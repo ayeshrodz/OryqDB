@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 oryq-types.workspace = true
+serde_json.workspace = true
+xxhash-rust.workspace = true
 
 [lints]
 workspace = true

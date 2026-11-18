@@ -38,14 +38,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "oryq-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-core",
 ]
 
 [[package]]
 name = "oryq-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-document",
  "oryq-engine",
@@ -56,28 +56,30 @@ dependencies = [
 
 [[package]]
 name = "oryq-document"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-types",
+ "serde_json",
+ "xxhash-rust",
 ]
 
 [[package]]
 name = "oryq-engine"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-types",
 ]
 
 [[package]]
 name = "oryq-ffi"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-core",
 ]
 
 [[package]]
 name = "oryq-index"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-document",
  "oryq-engine",
@@ -86,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "oryq-query"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oryq-document",
  "oryq-engine",
@@ -96,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "oryq-types"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 
 [[package]]
 name = "proc-macro2"
@@ -237,12 +239,18 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
  "toml",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
 name = "zmij"

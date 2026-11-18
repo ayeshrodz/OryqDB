@@ -1,3 +1,9 @@
 # `oryq-document`
 
-Scaffold established in `W01`; implementation is scheduled in `W02` and `W06` (see [docs/modules/document.md](../../docs/modules/document.md)).
+Binary `OryqDoc` v1 codec, zero-copy `DocumentView` / `ArrayView`, exact rational comparator, canonical dotted `FieldPath`, and Extended-JSON conversion (see [docs/modules/document.md](../../docs/modules/document.md)).
+
+## Verification
+```bash
+cargo test -p oryq-document
+cargo run -p xtask -- modules document
+```
