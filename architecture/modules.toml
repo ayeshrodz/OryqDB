@@ -55,7 +55,10 @@ crate = "oryq-engine"
 state = "active"
 owned = ["crates/oryq-engine/"]
 production_dependencies = ["oryq-types"]
-contract_files = ["crates/oryq-engine/src/lib.rs"]
+contract_files = [
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-engine/src/io/vfs.rs",
+]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-engine"]]
 

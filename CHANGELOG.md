@@ -7,7 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.1.0` (`W03` / M1 Complete): `oryq-engine` VFS/PAL, Page 0 dual shadow headers, 8192B slotted pager, freelist, and overflow chains.
+- `0.2.0-alpha.1` (`W04`): `oryq-engine` logical-page B+ tree and bounded page cache.
+- `0.2.0` (`W05` / M2 Complete): `.oryq-wal`, single-process MVCC snapshots/savepoints, checkpointing, and 7-point crash recovery.
+
+## [0.1.0] - 2026-11-19
+
+### Added (`W03` / Milestone 1 Complete)
+- Implemented `oryq-engine` physical persistence foundation (`#![forbid(unsafe_code)]`, depends only on `oryq-types`, `xxhash-rust`, and `fs4`):
+  - **VFS & PAL (`io/`):** `StorageIo` and `FileHandle` traits, `OsVfs` with isolated Unix (`pread`/`pwrite`, `(st_dev, st_ino)` identity, parent dir `fsync`) and Windows (`seek_read`/`seek_write`, canonical path identity) adapters, cross-platform exclusive OS locking (`fs4`), and process-local `FileRegistry` / `FileLease` alias protection (`LockedByProcess`).
+  - **Persistent Binary Format Codecs (`format/`):** Authoritative little-endian encoders/decoders and `XXH3_64` checksum validators for Page 0 dual shadow `StorageHeader` (Slot A/B selection and failover), 32B `PageHeader`, 16B `SlotEntry` (`SlottedPageView` / `SlottedPageMut` with compaction and non-overlapping span checks), `OverflowHeader` / `OverflowRef`, `FreelistTrunkHeader` / `FreelistEntry`, and `.oryq-wal` (`WalHeader`, chained `WalFrameHeader`, `CommitPayload`).
+  - **Pager, Allocator, Freelist & Overflow (`pager/`):** `Pager` (create/reopen across 4096/8192/16384B page sizes, alternating shadow-slot commits), `PageBuf` / `PageGuard` (RAII pins + `BudgetHandle`), `FreelistManager` (MVCC snapshot-horizon reuse gating `retired_tx_id < min_active_snapshot_tx_id` + chain validation), `PageAllocator`, and `OverflowStore` (bounded chain read/write/free with cycle detection).
+- Added 7 external integration tests (`persistence.rs`, `locking.rs`), `FaultVfs` fault-injection harness, `tests/fixtures/README.md`, `CC-0003` in `architecture/contract-changes.toml`, and `xtask modules engine` in CI.
 
 ## [0.1.0-alpha.2] - 2026-11-19
 

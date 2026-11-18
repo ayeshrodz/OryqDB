@@ -9,7 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fs4.workspace = true
 oryq-types.workspace = true
+xxhash-rust.workspace = true
 
 [lints]
 workspace = true

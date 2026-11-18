@@ -1,5 +1,21 @@
 #![forbid(unsafe_code)]
 
-//! `oryq-engine` crate scaffold (scheduled for `W03–W05`).
+//! `oryq-engine`: Physical storage, positioned VFS/PAL, Page 0 dual shadow headers,
+//! slotted pages, freelist, overflow chains, and persistent WAL format codecs.
 
+pub mod config;
+pub mod format;
+pub mod io;
+pub mod pager;
+
+pub use config::{EngineConfig, PageSize, SyncMode};
+pub use format::{
+    CommitPayload, FreelistEntry, FreelistTrunkHeader, HeaderSlot, OverflowHeader, OverflowRef,
+    PageFlags, PageHeader, PageType, SlotEntry, SlotFlags, SlottedPageMut, SlottedPageView,
+    StorageHeader, WalFrameHeader, WalFrameKind, WalHeader, FORMAT_VERSION, ORYQ_MAGIC,
+    PAGE_HEADER_SIZE, SLOT_ENTRY_SIZE, STORAGE_HEADER_SIZE, WAL_COMMIT_PAYLOAD_SIZE,
+    WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE, WAL_MAGIC,
+};
+pub use io::{FileHandle, FileIdentity, FileLease, FileRegistry, OpenMode, OsVfs, StorageIo};
 pub use oryq_types::{PageId, Result, SnapshotId, TxId};
+pub use pager::{FreelistManager, OverflowStore, PageAllocator, PageBuf, PageGuard, Pager};
