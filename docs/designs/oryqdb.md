@@ -18,7 +18,7 @@ The review findings, resolutions, remaining gates, and reviewer completion statu
 
 ## Overview
 
-OryqDB is an open-source (`MIT OR Apache-2.0`), embedded, serverless, single-file document database engine written in Rust. It compiles to a native Rust library (`oryq-core`), a C-compatible shared and static library (`oryq-ffi` exposing `include/oryq.h`), and a standalone command-line inspection utility (`oryq-cli` producing the `oryq` binary).
+OryqDB is an open-source (`MIT`), embedded, serverless, single-file document database engine written in Rust. It compiles to a native Rust library (`oryq-core`), a C-compatible shared and static library (`oryq-ffi` exposing `include/oryq.h`), and a standalone command-line inspection utility (`oryq-cli` producing the `oryq` binary).
 
 OryqDB targets applications that require local, low-latency persistent storage for nested, semi-structured documents across Linux, Windows, and macOS (x86-64 and ARM64) without deploying a external database daemon or embedding a managed runtime (.NET, JVM, or V8). It combines single-file deployment portability with native MongoDB-style document operations, zero-copy binary field extraction (`OryqDoc`), slotted-page sub-document delta updates, multi-version concurrency control (MVCC) backed by a write-ahead log (`.oryq-wal`), prefix-compressed compound and multi-key array indexes, and a memory-bounded streaming aggregation pipeline.
 

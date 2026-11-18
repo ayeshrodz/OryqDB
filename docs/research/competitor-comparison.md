@@ -72,4 +72,4 @@ Because SQLite 3.45+ already provides ACID single-file transactions and binary `
 ### 3.4 UnQLite & ObjectBox
 * **UnQLite:** Uses a virtual machine (Jx9 scripting language) to evaluate document collection filters and updates in C; lacks declarative compound/multi-key B+ tree index planning and modern MVCC concurrency.
 * **ObjectBox:** Achieves fast field reads via FlatBuffers vtables, but requires compile-time code generation from static schema files (`.fbs` / annotations) rather than schema-free dynamic JSON/document evolution, and relies on a closed-source C++ core library.
-* **OryqDB Counter-Measure:** 100% open-source (`MIT OR Apache-2.0`) dynamic schema-free document model achieving $O(\log k)$ zero-copy field extraction without pre-compiled schema code generation.
+* **OryqDB Counter-Measure:** 100% open-source (`MIT`) dynamic schema-free document model achieving $O(\log k)$ zero-copy field extraction without pre-compiled schema code generation.

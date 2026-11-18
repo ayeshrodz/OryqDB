@@ -1,6 +1,6 @@
 # OryqDB
 
-An open-source (`MIT OR Apache-2.0`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
+An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
 > **Current Version:** `0.0.1` (Milestone 0 — Converged Architecture & Modular Design Baseline; no Rust production workspace exists yet.)
 
@@ -57,4 +57,4 @@ python3 tools/validate_design_docs.py
 
 ## License
 
-Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Licensed under the [MIT License](LICENSE).
