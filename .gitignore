@@ -1,0 +1,28 @@
+# Rust / Cargo build outputs
+/target/
+**/*.rs.bk
+*.pdb
+
+# Reference repositories cloned for Milestone 0 research
+/references/
+
+# Database and sidecar files generated during local runs or tests
+*.oryq
+*.oryq-wal
+*.oryq-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Python / validation tooling artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS & editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
