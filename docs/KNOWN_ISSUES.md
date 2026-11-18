@@ -15,7 +15,7 @@
 | R08 | Failed commit sync can persist an unknown subset. | CommitOutcomeUnknown, faulted database, reopen recovery and idempotent application IDs. M2 failure schedules. |
 | R09 | Complete-length invalid WAL frame may be a torn tail or corruption of committed history. | Fail closed, preserve artifacts, diagnose manually; do not silently truncate acknowledged data. Recovery availability is conditional, not guaranteed for all corruption. |
 | R10 | Format is unfrozen; catalog schema/fixtures and native portability are unverified. | Freeze at M1–M3/M10 gates only after fixtures and tests. Cross-compilation is not native verification. |
-| R11 | Reference research remains incomplete. | Six `docs/research/litedb-*.md` reports require pinned source inspection; existing competitor descriptions are unverified hypotheses. |
+| R11 | Competitor performance comparisons are unmeasured until M7. | All six `docs/research/litedb-*.md` reports are verified against LiteDB `dev` @ `b3c4406231908c6ca29f6d4b2769aa08351d6fc2`; empirical competitor latency/throughput measurements remain an M7 (`W12`) benchmark gate. |
 | R12 | Strict power-loss durability depends on supported filesystem/device flush semantics. | FullSync rejects unavailable required flush guarantees; weaker mode must be explicitly selected and labelled. M8 native tests. |
 
 [Review dispositions](reviews/initial-design/goldfish_review_report.md) · [Delivery and verification gates](ROADMAP.md)
