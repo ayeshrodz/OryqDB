@@ -26,3 +26,19 @@ evidence = [
     "cargo run -p xtask -- architecture",
     "docs/ARCHITECTURE_DECISIONS.md#adr-008-domain-crates-owner-local-features-and-one-composition-root",
 ]
+
+[[changes]]
+id = "CC-0002"
+modules = ["document", "index", "query", "core"]
+files = [
+    "crates/oryq-document/src/lib.rs",
+    "crates/oryq-document/src/types.rs",
+    "crates/oryq-document/src/path.rs",
+]
+reason = "Implement W02 oryq-document public contract types (OryqTypeTag, ObjectId, Uuid, Decimal128, Value, ValueView, DocumentBuf, FieldPath) and zero-copy OryqDoc v1 codec, comparator, and Extended-JSON APIs."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-document",
+    "cargo run -p xtask -- modules document",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

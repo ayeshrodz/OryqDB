@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -22,13 +22,15 @@ repository = "https://github.com/ayeshrodz/OryqDB"
 homepage = "https://github.com/ayeshrodz/OryqDB"
 
 [workspace.dependencies]
-oryq-types = { path = "crates/oryq-types", version = "0.1.0-alpha.1" }
-oryq-document = { path = "crates/oryq-document", version = "0.1.0-alpha.1" }
-oryq-engine = { path = "crates/oryq-engine", version = "0.1.0-alpha.1" }
-oryq-index = { path = "crates/oryq-index", version = "0.1.0-alpha.1" }
-oryq-query = { path = "crates/oryq-query", version = "0.1.0-alpha.1" }
-oryq-core = { path = "crates/oryq-core", version = "0.1.0-alpha.1" }
-oryq-ffi = { path = "crates/oryq-ffi", version = "0.1.0-alpha.1" }
+oryq-types = { path = "crates/oryq-types", version = "0.1.0-alpha.2" }
+oryq-document = { path = "crates/oryq-document", version = "0.1.0-alpha.2" }
+oryq-engine = { path = "crates/oryq-engine", version = "0.1.0-alpha.2" }
+oryq-index = { path = "crates/oryq-index", version = "0.1.0-alpha.2" }
+oryq-query = { path = "crates/oryq-query", version = "0.1.0-alpha.2" }
+oryq-core = { path = "crates/oryq-core", version = "0.1.0-alpha.2" }
+oryq-ffi = { path = "crates/oryq-ffi", version = "0.1.0-alpha.2" }
+serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

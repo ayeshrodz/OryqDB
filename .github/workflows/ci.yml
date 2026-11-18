@@ -78,3 +78,6 @@ jobs:
 
       - name: Run module check for foundation (oryq-types)
         run: cargo run -p xtask -- modules types
+
+      - name: Run module check for document (oryq-document)
+        run: cargo run -p xtask -- modules document

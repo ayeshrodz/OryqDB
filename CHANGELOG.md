@@ -7,8 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.1.0-alpha.2` (`W02`): `oryq-document` codec, views, canonical comparator, path validator, and JSON conversion.
 - `0.1.0` (`W03` / M1 Complete): `oryq-engine` VFS/PAL, Page 0 dual shadow headers, 8192B slotted pager, freelist, and overflow chains.
+
+## [0.1.0-alpha.2] - 2026-11-19
+
+### Added (`W02` / `oryq-document`)
+- Implemented `oryq-document` (`#![forbid(unsafe_code)]`, depends only on `oryq-types`, `serde_json`, and `xxhash-rust` — independent of `oryq-engine`):
+  - `OryqDoc` v1 binary encoder (`encode_document` with optional `BudgetHandle` accounting) and strict structural validator (`validate_document` checking header version/flags, `xxh3_64` hash-prefix directory sort order, non-overlapping spans, valid UTF-8, tag validity, and nesting depth `<= 128`).
+  - Zero-copy `DocumentView<'a>` (`O(log k)` binary search over sorted 12B directory + dotted `FieldPath` resolution) and `ArrayView<'a>` (`O(1)` random access + `ExactSizeIterator`).
+  - Core document types (`OryqTypeTag`, `ObjectId`, `Uuid`, IEEE 754-2008 BID `Decimal128`, `Value`, `ValueView<'a>`, `DocumentBuf`) and `FieldPath` validator (`MAX_PATH_DEPTH = 128`).
+  - Canonical cross-type comparator (`compare_values`) with exact rational `BigUint` arithmetic across `Int64`, `Float64`, and `Decimal128` (`-0.0 == +0.0`, `NaN < -Inf`, `10 == 10.0 == Decimal("10.0")`, `Decimal("0.1") != 0.1_f64`).
+  - Extended-JSON codec (`from_json_str`, `from_json_value`, `to_json_value`, `to_json_string`) supporting `$oid`, `$uuid`, `$date`, `$binary`, `$numberLong`, `$numberDouble`, and `$numberDecimal`.
+- Added 11 external integration tests across `roundtrip.rs`, `ordering.rs`, and `malformed.rs`, plus `tests/fixtures/README.md`, `CC-0002` in `architecture/contract-changes.toml`, and `xtask modules document` in CI.
 
 ## [0.1.0-alpha.1] - 2026-11-19
 
