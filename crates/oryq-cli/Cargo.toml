@@ -1,0 +1,19 @@
+[package]
+name = "oryq-cli"
+description = "Command-line administrative and forensic inspection utility for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "oryq"
+path = "src/main.rs"
+
+[dependencies]
+oryq-core.workspace = true
+
+[lints]
+workspace = true

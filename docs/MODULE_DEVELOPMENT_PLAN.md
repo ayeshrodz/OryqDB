@@ -103,8 +103,9 @@ OryqDB uses Semantic Versioning (`0.x.y`) synchronized across `VERSION`, `CHANGE
 | Packages | State | Evidence | Next action |
 | :--- | :--- | :--- | :--- |
 | W00 | Verified | LiteDB `dev` @ `b3c4406231908c6ca29f6d4b2769aa08351d6fc2` inspected; all 6 `docs/research/litedb-*.md` reports authored; `python3 tools/validate_design_docs.py` passed (Linux x86_64) | Unblocked `W01` (`v0.1.0`) |
-| W01 | Planned | No Cargo workspace or production code exists | Start `W01`: eight-crate workspace, `architecture/*.toml`, `oryq-types`, and `xtask` self-tests |
-| W02–W16 | Planned | No Cargo workspace or production code exists | Proceed sequentially after `W01` gate |
+| W01 | Verified | Eight-crate workspace, `architecture/*.toml`, `oryq-types` (7 integration tests), `xtask` (6 self-tests), `xtask modules types` (7 downstream checks), `cargo clippy -- -D warnings`, and `.github/workflows/ci.yml` passed on Linux x86_64 (`rustc 1.99.1`) | Start `W02` (`oryq-document` codec/views/comparator) or `W03` (`oryq-engine` io/format/pager) |
+| W02 | Planned | Scaffold only (not implemented) | Implement `oryq-document` codec/view/array/path/json/compare + tests |
+| W03–W16 | Planned | Scaffolds only (not implemented) | Proceed sequentially after `W02`/`W03` gates |
 | X01–X03 | Planned; post-baseline | Extension protocols/implementation not verified | Keep disabled until their prerequisite gates pass |
 
 When work begins, split the range rows into individual package rows. Each completed row must record commands, platform, fixture revision, failures/limitations and the next unblocked package. Keep this ledger as the work-package tracker; ROADMAP remains the product gate tracker.

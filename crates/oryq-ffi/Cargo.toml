@@ -1,0 +1,19 @@
+[package]
+name = "oryq-ffi"
+description = "Panic-safe C Application Binary Interface (include/oryq.h) for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "oryq"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+oryq-core.workspace = true
+
+[lints]
+workspace = true

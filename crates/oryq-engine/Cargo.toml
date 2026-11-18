@@ -1,0 +1,15 @@
+[package]
+name = "oryq-engine"
+description = "Physical storage, slotted pages, byte B+ trees, WAL, MVCC snapshots, recovery, and checkpointing for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+oryq-types.workspace = true
+
+[lints]
+workspace = true

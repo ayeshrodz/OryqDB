@@ -1,0 +1,19 @@
+[package]
+name = "oryq-core"
+description = "Public Rust facade, transactional catalog, atomic statement orchestration, and composition root for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+oryq-types.workspace = true
+oryq-document.workspace = true
+oryq-engine.workspace = true
+oryq-index.workspace = true
+oryq-query.workspace = true
+
+[lints]
+workspace = true

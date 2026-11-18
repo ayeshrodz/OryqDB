@@ -7,7 +7,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.1.0` (`W01–W03` / M1): Eight-crate Cargo workspace, `oryq-types`, `xtask architecture` checker, and `oryq-engine` persistent slotted-page foundation.
+- `0.1.0-alpha.2` (`W02`): `oryq-document` codec, views, canonical comparator, path validator, and JSON conversion.
+- `0.1.0` (`W03` / M1 Complete): `oryq-engine` VFS/PAL, Page 0 dual shadow headers, 8192B slotted pager, freelist, and overflow chains.
+
+## [0.1.0-alpha.1] - 2026-11-19
+
+### Added (`W01` / M1 Setup)
+- Eight-crate baseline Cargo workspace (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) + `xtask`, with `rustfmt.toml`, `.clippy.toml`, and GitHub Actions CI workflow (`.github/workflows/ci.yml`) triggered on PRs and merges to `main`.
+- Implemented `oryq-types` (`#![forbid(unsafe_code)]`, zero runtime dependencies): checked identity newtypes (`PageId`, `TxId`/`SnapshotId`, `CollectionId`, `IndexId`, `NamespaceId`, `RecordId`), boxed pointer-sized `ErrorEnvelope` and `ErrorCategory`, concurrent RAII `BudgetHandle` / `Reservation` tokens, `CancellationSource` / `CancellationToken`, and `CapabilityId` / `FeatureBitmask` / `VersionRange`.
+- Authored `architecture/{modules,capabilities,contract-changes}.toml` (schema v1) and implemented `xtask architecture` (static dependency allowlist, cycle detection, prefix overlap, bit allocation, and `--base` / `--changed-paths` contract-change enforcement with 6 self-tests) and `xtask modules <id>` (owner tests + topological downstream `cargo check`).
 
 ## [0.0.2] - 2026-11-19
 

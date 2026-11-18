@@ -4,37 +4,38 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: 0 — Research and architecture (`W00` / `v0.0.2`)
-STATUS: Complete — converged architecture & pinned LiteDB source audit verified; ready for W01 (M1 setup)
+MILESTONE: 1 — Persistent storage foundation (`W01` M1 setup complete / `v0.1.0-alpha.1`)
+STATUS: In Progress — `W01` workspace, `oryq-types`, `xtask` architecture checker, and CI verified; `W02` (`oryq-document`) and `W03` (`oryq-engine`) next
 
 IMPLEMENTED:
-- Documentation only. No Cargo workspace, production engine or executable Rust tests exist.
-- Authored master and eight subsystem specifications plus roadmap and trackers.
-- Added the modular technical specification, eight module guides and ordered module work packages.
-- Completed pinned LiteDB source audit (`dev` @ `b3c4406231908c6ca29f6d4b2769aa08351d6fc2`, MIT) across all six `docs/research/litedb-*.md` deliverables (`W00` / `v0.0.2`).
-- Applied EGM review revisions across initial design and modular architecture (both converged).
+- Completed `W00` (`v0.0.2`): converged EGM design/modular specs and pinned LiteDB source audit (`dev` @ `b3c4406231908c6ca29f6d4b2769aa08351d6fc2`).
+- Completed `W01` (`v0.1.0-alpha.1`):
+  - Eight-crate Cargo workspace (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) + `xtask`, `rustfmt.toml`, `.clippy.toml`, and `.github/workflows/ci.yml`.
+  - Full implementation of `oryq-types` (IDs, boxed `ErrorEnvelope`, RAII `BudgetHandle`/`Reservation`, `CancellationToken`, `CapabilityId`/`FeatureBitmask`/`VersionRange`).
+  - `architecture/{modules,capabilities,contract-changes}.toml` and `xtask architecture` / `xtask modules <id>` enforcement tool.
+- Remaining 7 domain/adapter crates are minimal compiling scaffolds only (not marked implemented).
 
 VERIFIED:
-- `python3 tools/validate_design_docs.py` passes (links, fragments, fences, 26,809 numeric ordering cases, 100 prefix-bound cases, C/C++ header syntax).
-- See initial and modular Goldfish review reports for reviewer completion, evidence and dispositions.
-- Specification review and reference audit are not runtime validation or format freeze.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings).
+- `cargo test --workspace` and `--no-default-features`: 13 tests passed (`oryq-types`: 7 integration tests; `xtask`: 6 architecture-checker self-tests).
+- `cargo run -p xtask -- architecture` and `cargo run -p xtask -- modules types`: passed (7 downstream consumers checked in topological order).
+- `python3 tools/validate_design_docs.py`: passed.
 
 TEST RESULTS:
-- Documentation/reference checks and design-level experiments passed.
-- No production Rust, C ABI implementation, durability or benchmark tests executed yet.
+- Linux `x86_64` (`rustc 1.99.1`): 13 passed, 0 failed.
+- Multi-OS CI matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`) configured in `.github/workflows/ci.yml`.
 
 KNOWN ISSUES:
-- Persistent catalog schema/fixtures must be frozen at the M3 gate.
-- Shared-process synchronization and optional search are post-baseline extensions.
-- Complete-length corrupted WAL tails fail closed and may require manual diagnosis.
+- Persistent storage (`W03`), document codec (`W02`), transactions (`W05`), and persistent catalog fixtures (`W08`) are not yet implemented.
+- Shared-process synchronization (`X02`) and optional search (`X01`) remain post-baseline extensions.
 
 PERFORMANCE:
-- No measured OryqDB performance results. All design figures are unverified targets.
+- No measured OryqDB database benchmarks yet (scheduled for `W12` / M7).
 
 NEXT STEPS:
-1. Start `W01` (`v0.1.0`): create eight-crate Cargo workspace, `architecture/*.toml` manifests, `oryq-types`, and `xtask architecture` self-tests.
-2. Implement `W02`/`W03` (M1 pager/VFS + document codec) with golden fixtures and parser limits.
-3. Implement `W04`/`W05` (M2 B+ tree, WAL, transaction protocol and crash/admission schedules).
+1. Implement `W02` (`v0.1.0-alpha.2`): `oryq-document` binary codec, zero-copy `DocumentView`, exact numeric comparator, path validator, and JSON conversion.
+2. Implement `W03` (`v0.1.0` / M1 Complete): `oryq-engine` VFS/PAL, Page 0 dual shadow headers, 8192B slotted pager, freelist, overflow chains, and golden byte fixtures.
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)
