@@ -81,3 +81,6 @@ jobs:
 
       - name: Run module check for document (oryq-document)
         run: cargo run -p xtask -- modules document
+
+      - name: Run module check for engine (oryq-engine)
+        run: cargo run -p xtask -- modules engine

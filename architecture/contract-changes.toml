@@ -42,3 +42,18 @@ evidence = [
     "cargo run -p xtask -- modules document",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0003"
+modules = ["engine", "index", "core"]
+files = [
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-engine/src/io/vfs.rs",
+]
+reason = "Implement W03 oryq-engine VFS/PAL contracts (StorageIo, FileHandle, OsVfs, FileRegistry), persistent Page 0 dual shadow headers, slotted page/overflow/freelist/WAL binary codecs, and Pager/PageAllocator/OverflowStore."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-engine",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
