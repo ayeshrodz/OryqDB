@@ -1,0 +1,18 @@
+[package]
+name = "oryq-query"
+description = "Filter AST, access planner, streaming cursors, and memory-bounded aggregation pipeline stages for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+oryq-types.workspace = true
+oryq-document.workspace = true
+oryq-engine.workspace = true
+oryq-index.workspace = true
+
+[lints]
+workspace = true

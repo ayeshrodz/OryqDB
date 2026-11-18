@@ -1,0 +1,28 @@
+schema_version = 1
+
+[[changes]]
+id = "CC-0001"
+modules = ["types", "document", "engine", "index", "query", "core", "ffi", "cli"]
+files = [
+    "crates/oryq-types/src/lib.rs",
+    "crates/oryq-types/src/ids.rs",
+    "crates/oryq-types/src/error.rs",
+    "crates/oryq-types/src/budget.rs",
+    "crates/oryq-types/src/cancel.rs",
+    "crates/oryq-types/src/capability.rs",
+    "crates/oryq-document/src/lib.rs",
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-index/src/lib.rs",
+    "crates/oryq-query/src/lib.rs",
+    "crates/oryq-core/src/lib.rs",
+    "crates/oryq-ffi/src/lib.rs",
+    "crates/oryq-cli/src/main.rs",
+    "architecture/capabilities.toml",
+]
+reason = "Establish W01 eight-crate baseline workspace, oryq-types foundation contracts (IDs, error envelope, budget reservations, cancellation, capability identity), and initial capability bit reservations."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-types",
+    "cargo run -p xtask -- architecture",
+    "docs/ARCHITECTURE_DECISIONS.md#adr-008-domain-crates-owner-local-features-and-one-composition-root",
+]

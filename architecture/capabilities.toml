@@ -1,0 +1,64 @@
+schema_version = 1
+
+[[capabilities]]
+id = "oryq.index.primary.v1"
+owner = "index"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
+id = "oryq.index.secondary.v1"
+owner = "index"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
+id = "oryq.index.compound.v1"
+owner = "index"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
+id = "oryq.index.multikey.v1"
+owner = "index"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
+id = "oryq.coordinator.single_process.v1"
+owner = "engine"
+interface_version = 1
+persistent = false
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
+id = "oryq.index.fts.v1"
+owner = "fts"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = [0]
+retired = false
+
+[[capabilities]]
+id = "oryq.index.vector.v1"
+owner = "vec"
+interface_version = 1
+persistent = true
+read_bits = []
+write_bits = [1]
+retired = false

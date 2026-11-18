@@ -1,0 +1,132 @@
+schema_version = 1
+
+[tooling]
+owned = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rustfmt.toml",
+    ".clippy.toml",
+    ".gitignore",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "VERSION",
+    ".github/",
+    "architecture/",
+    "docs/",
+    "tools/",
+    "xtask/",
+]
+
+[[modules]]
+id = "types"
+crate = "oryq-types"
+state = "active"
+owned = ["crates/oryq-types/"]
+production_dependencies = []
+contract_files = [
+    "crates/oryq-types/src/lib.rs",
+    "crates/oryq-types/src/ids.rs",
+    "crates/oryq-types/src/error.rs",
+    "crates/oryq-types/src/budget.rs",
+    "crates/oryq-types/src/cancel.rs",
+    "crates/oryq-types/src/capability.rs",
+]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-types"]]
+
+[[modules]]
+id = "document"
+crate = "oryq-document"
+state = "active"
+owned = ["crates/oryq-document/"]
+production_dependencies = ["oryq-types"]
+contract_files = ["crates/oryq-document/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-document"]]
+
+[[modules]]
+id = "engine"
+crate = "oryq-engine"
+state = "active"
+owned = ["crates/oryq-engine/"]
+production_dependencies = ["oryq-types"]
+contract_files = ["crates/oryq-engine/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-engine"]]
+
+[[modules]]
+id = "index"
+crate = "oryq-index"
+state = "active"
+owned = ["crates/oryq-index/"]
+production_dependencies = ["oryq-types", "oryq-document", "oryq-engine"]
+contract_files = ["crates/oryq-index/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-index"]]
+
+[[modules]]
+id = "query"
+crate = "oryq-query"
+state = "active"
+owned = ["crates/oryq-query/"]
+production_dependencies = ["oryq-types", "oryq-document", "oryq-engine", "oryq-index"]
+contract_files = ["crates/oryq-query/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-query"]]
+
+[[modules]]
+id = "core"
+crate = "oryq-core"
+state = "active"
+owned = ["crates/oryq-core/"]
+production_dependencies = [
+    "oryq-types",
+    "oryq-document",
+    "oryq-engine",
+    "oryq-index",
+    "oryq-query",
+]
+contract_files = ["crates/oryq-core/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-core"]]
+
+[[modules]]
+id = "ffi"
+crate = "oryq-ffi"
+state = "active"
+owned = ["crates/oryq-ffi/"]
+production_dependencies = ["oryq-core"]
+contract_files = ["crates/oryq-ffi/src/lib.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-ffi"]]
+
+[[modules]]
+id = "cli"
+crate = "oryq-cli"
+state = "active"
+owned = ["crates/oryq-cli/"]
+production_dependencies = ["oryq-core"]
+contract_files = ["crates/oryq-cli/src/main.rs"]
+optional = false
+test_commands = [["cargo", "test", "-p", "oryq-cli"]]
+
+[[modules]]
+id = "fts"
+crate = "oryq-fts"
+state = "planned"
+owned = ["crates/oryq-fts/"]
+production_dependencies = ["oryq-types", "oryq-document", "oryq-engine", "oryq-index"]
+contract_files = ["crates/oryq-fts/src/lib.rs"]
+optional = true
+test_commands = [["cargo", "test", "-p", "oryq-fts"]]
+
+[[modules]]
+id = "vec"
+crate = "oryq-vec"
+state = "planned"
+owned = ["crates/oryq-vec/"]
+production_dependencies = ["oryq-types", "oryq-document", "oryq-engine", "oryq-index"]
+contract_files = ["crates/oryq-vec/src/lib.rs"]
+optional = true
+test_commands = [["cargo", "test", "-p", "oryq-vec"]]
