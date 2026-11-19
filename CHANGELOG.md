@@ -7,8 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.4.0-alpha.1` (`W09`): `oryq-index` secondary indexes and transactional differential maintenance.
 - `0.4.0` (`W10` / M4–M5 Complete): `oryq-query` filter AST, access planner, lending cursors & `explain_analyze()`.
+
+## [0.4.0-alpha.1] - 2026-11-19
+
+### Added (`W09` / M4 Secondary Indexes)
+- Implemented `oryq-index` single/nested-path secondary indexes (`secondary/`):
+  - `SecondaryIndexProvider` (`"index.secondary"`) registered in `IndexProviderRegistry::default_v1()`.
+  - Single & nested-path extraction (`extract_secondary_key_prefix`), 8-byte BE `RecordId`-suffixed keys (`build_secondary_full_key` / `split_record_id_suffix`), `unique` collision enforcement (`DuplicateKey`), `sparse` missing-field omission vs non-sparse `Null` encoding, and zero-I/O differential `on_update` bypass when indexed values are unchanged.
+  - Ordered equality, range (`SortOrder::Asc` and `SortOrder::Desc`), and full scans (`scan_secondary_eq`, `scan_secondary_range`, `scan_secondary_all`).
+- Exposed transactional `create_index` (with full collection backfill inside a statement savepoint), `drop_index` (protecting `_id_`), and `list_indexes` on `oryq-core` `WriteCollection` / `ReadCollection` with zero per-index branches in core mutation paths.
+- Added integration tests in `crates/oryq-index/tests/uniqueness.rs` and `crates/oryq-core/tests/atomic_maintenance.rs` (including multi-index A-succeeds / B-fails rollback followed by commit in the same transaction; **55 tests total**) and recorded `CC-0009`.
 
 ## [0.3.0] - 2026-11-19
 

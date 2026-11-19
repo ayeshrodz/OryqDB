@@ -19,6 +19,7 @@ pub use config::DatabaseConfig;
 pub use database::Database;
 pub use oryq_document::{DocumentBuf, DocumentView, ObjectId, Uuid, Value, ValueView};
 pub use oryq_engine::{CheckpointOutcome, CommitReceipt, PageSize, SyncMode};
+pub use oryq_index::{IndexDescriptor, IndexKind, SortOrder};
 pub use oryq_types::{
     BudgetDomain, BudgetHandle, CancellationSource, CancellationToken, CollectionId, ErrorCategory,
     ErrorEnvelope, IndexId, PageId, RecordId, Result, SnapshotId, TxId,

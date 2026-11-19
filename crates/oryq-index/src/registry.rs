@@ -7,6 +7,7 @@ use oryq_types::{CapabilityId, ErrorCategory, ErrorEnvelope, Result};
 
 use crate::primary::PrimaryIndexProvider;
 use crate::provider::IndexProvider;
+use crate::secondary::SecondaryIndexProvider;
 
 const MODULE_ID: &str = "index";
 
@@ -21,10 +22,12 @@ impl IndexProviderRegistry {
         Self::default()
     }
 
-    /// Creates a registry populated with all baseline built-in providers (`index.primary`).
+    /// Creates a registry populated with all baseline built-in providers
+    /// (`index.primary`, `index.secondary`).
     pub fn default_v1() -> Self {
         let mut reg = Self::new();
         reg.register(Arc::new(PrimaryIndexProvider));
+        reg.register(Arc::new(SecondaryIndexProvider));
         reg
     }
 

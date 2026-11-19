@@ -2,14 +2,15 @@
 
 use oryq_document::{from_json_str, DocumentBuf, UpdateSpec, Value};
 use oryq_engine::{CommitReceipt, WriteTxn};
+use oryq_index::{IndexDescriptor, SortOrder};
 use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result, TxId};
 
 use crate::api::read::{find_all_in_store, find_by_id_in_store};
 use crate::catalog::{list_collection_names, load_collection_entry};
 use crate::composition::CoreRegistries;
 use crate::write::{
-    create_collection_stmt, delete_by_id_stmt, drop_collection_stmt, insert_doc_stmt,
-    replace_by_id_stmt, update_by_id_stmt,
+    create_collection_stmt, create_secondary_index_stmt, delete_by_id_stmt, drop_collection_stmt,
+    drop_index_stmt, insert_doc_stmt, replace_by_id_stmt, update_by_id_stmt,
 };
 
 const MODULE_ID: &str = "core";
@@ -164,5 +165,42 @@ impl WriteCollection<'_, '_> {
 
     pub fn delete_by_id(&mut self, id: &Value) -> Result<bool> {
         delete_by_id_stmt(self.tx, self.registries, &self.name, id)
+    }
+
+    pub fn create_index(
+        &mut self,
+        path: &str,
+        order: SortOrder,
+        unique: bool,
+        sparse: bool,
+        name: Option<&str>,
+    ) -> Result<IndexDescriptor> {
+        create_secondary_index_stmt(
+            self.tx,
+            self.registries,
+            &self.name,
+            name,
+            path,
+            order,
+            unique,
+            sparse,
+        )
+    }
+
+    pub fn drop_index(&mut self, index_name: &str) -> Result<bool> {
+        drop_index_stmt(self.tx, self.registries, &self.name, index_name)
+    }
+
+    pub fn list_indexes(&self) -> Result<Vec<IndexDescriptor>> {
+        let entry = load_collection_entry(self.tx, self.tx.catalog_root_page_id(), &self.name)?
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "WriteCollection::list_indexes",
+                    format!("collection '{}' does not exist", self.name),
+                )
+            })?;
+        Ok(entry.indexes)
     }
 }

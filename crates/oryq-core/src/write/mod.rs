@@ -3,7 +3,7 @@
 pub mod statement;
 
 pub use statement::{
-    create_collection_stmt, decode_collection_record, delete_by_id_stmt, drop_collection_stmt,
-    encode_collection_record, generate_object_id, insert_doc_stmt, replace_by_id_stmt,
-    update_by_id_stmt,
+    create_collection_stmt, create_secondary_index_stmt, decode_collection_record,
+    delete_by_id_stmt, drop_collection_stmt, drop_index_stmt, encode_collection_record,
+    generate_object_id, insert_doc_stmt, replace_by_id_stmt, update_by_id_stmt,
 };
