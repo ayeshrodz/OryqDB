@@ -1,13 +1,22 @@
 #![forbid(unsafe_code)]
 
 //! `oryq-engine`: Physical storage, positioned VFS/PAL, Page 0 dual shadow headers,
-//! slotted pages, freelist, overflow chains, and persistent WAL format codecs.
+//! slotted pages, freelist, overflow chains, bounded page cache, version metadata,
+//! logical-page byte B+ trees, and persistent WAL format codecs.
 
+pub mod btree;
+pub mod cache;
 pub mod config;
 pub mod format;
 pub mod io;
 pub mod pager;
 
+pub use btree::{
+    BTree, BTreeCursor, InternalNode, LeafEntry, PageStore, PageStoreMut, PagerPageStore, TreeKind,
+};
+pub use cache::{
+    CacheStats, PageCache, PageVersionEntry, PageVersionLocation, PinnedPage, VersionIndex,
+};
 pub use config::{EngineConfig, PageSize, SyncMode};
 pub use format::{
     CommitPayload, FreelistEntry, FreelistTrunkHeader, HeaderSlot, OverflowHeader, OverflowRef,

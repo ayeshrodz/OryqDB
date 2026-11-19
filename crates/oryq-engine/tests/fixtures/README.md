@@ -12,6 +12,10 @@ This directory documents the golden binary layout assertions and fault-injection
 - `tests/locking.rs`:
   - **OS File Identity & Exclusive Locking (`OsVfs`):** Verifies that opening the same `.oryq` file via identical path, relative alias (`./`), or Unix symlink returns `ErrorCategory::LockedByProcess`, and that dropping the `Pager` releases both the `FileRegistry` lease and OS lock for clean reopen.
   - **Fault-Injected Sync Failures (`FaultVfs`):** Verifies that sync failures during `commit_header` propagate `ErrorCategory::Io` without advancing `active_slot`.
+- `tests/btree_cache.rs` (`W04`):
+  - **Pin-Aware Bounded `PageCache`:** Verifies `BudgetHandle` quota enforcement, pinned-page protection (`QuotaExceeded` when all resident pages are pinned), and LRU unpinned eviction.
+  - **MVCC `VersionIndex`:** Verifies snapshot visibility (`tx_id <= snapshot_id`), horizon-safe pruning (`prune_below`), monotonicity checks, and `max_entries` quota.
+  - **Multi-Level Byte `BTree` & `BTreeCursor`:** 400-key deterministic shuffled oracle test exercising leaf/internal/root splits, 100 upserts, point lookups, forward/range/reverse stack-based scans, persistence across reopen, sibling borrow/merge deletions, freelist chain validation, and full root collapse back to an empty leaf.
 
 ## Regenerating / Adding Fixtures
 

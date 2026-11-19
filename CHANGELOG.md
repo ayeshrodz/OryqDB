@@ -7,8 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.2.0-alpha.1` (`W04`): `oryq-engine` logical-page B+ tree and bounded page cache.
 - `0.2.0` (`W05` / M2 Complete): `.oryq-wal`, single-process MVCC snapshots/savepoints, checkpointing, and 7-point crash recovery.
+
+## [0.2.0-alpha.1] - 2026-11-19
+
+### Added (`W04` / M2 Foundation)
+- Implemented `oryq-engine` bounded pin-aware page cache and MVCC version metadata (`cache/`):
+  - `PageCache` & `PinnedPage`: LRU eviction bounded by `BudgetHandle` (`BudgetDomain::Cache`), skipping actively pinned `Arc<[u8]>` handles and returning `QuotaExceeded` rather than evicting pinned pages.
+  - `VersionIndex` & `PageVersionEntry`: bounded per-page committed version chains with `resolve_for_snapshot` (`tx_id <= snapshot_id`) and horizon-safe `prune_below`.
+- Implemented `oryq-engine` logical-page byte B+ tree (`btree/`):
+  - `TreeKind`, `PageStore` / `PageStoreMut` / `PagerPageStore`, and normative leaf (`[key_len:u16][key][val_len:u32][val]`) & internal (`[sep_len:u16][sep][right_child:u64]` with sentinel slot 0) codecs.
+  - `BTree` & `BTreeCursor`: point lookup, cycle/height-checked descent, upsert, multi-level leaf/internal/root splits, sibling borrow/merge deletion, root collapse, and stack-based forward/reverse range scans without on-disk sibling links.
+- Added 4 external integration tests in `crates/oryq-engine/tests/btree_cache.rs` (including a 400-key randomized oracle fuzz/reopen/collapse test) and recorded `CC-0004` in `architecture/contract-changes.toml`.
 
 ## [0.1.0] - 2026-11-19
 
