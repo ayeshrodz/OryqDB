@@ -57,3 +57,17 @@ evidence = [
     "cargo run -p xtask -- modules engine",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0004"
+modules = ["engine", "index", "core"]
+files = [
+    "crates/oryq-engine/src/lib.rs",
+]
+reason = "Export W04 oryq-engine logical-page byte B+ tree (BTree, BTreeCursor, PageStore, PageStoreMut, PagerPageStore, TreeKind) and bounded pin-aware cache / MVCC version metadata (PageCache, PinnedPage, VersionIndex)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-engine",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
