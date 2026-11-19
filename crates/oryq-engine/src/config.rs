@@ -58,6 +58,14 @@ pub struct EngineConfig {
     pub sync_mode: SyncMode,
     pub create_if_missing: bool,
     pub read_only: bool,
+    /// Maximum cached page bytes in [`crate::cache::PageCache`].
+    pub max_cache_bytes: usize,
+    /// Maximum version metadata entries retained in [`crate::cache::VersionIndex`].
+    pub max_version_entries: usize,
+    /// Hard cap on `.oryq-wal` byte size before rejecting new writes (`QuotaExceeded`).
+    pub max_wal_hard_bytes: u64,
+    /// Maximum concurrent active read snapshots in [`crate::coordinator::SingleProcessCoordinator`].
+    pub max_readers: usize,
 }
 
 impl Default for EngineConfig {
@@ -67,6 +75,10 @@ impl Default for EngineConfig {
             sync_mode: SyncMode::Full,
             create_if_missing: true,
             read_only: false,
+            max_cache_bytes: 16 * 1024 * 1024,
+            max_version_entries: 65_536,
+            max_wal_hard_bytes: 256 * 1024 * 1024,
+            max_readers: 64,
         }
     }
 }

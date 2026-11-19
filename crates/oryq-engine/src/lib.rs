@@ -2,14 +2,20 @@
 
 //! `oryq-engine`: Physical storage, positioned VFS/PAL, Page 0 dual shadow headers,
 //! slotted pages, freelist, overflow chains, bounded page cache, version metadata,
-//! logical-page byte B+ trees, and persistent WAL format codecs.
+//! logical-page byte B+ trees, WAL, single-process MVCC transactions, savepoints,
+//! checkpointing, and restartable crash recovery.
 
 pub mod btree;
 pub mod cache;
+pub mod checkpoint;
 pub mod config;
+pub mod coordinator;
 pub mod format;
 pub mod io;
 pub mod pager;
+pub mod ports;
+pub mod recovery;
+pub mod transaction;
 
 pub use btree::{
     BTree, BTreeCursor, InternalNode, LeafEntry, PageStore, PageStoreMut, PagerPageStore, TreeKind,
@@ -18,6 +24,7 @@ pub use cache::{
     CacheStats, PageCache, PageVersionEntry, PageVersionLocation, PinnedPage, VersionIndex,
 };
 pub use config::{EngineConfig, PageSize, SyncMode};
+pub use coordinator::{SingleProcessCoordinator, SnapshotGuard, WriterPermit};
 pub use format::{
     CommitPayload, FreelistEntry, FreelistTrunkHeader, HeaderSlot, OverflowHeader, OverflowRef,
     PageFlags, PageHeader, PageType, SlotEntry, SlotFlags, SlottedPageMut, SlottedPageView,
@@ -28,3 +35,6 @@ pub use format::{
 pub use io::{FileHandle, FileIdentity, FileLease, FileRegistry, OpenMode, OsVfs, StorageIo};
 pub use oryq_types::{PageId, Result, SnapshotId, TxId};
 pub use pager::{FreelistManager, OverflowStore, PageAllocator, PageBuf, PageGuard, Pager};
+pub use ports::{CheckpointOutcome, CommitReceipt, RecordCompactor};
+pub use recovery::{CommittedDbMeta, RecoveredPageFrame, RecoveredTx, WalScanResult};
+pub use transaction::{wal_path_for, ReadTxn, SavepointId, StorageEngine, WriteTxn};
