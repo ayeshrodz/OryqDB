@@ -1,0 +1,229 @@
+name: Release & Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build and upload artifacts even if the git tag already exists"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Check Version & Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      should_release: ${{ steps.meta.outputs.should_release }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${VERSION}" == 0.* || "${VERSION}" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists."
+            if [[ "${{ inputs.force }}" == "true" ]]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Tag ${TAG} does not exist yet; triggering release build."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Package (${{ matrix.target }})
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release CLI & FFI libraries
+        run: cargo build --release -p oryq-cli -p oryq-ffi
+
+      - name: Assemble release archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          STAGE="oryqdb-${TAG}-${TARGET}"
+          mkdir -p "${STAGE}/bin" "${STAGE}/lib" "${STAGE}/include"
+
+          cp target/release/oryq "${STAGE}/bin/oryq"
+          cp target/release/liboryq.a "${STAGE}/lib/liboryq.a"
+          if [[ -f target/release/liboryq.so ]]; then
+            cp target/release/liboryq.so "${STAGE}/lib/liboryq.so"
+          fi
+          if [[ -f target/release/liboryq.dylib ]]; then
+            cp target/release/liboryq.dylib "${STAGE}/lib/liboryq.dylib"
+          fi
+          if [[ -f include/oryq.h ]]; then
+            cp include/oryq.h "${STAGE}/include/oryq.h"
+          else
+            rmdir "${STAGE}/include"
+          fi
+
+          cp LICENSE README.md CHANGELOG.md VERSION "${STAGE}/"
+          mkdir -p dist
+          tar -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+
+      - name: Assemble release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "oryqdb-$env:TAG-$env:TARGET"
+          New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\lib" | Out-Null
+
+          Copy-Item "target\release\oryq.exe" "$stage\bin\oryq.exe"
+          foreach ($lib in @("oryq.dll", "oryq.dll.lib", "oryq.lib")) {
+            if (Test-Path "target\release\$lib") {
+              Copy-Item "target\release\$lib" "$stage\lib\$lib"
+            }
+          }
+          if (Test-Path "include\oryq.h") {
+            New-Item -ItemType Directory -Force -Path "$stage\include" | Out-Null
+            Copy-Item "include\oryq.h" "$stage\include\oryq.h"
+          }
+
+          Copy-Item "LICENSE", "README.md", "CHANGELOG.md", "VERSION" "$stage\"
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Compress-Archive -Path "$stage" -DestinationPath "dist\$stage.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: oryqdb-${{ needs.prepare.outputs.tag }}-${{ matrix.target }}
+          path: dist/*
+          retention-days: 90
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all packaged archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Extract changelog notes for ${{ needs.prepare.outputs.version }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > release_notes.md
+          import os, re
+          version = os.environ["VERSION"]
+          with open("CHANGELOG.md", "r", encoding="utf-8") as f:
+              text = f.read()
+          pattern = rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)"
+          m = re.search(pattern, text)
+          if m:
+              body = m.group(1).strip()
+          else:
+              body = f"Automated pre-release package for OryqDB `{version}`."
+          print(f"# OryqDB v{version}\n")
+          print(body)
+          print("\n---\n### Included Artifacts\n- `oryq` CLI binary (`bin/`)\n- `liboryq` C ABI static & dynamic libraries (`lib/`)\n- `SHA256SUMS.txt` integrity checksums")
+          PY
+          cat release_notes.md
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" dist/* \
+              --title "OryqDB ${TAG}" \
+              --notes-file release_notes.md \
+              ${PRERELEASE_FLAG}
+          fi
