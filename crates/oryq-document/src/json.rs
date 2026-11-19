@@ -66,7 +66,7 @@ pub fn to_json_string(view: &DocumentView<'_>) -> Result<String> {
     })
 }
 
-fn json_to_value(v: &JsonValue) -> Result<Value> {
+pub(crate) fn json_to_value(v: &JsonValue) -> Result<Value> {
     match v {
         JsonValue::Null => Ok(Value::Null),
         JsonValue::Bool(b) => Ok(Value::Bool(*b)),

@@ -7,9 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.3.0-alpha.1` (`W06`): `oryq-document` update operators and document patch normalization.
 - `0.3.0-alpha.2` (`W07`): `oryq-index` primary `_id -> RecordId` mapping and key codec.
 - `0.3.0` (`W08` / M3 Complete): `oryq-core` database/catalog/CRUD vertical slice.
+
+## [0.3.0-alpha.1] - 2026-11-19
+
+### Added (`W06` / M3 Document Updates)
+- Implemented `oryq-document` update operators (`updates/`):
+  - Owner-local `UpdateOperator` trait and `UpdateRegistry::default_v1()` registering `$set`, `$unset`, `$inc`, `$push`, and `$pull`.
+  - Common pre-mutation validation in `UpdateSpec`: `_id` immutability (including `validate_replacement_doc`), ancestor/descendant and cross-operator path-conflict rejection, unknown operator rejection, checked `i64` overflow, lossless `i64 -> f64` (`|i| <= 2^53`) promotion, `Decimal128` `$inc` rejection (`UnsupportedFeature`), and canonical equality in `$pull`.
+  - `apply_update` producing `NormalizedMutation` (`updated_doc`, `touched_top_level_fields`, binary `patch_bytes`, `bloom_mask`, `modified`).
+- Implemented `oryq-document` state-normalized physical delta patches (`patch/`):
+  - Normative binary encoder/decoder (`encode_physical_patch` / `decode_physical_patch`), 2-hash 64-bit `bloom_mask_for_top_level`, newest-first `resolve_path_with_patches`, and pure stateless `compact_document` with `BudgetHandle` accounting.
+- Added 4 external integration tests in `crates/oryq-document/tests/updates.rs` (15 total in `oryq-document`) and recorded `CC-0006` in `architecture/contract-changes.toml`.
 
 ## [0.2.0] - 2026-11-19
 
