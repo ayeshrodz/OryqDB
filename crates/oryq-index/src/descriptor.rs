@@ -58,6 +58,31 @@ impl IndexDescriptor {
             options_json: None,
         }
     }
+
+    /// Constructs a single/nested-path secondary index descriptor.
+    pub fn secondary(
+        index_id: IndexId,
+        name: String,
+        path: FieldPath,
+        order: SortOrder,
+        unique: bool,
+        sparse: bool,
+        root_page_id: PageId,
+    ) -> Self {
+        Self {
+            index_id,
+            name,
+            kind: IndexKind::Secondary,
+            fields: vec![IndexFieldSpec { path, order }],
+            unique,
+            sparse,
+            root_page_id,
+            required_feature_bit: None,
+            provider_id: CapabilityId::new("index.secondary").expect("valid capability id"),
+            data_version: 1,
+            options_json: None,
+        }
+    }
 }
 
 /// Planner-visible read capability facts declared by an [`crate::provider::IndexProvider`].

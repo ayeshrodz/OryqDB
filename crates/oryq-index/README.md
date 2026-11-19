@@ -8,6 +8,7 @@ Canonical memcomparable key encoding, index descriptors, owner-local provider re
 - **`provider` & `registry`:** Object-safe `IndexProvider` trait and owner-local `IndexProviderRegistry::default_v1()`.
 - **`plugin`:** Restricted `IndexReadContext` (`PageStore`) and `IndexWriteContext` (`PageStoreMut`) without commit/checkpoint/file-handle authority.
 - **`primary`:** `PrimaryIndexProvider` (`"index.primary"`), `lookup_primary_id`, and `scan_primary_record_ids` enforcing mandatory uniqueness and transactional B+ tree maintenance.
+- **`secondary`:** `SecondaryIndexProvider` (`"index.secondary"`), single/nested-path extraction, `unique` collision checks, `sparse` missing-field omission, differential `on_update` bypass, and ordered equality/range scans (`scan_secondary_eq`, `scan_secondary_range`, `scan_secondary_all`).
 
 ## Dependencies
 - Internal: `oryq-types`, `oryq-document`, `oryq-engine` (never `query`/`core`/`ffi`/`cli`).

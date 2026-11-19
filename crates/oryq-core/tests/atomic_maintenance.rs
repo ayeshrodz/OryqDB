@@ -121,3 +121,79 @@ fn catalog_v1_codec_roundtrip_and_record_compactor_adapter() {
         to_json_value(&mutated.updated_doc.view())
     );
 }
+
+#[test]
+fn multi_index_a_succeeds_b_fails_rollback_then_commit_in_same_txn() {
+    let dir = unique_temp_dir("multi_index_rollback");
+    let db_path = dir.join("multi.oryq");
+    let cfg = DatabaseConfig {
+        page_size: PageSize::Size4096,
+        ..DatabaseConfig::default()
+    };
+
+    {
+        let db = Database::open(&db_path, cfg.clone()).unwrap();
+        let mut w = db.begin_write().unwrap();
+        w.create_collection("users").unwrap();
+        {
+            let mut users = w.collection("users").unwrap();
+            // Seed doc before index creation so create_index backfills it
+            users
+                .insert_json(r#"{"_id": 1, "email": "alice@oryq.dev", "dept": "eng"}"#)
+                .unwrap();
+
+            // Index A: non-unique on "dept"; Index B: unique on "email"
+            users
+                .create_index(
+                    "dept",
+                    oryq_core::SortOrder::Asc,
+                    false,
+                    false,
+                    Some("idx_dept"),
+                )
+                .unwrap();
+            users
+                .create_index(
+                    "email",
+                    oryq_core::SortOrder::Asc,
+                    true,
+                    false,
+                    Some("idx_email_uniq"),
+                )
+                .unwrap();
+            assert_eq!(users.list_indexes().unwrap().len(), 3);
+
+            // Cannot drop mandatory primary _id_ index
+            assert_eq!(
+                users.drop_index("_id_").unwrap_err().category(),
+                ErrorCategory::InvalidArgument
+            );
+
+            // Insert doc 2: primary & idx_dept (A) succeed, but idx_email_uniq (B) FAILS with DuplicateKey!
+            // Statement savepoint MUST roll back collection + primary + idx_dept cleanly.
+            let err = users
+                .insert_json(r#"{"_id": 2, "email": "alice@oryq.dev", "dept": "sales"}"#)
+                .unwrap_err();
+            assert_eq!(err.category(), ErrorCategory::DuplicateKey);
+
+            // Subsequent valid insert with _id: 2 in the SAME transaction succeeds cleanly!
+            users
+                .insert_json(r#"{"_id": 2, "email": "bob@oryq.dev", "dept": "sales"}"#)
+                .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    // Reopen and verify both docs and all 3 indexes survived intact
+    {
+        let db = Database::open(&db_path, cfg).unwrap();
+        let r = db.begin_read().unwrap();
+        let users = r.collection("users").unwrap();
+        assert_eq!(users.count().unwrap(), 2);
+        assert_eq!(users.list_indexes().len(), 3);
+        assert!(users.find_by_id(&Value::Int64(1)).unwrap().is_some());
+        assert!(users.find_by_id(&Value::Int64(2)).unwrap().is_some());
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

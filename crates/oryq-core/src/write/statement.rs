@@ -9,12 +9,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_document::{
-    apply_update, encode_document, validate_replacement_doc, DocumentBuf, ObjectId, UpdateSpec,
-    Value,
+    apply_update, encode_document, validate_replacement_doc, DocumentBuf, FieldPath, ObjectId,
+    UpdateSpec, Value,
 };
 use oryq_engine::btree::read_internal_node;
 use oryq_engine::{BTree, PageStore, PageStoreMut, SlottedPageView, TreeKind, WriteTxn};
-use oryq_index::{encode_record_id, lookup_primary_id, IndexDescriptor, PRIMARY_PROVIDER_ID};
+use oryq_index::{
+    decode_record_id, encode_record_id, lookup_primary_id, IndexDescriptor, IndexKind, SortOrder,
+    PRIMARY_PROVIDER_ID,
+};
 use oryq_types::{
     CapabilityId, CollectionId, ErrorCategory, ErrorEnvelope, FeatureBitmask, IndexId, PageId,
     RecordId, Result,
@@ -476,6 +479,157 @@ pub fn delete_by_id_stmt(
 
         let new_catalog_root = save_collection_entry(tx, catalog_root, &entry)?;
         tx.set_catalog_root_page_id(new_catalog_root);
+        Ok(true)
+    })();
+
+    match res {
+        Ok(ok) => {
+            tx.release_savepoint(sp)?;
+            Ok(ok)
+        }
+        Err(err) => {
+            let _ = tx.rollback_to(sp);
+            Err(err)
+        }
+    }
+}
+
+/// Atomically creates and backfills a secondary index on `collection_name` inside a savepoint.
+#[allow(clippy::too_many_arguments)]
+pub fn create_secondary_index_stmt(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    collection_name: &str,
+    index_name: Option<&str>,
+    raw_path: &str,
+    order: SortOrder,
+    unique: bool,
+    sparse: bool,
+) -> Result<IndexDescriptor> {
+    let field_path = FieldPath::parse(raw_path)?;
+    let name = match index_name {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => format!(
+            "{}_{}",
+            field_path.as_str().replace('.', "_"),
+            match order {
+                SortOrder::Asc => "1",
+                SortOrder::Desc => "-1",
+            }
+        ),
+    };
+
+    let sp = tx.savepoint();
+    let res = (|| -> Result<IndexDescriptor> {
+        let catalog_root = tx.catalog_root_page_id();
+        let mut entry =
+            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "write::create_secondary_index_stmt",
+                    format!("collection '{collection_name}' does not exist"),
+                )
+            })?;
+
+        if entry.indexes.iter().any(|i| i.name == name) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::DuplicateKey,
+                MODULE_ID,
+                "write::create_secondary_index_stmt",
+                format!("index '{name}' already exists on collection '{collection_name}'"),
+            ));
+        }
+
+        let mut meta = load_catalog_meta(tx, catalog_root)?;
+        let index_id = IndexId::new(meta.next_index_id)?;
+        meta.next_index_id = meta.next_index_id.checked_add(1).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "write::create_secondary_index_stmt",
+                "index_id counter overflow",
+            )
+        })?;
+
+        let mut desc = IndexDescriptor::secondary(
+            index_id,
+            name,
+            field_path,
+            order,
+            unique,
+            sparse,
+            PageId::new(1),
+        );
+        let provider = registries.indexes.require(&desc.provider_id)?;
+        desc.root_page_id = provider.create_empty(tx, &desc)?;
+
+        // Backfill all existing documents in the collection inside the same savepoint.
+        let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let existing = data_tree.scan_all(tx)?;
+        for (raw_rid, raw_rec) in existing {
+            let rid = decode_record_id(&raw_rid)?;
+            let doc = decode_collection_record(&raw_rec)?;
+            let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
+            desc.root_page_id = maint.new_root_page_id;
+        }
+
+        entry.indexes.push(desc.clone());
+        let root_after_meta = save_catalog_meta(tx, catalog_root, &meta)?;
+        let root_after_entry = save_collection_entry(tx, root_after_meta, &entry)?;
+        tx.set_catalog_root_page_id(root_after_entry);
+        Ok(desc)
+    })();
+
+    match res {
+        Ok(desc) => {
+            tx.release_savepoint(sp)?;
+            Ok(desc)
+        }
+        Err(err) => {
+            let _ = tx.rollback_to(sp);
+            Err(err)
+        }
+    }
+}
+
+/// Atomically drops a non-primary index from `collection_name` inside a savepoint.
+pub fn drop_index_stmt(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    collection_name: &str,
+    index_name: &str,
+) -> Result<bool> {
+    let sp = tx.savepoint();
+    let res = (|| -> Result<bool> {
+        let catalog_root = tx.catalog_root_page_id();
+        let mut entry =
+            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "write::drop_index_stmt",
+                    format!("collection '{collection_name}' does not exist"),
+                )
+            })?;
+
+        let Some(pos) = entry.indexes.iter().position(|i| i.name == index_name) else {
+            return Ok(false);
+        };
+        if entry.indexes[pos].kind == IndexKind::Primary {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "write::drop_index_stmt",
+                "cannot drop mandatory primary '_id_' index",
+            ));
+        }
+        let desc = entry.indexes.remove(pos);
+        let provider = registries.indexes.require(&desc.provider_id)?;
+        provider.drop_index(tx, &desc)?;
+
+        let new_root = save_collection_entry(tx, catalog_root, &entry)?;
+        tx.set_catalog_root_page_id(new_root);
         Ok(true)
     })();
 

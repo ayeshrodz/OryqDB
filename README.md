@@ -2,7 +2,7 @@
 
 An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
-> **Current Version:** `0.3.0` (**Milestone 3 Complete** — First end-to-end embedded NoSQL CRUD database (`Database`, collections, auto-`_id`, `$set`/`$unset`/`$inc`/`$push`/`$pull`, primary index, MVCC snapshots, WAL/checkpoint/seal & reopen) verified across `oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, and `oryq-core`; entering M4–M5 with `W09` secondary indexes next.)
+> **Current Version:** `0.4.0-alpha.1` (`W09` M4 Secondary Indexes Complete — single/nested secondary indexes, uniqueness, sparse omission, differential maintenance, ordered range scans & core `create_index`/`drop_index` verified; `W10` `oryq-query` filter AST, planner & cursors next.)
 
 ## Design Overview
 

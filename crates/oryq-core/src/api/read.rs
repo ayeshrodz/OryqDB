@@ -2,7 +2,7 @@
 
 use oryq_document::{encode_document, DocumentBuf, Value};
 use oryq_engine::{BTree, PageStore, ReadTxn, TreeKind};
-use oryq_index::{encode_record_id, lookup_primary_id};
+use oryq_index::{encode_record_id, lookup_primary_id, IndexDescriptor};
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId};
 
 use crate::catalog::{list_collection_names, load_collection_entry, CatalogEntry};
@@ -70,6 +70,10 @@ impl ReadCollection<'_, '_> {
     pub fn count(&self) -> Result<usize> {
         let tree = BTree::open(self.entry.data_root_page_id, TreeKind::Collection);
         Ok(tree.scan_all(self.tx)?.len())
+    }
+
+    pub fn list_indexes(&self) -> &[IndexDescriptor] {
+        &self.entry.indexes
     }
 }
 
