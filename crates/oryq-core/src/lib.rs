@@ -1,7 +1,24 @@
 #![forbid(unsafe_code)]
 
-//! `oryq-core` public facade crate scaffold (scheduled for `W08` and `W14`).
+//! `oryq-core`: Public Rust embedded database facade, versioned transactional catalog,
+//! atomic statement orchestration, and composition root for OryqDB.
 
+pub mod adapters;
+pub mod api;
+pub mod catalog;
+pub mod composition;
+pub mod config;
+pub mod database;
+pub mod write;
+
+pub use adapters::DocumentRecordCompactor;
+pub use api::{ReadCollection, ReadTransaction, WriteCollection, WriteTransaction};
+pub use catalog::{CatalogEntry, CatalogMeta, CATALOG_SCHEMA_VERSION};
+pub use composition::CoreRegistries;
+pub use config::DatabaseConfig;
+pub use database::Database;
+pub use oryq_document::{DocumentBuf, DocumentView, ObjectId, Uuid, Value, ValueView};
+pub use oryq_engine::{CheckpointOutcome, CommitReceipt, PageSize, SyncMode};
 pub use oryq_types::{
     BudgetDomain, BudgetHandle, CancellationSource, CancellationToken, CollectionId, ErrorCategory,
     ErrorEnvelope, IndexId, PageId, RecordId, Result, SnapshotId, TxId,

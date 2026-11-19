@@ -7,7 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.3.0` (`W08` / M3 Complete): `oryq-core` database/catalog/CRUD vertical slice.
+- `0.4.0-alpha.1` (`W09`): `oryq-index` secondary indexes and transactional differential maintenance.
+- `0.4.0` (`W10` / M4–M5 Complete): `oryq-query` filter AST, access planner, lending cursors & `explain_analyze()`.
+
+## [0.3.0] - 2026-11-19
+
+### Added (`W08` / Milestone 3 Complete — First End-to-End CRUD Vertical Slice)
+- Implemented `oryq-core` (`#![forbid(unsafe_code)]`, public embedded database facade and composition root):
+  - **Database & Config (`database.rs`, `config.rs`):** Shareable `Database` (`open`, `open_with_io`, `begin_read`, `begin_write`, `try_begin_write`, `checkpoint`, `is_sealed`) and `DatabaseConfig`.
+  - **Public API (`api/`):** `ReadTransaction`, `ReadCollection` (`find_by_id`, `find_all`, `count`), `WriteTransaction` (`create_collection`, `drop_collection`, `list_collections`, `commit`, `rollback`), and `WriteCollection` (`insert`, `insert_json`, `update_by_id`, `replace_by_id`, `delete_by_id`, `find_by_id`, `find_all`).
+  - **Frozen v1 Catalog (`catalog/`):** Canonical `OryqDoc` catalog schema (`CATALOG_SCHEMA_VERSION = 1`) persisting collection roots, monotonic `RecordId` counters, required feature bitmasks, and per-index descriptors inside the transactional catalog B+ tree.
+  - **Atomic Statement Orchestration (`write/`):** Statement-scoped `SavepointId` rollback across collection B+ tree, all registered indexes, `RecordId` counter, and catalog, plus automatic 12-byte monotonic `ObjectId` generation when `_id` is omitted.
+  - **Composition Root & Adapters (`composition/`, `adapters/`):** `CoreRegistries::default_v1()` and `DocumentRecordCompactor` implementing `oryq-engine::RecordCompactor`.
+- Added 3 external integration tests in `crates/oryq-core/tests/{vertical_slice,atomic_maintenance}.rs` (**53 total across workspace**), recorded `CC-0008` in `architecture/contract-changes.toml`, and added `xtask modules core` to CI.
 
 ## [0.3.0-alpha.2] - 2026-11-19
 
