@@ -103,3 +103,20 @@ evidence = [
     "cargo run -p xtask -- modules document",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0007"
+modules = ["index", "query", "core"]
+files = [
+    "crates/oryq-index/src/lib.rs",
+    "crates/oryq-index/src/descriptor.rs",
+    "crates/oryq-index/src/provider.rs",
+    "crates/oryq-index/src/plugin/context.rs",
+]
+reason = "Implement W07 oryq-index contracts: IndexDescriptor, IndexProvider, IndexProviderRegistry, restricted IndexReadContext/IndexWriteContext, canonical memcomparable key codec, and PrimaryIndexProvider (_id -> RecordId)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-index",
+    "cargo run -p xtask -- modules index",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

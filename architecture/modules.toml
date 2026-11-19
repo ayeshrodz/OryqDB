@@ -72,7 +72,12 @@ crate = "oryq-index"
 state = "active"
 owned = ["crates/oryq-index/"]
 production_dependencies = ["oryq-types", "oryq-document", "oryq-engine"]
-contract_files = ["crates/oryq-index/src/lib.rs"]
+contract_files = [
+    "crates/oryq-index/src/lib.rs",
+    "crates/oryq-index/src/descriptor.rs",
+    "crates/oryq-index/src/provider.rs",
+    "crates/oryq-index/src/plugin/context.rs",
+]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-index"]]
 
