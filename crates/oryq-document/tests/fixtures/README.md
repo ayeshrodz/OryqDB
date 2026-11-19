@@ -14,6 +14,8 @@ This directory documents the test cases and deterministic binary/JSON fixtures u
   - Verifies exact numeric comparisons across `Int64`, `Float64`, and `Decimal128`: `-0.0 == +0.0 == 0 == Decimal("-0.00")`, `NaN == NaN < -Inf`, `10 == 10.0 == Decimal("10.0")`, `Decimal("0.1") < 0.1_f64`, precision preservation above `2^53` and at `i64::MIN`/`i64::MAX`, and subnormal `f64` ordering.
 - `tests/malformed.rs`:
   - Verifies strict `validate_document` rejection of truncated buffers, unknown format versions, mismatched `total_len`, `HAS_OVERFLOW_POINTERS` (`Corruption`), `0xF` `OverflowRef` (`Corruption`), reserved flags/tags (`Corruption`), corrupted `xxh3_64` hash prefixes, unsorted directory entries, overlapping heap spans, invalid UTF-8, NUL bytes in field names, duplicate keys, nesting depth `> 128`, and invalid `FieldPath` strings.
+- `tests/updates.rs` (`W06`):
+  - Verifies `$set`, `$unset`, `$inc`, `$push`, and `$pull` via `UpdateRegistry::default_v1()`, `_id` immutability (including `validate_replacement_doc`), ancestor/descendant path conflicts, checked `i64` overflow & lossless `i64 -> f64` (`2^53`) precision guards, `Decimal128` `$inc` rejection, multi-patch newest-first ancestor/descendant resolution (`resolve_path_with_patches`), and pure budgeted compaction (`compact_document`).
 
 ## Regenerating / Adding Fixtures
 

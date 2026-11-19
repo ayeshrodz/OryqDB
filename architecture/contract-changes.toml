@@ -88,3 +88,18 @@ evidence = [
     "cargo run -p xtask -- modules engine",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0006"
+modules = ["document", "core"]
+files = [
+    "crates/oryq-document/src/lib.rs",
+    "crates/oryq-document/src/updates/registry.rs",
+]
+reason = "Implement W06 oryq-document update operator registry (UpdateOperator, UpdateRegistry, UpdateSpec, apply_update, validate_replacement_doc) and state-normalized physical delta patch encoding, bloom resolution, and pure compaction."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-document",
+    "cargo run -p xtask -- modules document",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

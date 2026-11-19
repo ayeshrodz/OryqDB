@@ -45,6 +45,7 @@ contract_files = [
     "crates/oryq-document/src/lib.rs",
     "crates/oryq-document/src/types.rs",
     "crates/oryq-document/src/path.rs",
+    "crates/oryq-document/src/updates/registry.rs",
 ]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-document"]]
