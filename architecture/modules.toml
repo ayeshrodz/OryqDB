@@ -103,7 +103,12 @@ production_dependencies = [
     "oryq-index",
     "oryq-query",
 ]
-contract_files = ["crates/oryq-core/src/lib.rs"]
+contract_files = [
+    "crates/oryq-core/src/lib.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-core/src/api/mod.rs",
+    "crates/oryq-core/src/composition/mod.rs",
+]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-core"]]
 
