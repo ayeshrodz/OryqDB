@@ -7,8 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.3.0-alpha.2` (`W07`): `oryq-index` primary `_id -> RecordId` mapping and key codec.
 - `0.3.0` (`W08` / M3 Complete): `oryq-core` database/catalog/CRUD vertical slice.
+
+## [0.3.0-alpha.2] - 2026-11-19
+
+### Added (`W07` / M3 Primary Index & Key Codec)
+- Implemented `oryq-index` (`#![forbid(unsafe_code)]`, depends on `oryq-types`, `oryq-document`, `oryq-engine`):
+  - **Canonical Memcomparable Key Codec (`key_codec.rs`):** Order-preserving byte encoding across all 12 `OryqDoc` types matching `oryq_document::compare_values` (including exact variable-width `BigDec` cross-type numeric encoding across `Int64`, `Float64`, and `Decimal128`), `SortOrder::{Asc, Desc}`, primary `_id` type validation (`ObjectId`, `Uuid`, `Int64`, `String <= 1024B`), `max_index_key_bytes`, and 8-byte BE `RecordId` encoding.
+  - **Descriptors, Provider & Registry (`descriptor.rs`, `provider.rs`, `registry.rs`):** `IndexDescriptor`, `IndexKind`, `IndexFieldSpec`, `IndexReadCapabilities`, `MaintenanceResult`, object-safe `IndexProvider`, and `IndexProviderRegistry::default_v1()`.
+  - **Restricted Plugin Contexts (`plugin/context.rs`):** `IndexReadContext` (`PageStore`) and `IndexWriteContext` (`PageStoreMut`) scoped to a `NamespaceId` without commit/checkpoint/file-handle authority.
+  - **Primary Index (`primary/`):** `PrimaryIndexProvider` (`"index.primary"`), `lookup_primary_id`, and `scan_primary_record_ids` enforcing mandatory uniqueness, `_id` immutability, empty-collection create/reopen/drop, and transactional B+ tree maintenance.
+- Added 3 external integration tests in `crates/oryq-index/tests/{codec,conformance}.rs` (50 total across workspace), recorded `CC-0007` in `architecture/contract-changes.toml`, and added `xtask modules index` to CI.
 
 ## [0.3.0-alpha.1] - 2026-11-19
 

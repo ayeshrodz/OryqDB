@@ -84,3 +84,6 @@ jobs:
 
       - name: Run module check for engine (oryq-engine)
         run: cargo run -p xtask -- modules engine
+
+      - name: Run module check for index (oryq-index)
+        run: cargo run -p xtask -- modules index
