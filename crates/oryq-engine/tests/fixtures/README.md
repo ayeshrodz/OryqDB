@@ -16,6 +16,10 @@ This directory documents the golden binary layout assertions and fault-injection
   - **Pin-Aware Bounded `PageCache`:** Verifies `BudgetHandle` quota enforcement, pinned-page protection (`QuotaExceeded` when all resident pages are pinned), and LRU unpinned eviction.
   - **MVCC `VersionIndex`:** Verifies snapshot visibility (`tx_id <= snapshot_id`), horizon-safe pruning (`prune_below`), monotonicity checks, and `max_entries` quota.
   - **Multi-Level Byte `BTree` & `BTreeCursor`:** 400-key deterministic shuffled oracle test exercising leaf/internal/root splits, 100 upserts, point lookups, forward/range/reverse stack-based scans, persistence across reopen, sibling borrow/merge deletions, freelist chain validation, and full root collapse back to an empty leaf.
+- `tests/admission.rs`, `tests/checkpoint.rs`, `tests/recovery.rs` (`W05`):
+  - **MVCC Snapshot Admission & Savepoints:** Nested same-thread readers, `max_readers` / single-writer `Busy` contention, nested `SavepointId` rollback with page-allocation rollback, auto-rollback on `Drop`, and hard `max_wal_hard_bytes` rejection.
+  - **Sealed/Unsealed Checkpointing & WAL Reset:** Durable dual-slot unseal, passive horizon checkpoint under active readers, full WAL reset & seal when idle, standalone sealed reopen without `.oryq-wal`, and interrupted `reset_intent_seq` completion on reopen.
+  - **Crash Recovery & Uncertain Sync Poisoning:** Incomplete trailing frame truncation, restartable double-reopen recovery, fail-closed corruption on bit-flipped complete WAL frames or missing unsealed WAL, and `CommitOutcomeUnknown` poisoning on sync failure.
 
 ## Regenerating / Adding Fixtures
 

@@ -57,7 +57,10 @@ owned = ["crates/oryq-engine/"]
 production_dependencies = ["oryq-types"]
 contract_files = [
     "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-engine/src/ports.rs",
     "crates/oryq-engine/src/io/vfs.rs",
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-engine/src/coordinator/mod.rs",
 ]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-engine"]]

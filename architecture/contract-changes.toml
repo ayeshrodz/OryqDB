@@ -71,3 +71,20 @@ evidence = [
     "cargo run -p xtask -- modules engine",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0005"
+modules = ["engine", "index", "core"]
+files = [
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-engine/src/ports.rs",
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-engine/src/coordinator/mod.rs",
+]
+reason = "Complete W05 Milestone 2 engine contracts: RecordCompactor/CommitReceipt/CheckpointOutcome ports, SingleProcessCoordinator/SnapshotGuard/WriterPermit, StorageEngine/ReadTxn/WriteTxn/SavepointId, WAL recovery, and checkpoint/reset/seal protocols."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-engine",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

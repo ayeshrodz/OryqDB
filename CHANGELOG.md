@@ -7,7 +7,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.2.0` (`W05` / M2 Complete): `.oryq-wal`, single-process MVCC snapshots/savepoints, checkpointing, and 7-point crash recovery.
+- `0.3.0-alpha.1` (`W06`): `oryq-document` update operators and document patch normalization.
+- `0.3.0-alpha.2` (`W07`): `oryq-index` primary `_id -> RecordId` mapping and key codec.
+- `0.3.0` (`W08` / M3 Complete): `oryq-core` database/catalog/CRUD vertical slice.
+
+## [0.2.0] - 2026-11-19
+
+### Added (`W05` / Milestone 2 Complete)
+- Implemented `oryq-engine` WAL, single-process MVCC transactions, nested savepoints, checkpoint/reset, and restartable crash recovery:
+  - **Engine Ports (`ports.rs`):** `RecordCompactor` pure compaction trait, `CommitReceipt`, and `CheckpointOutcome`.
+  - **Snapshot Coordinator (`coordinator/`):** `SingleProcessCoordinator`, `SnapshotGuard`, and `WriterPermit` with atomic admission, nested same-thread readers, `max_readers` enforcement, single-writer exclusion, and uncertain-commit poisoning.
+  - **WAL Recovery (`recovery/`):** `scan_wal` (chained `XXH3_64_with_seed` verification, incomplete-tail truncation, fail-closed corruption on bad complete frames) and restartable `replay_into_version_index` without domain callbacks.
+  - **Checkpointing & Sealed Files (`checkpoint/`):** `copy_committed_pages_to_main` (horizon-bounded passive checkpoint), `unseal_for_first_write` (durable dual-slot `wal_required=1`), `reset_wal_after_full_checkpoint` (redundant dual-slot `reset_intent_seq` + seal), and `complete_interrupted_reset`.
+  - **Transactions (`transaction/`):** `StorageEngine`, `ReadTxn` (`PageStore`), `WriteTxn` (`PageStoreMut`, nested `SavepointId` rollback/release with allocation rollback, auto-rollback on `Drop`, hard `max_wal_hard_bytes` cap, and `CommitOutcomeUnknown` poisoning on sync failure).
+- Added 8 new external integration tests across `tests/admission.rs`, `tests/checkpoint.rs`, and `tests/recovery.rs` (19 total in `oryq-engine`) and recorded `CC-0005` in `architecture/contract-changes.toml`.
+
+### Fixed
+- Upgraded `.github/workflows/ci.yml` from `actions/checkout@v4` to `actions/checkout@v6` to eliminate GitHub Actions Node.js 20 deprecation warnings.
+- Removed unused `homepage` field and unused `oryq-ffi` entry from root `Cargo.toml` to resolve Cargo manifest warnings on Windows CI.
 
 ## [0.2.0-alpha.1] - 2026-11-19
 
