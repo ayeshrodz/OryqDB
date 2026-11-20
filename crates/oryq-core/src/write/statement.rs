@@ -13,16 +13,19 @@ use oryq_document::{
     UpdateSpec, Value,
 };
 use oryq_engine::btree::read_internal_node;
-use oryq_engine::{BTree, PageStore, PageStoreMut, SlottedPageView, TreeKind, WriteTxn};
+use oryq_engine::{
+    BTree, PageStore, PageStoreMut, RecordCompactor, SlottedPageView, TreeKind, WriteTxn,
+};
 use oryq_index::{
     decode_record_id, encode_record_id, lookup_primary_id, IndexDescriptor, IndexKind, SortOrder,
     PRIMARY_PROVIDER_ID,
 };
 use oryq_types::{
-    CapabilityId, CollectionId, ErrorCategory, ErrorEnvelope, FeatureBitmask, IndexId, PageId,
-    RecordId, Result,
+    BudgetDomain, BudgetHandle, CapabilityId, CollectionId, ErrorCategory, ErrorEnvelope,
+    FeatureBitmask, IndexId, PageId, RecordId, Result,
 };
 
+use crate::adapters::DocumentRecordCompactor;
 use crate::catalog::{
     delete_collection_entry, load_catalog_meta, load_collection_entry, save_catalog_meta,
     save_collection_entry, validate_collection_name, CatalogEntry,
@@ -31,6 +34,9 @@ use crate::composition::CoreRegistries;
 
 const MODULE_ID: &str = "core";
 const RECORD_KIND_INLINE: u8 = 0x00;
+const RECORD_KIND_DELTA_CHAIN: u8 = 0x01;
+/// Maximum number of chained physical delta patches before automatic compaction (`docs/file-format.md` §4.2).
+pub const MAX_DELTA_CHAIN: u8 = 4;
 
 /// Generates a 12-byte monotonically sortable [`ObjectId`] (`docs/document-model.md` §4.2):
 /// `[4-byte unix_seconds_be][5-byte process_tag][3-byte atomic_counter_be]`.
@@ -61,7 +67,8 @@ pub fn encode_collection_record(doc: &DocumentBuf) -> Vec<u8> {
     out
 }
 
-/// Decodes a collection B+ tree value into an immutable validated [`DocumentBuf`].
+/// Decodes a collection B+ tree value (inline `0x00` or delta-chained `0x01`) into an
+/// immutable validated [`DocumentBuf`].
 pub fn decode_collection_record(raw: &[u8]) -> Result<DocumentBuf> {
     let (&kind, body) = raw.split_first().ok_or_else(|| {
         ErrorEnvelope::new(
@@ -71,15 +78,147 @@ pub fn decode_collection_record(raw: &[u8]) -> Result<DocumentBuf> {
             "empty collection record envelope",
         )
     })?;
-    if kind != RECORD_KIND_INLINE {
-        return Err(ErrorEnvelope::new(
+    match kind {
+        RECORD_KIND_INLINE => DocumentBuf::from_bytes(body),
+        RECORD_KIND_DELTA_CHAIN => {
+            let (base, patches, _bloom) = parse_delta_chain_record(body)?;
+            let patch_slices: Vec<&[u8]> = patches.iter().map(|p| p.as_slice()).collect();
+            let compactor = DocumentRecordCompactor;
+            let budget = BudgetHandle::new(BudgetDomain::Transaction, 16 * 1024 * 1024);
+            let compacted = compactor.compact(&base, &patch_slices, &budget)?;
+            DocumentBuf::from_bytes(compacted)
+        }
+        other => Err(ErrorEnvelope::new(
             ErrorCategory::UnsupportedFeature,
             MODULE_ID,
             "write::decode_collection_record",
-            format!("unsupported collection record storage_kind 0x{kind:02x}"),
+            format!("unsupported collection record storage_kind 0x{other:02x}"),
+        )),
+    }
+}
+
+/// Encodes a delta-chained record envelope `[0x01][count: u8][bloom: u64 LE][base_len: u32 LE][base][patch_i_len: u32 LE][patch_i]...`.
+fn encode_delta_chain_record(base: &[u8], patches: &[Vec<u8>], bloom_mask: u64) -> Vec<u8> {
+    let total_patches: usize = patches.iter().map(|p| 4 + p.len()).sum();
+    let mut out = Vec::with_capacity(1 + 1 + 8 + 4 + base.len() + total_patches);
+    out.push(RECORD_KIND_DELTA_CHAIN);
+    out.push(patches.len() as u8);
+    out.extend_from_slice(&bloom_mask.to_le_bytes());
+    out.extend_from_slice(&(base.len() as u32).to_le_bytes());
+    out.extend_from_slice(base);
+    for p in patches {
+        out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+fn parse_delta_chain_record(body: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>, u64)> {
+    if body.len() < 1 + 8 + 4 {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::parse_delta_chain_record",
+            "truncated delta-chain record header",
         ));
     }
-    DocumentBuf::from_bytes(body)
+    let count = body[0] as usize;
+    if count == 0 || count > MAX_DELTA_CHAIN as usize {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::parse_delta_chain_record",
+            format!("invalid delta chain length {count}"),
+        ));
+    }
+    let bloom = u64::from_le_bytes(body[1..9].try_into().unwrap());
+    let base_len = u32::from_le_bytes(body[9..13].try_into().unwrap()) as usize;
+    let mut pos = 13;
+    if pos + base_len > body.len() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::parse_delta_chain_record",
+            "truncated base document in delta-chain record",
+        ));
+    }
+    let base = body[pos..pos + base_len].to_vec();
+    pos += base_len;
+
+    let mut patches = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 4 > body.len() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::parse_delta_chain_record",
+                "truncated patch length in delta-chain record",
+            ));
+        }
+        let plen = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + plen > body.len() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::parse_delta_chain_record",
+                "truncated patch payload in delta-chain record",
+            ));
+        }
+        patches.push(body[pos..pos + plen].to_vec());
+        pos += plen;
+    }
+    Ok((base, patches, bloom))
+}
+
+/// Appends a state-normalized physical patch to `raw_existing` if the chain stays within
+/// `MAX_DELTA_CHAIN` (4), or compacts automatically back to `RECORD_KIND_INLINE` on the 5th patch.
+fn append_or_compact_record(
+    raw_existing: &[u8],
+    patch_bytes: &[u8],
+    patch_bloom: u64,
+    fallback_compacted: &DocumentBuf,
+) -> Result<Vec<u8>> {
+    if patch_bytes.is_empty() {
+        return Ok(encode_collection_record(fallback_compacted));
+    }
+    let (&kind, body) = raw_existing.split_first().ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::append_or_compact_record",
+            "empty existing collection record",
+        )
+    })?;
+
+    match kind {
+        RECORD_KIND_INLINE => Ok(encode_delta_chain_record(
+            body,
+            &[patch_bytes.to_vec()],
+            patch_bloom,
+        )),
+        RECORD_KIND_DELTA_CHAIN => {
+            let (base, mut patches, existing_bloom) = parse_delta_chain_record(body)?;
+            if patches.len() >= MAX_DELTA_CHAIN as usize {
+                // 5th patch triggers automatic compaction via RecordCompactor!
+                // Patches are stored newest-first (head_delta_slot order).
+                patches.insert(0, patch_bytes.to_vec());
+                let patch_slices: Vec<&[u8]> = patches.iter().map(|p| p.as_slice()).collect();
+                let budget = BudgetHandle::new(BudgetDomain::Transaction, 16 * 1024 * 1024);
+                let compacted = DocumentRecordCompactor.compact(&base, &patch_slices, &budget)?;
+                let doc = DocumentBuf::from_bytes(compacted)?;
+                Ok(encode_collection_record(&doc))
+            } else {
+                patches.insert(0, patch_bytes.to_vec());
+                Ok(encode_delta_chain_record(
+                    &base,
+                    &patches,
+                    existing_bloom | patch_bloom,
+                ))
+            }
+        }
+        _ => Ok(encode_collection_record(fallback_compacted)),
+    }
 }
 
 /// Creates a new empty collection with its collection B+ tree and primary `_id` index.
@@ -323,7 +462,12 @@ pub fn update_by_id_stmt(
             return Ok(true);
         }
 
-        let new_rec_val = encode_collection_record(&mutated.updated_doc);
+        let new_rec_val = append_or_compact_record(
+            &raw,
+            &mutated.patch_bytes,
+            mutated.bloom_mask,
+            &mutated.updated_doc,
+        )?;
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
         entry.data_root_page_id = data_tree.root();
 
