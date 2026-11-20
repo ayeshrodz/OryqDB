@@ -4,8 +4,9 @@ use oryq_document::{encode_document, DocumentBuf, Value};
 use oryq_engine::{BTree, PageStore, ReadTxn, TreeKind};
 use oryq_index::{encode_record_id, lookup_primary_id, IndexDescriptor};
 use oryq_query::{
-    execute_count, execute_find, explain_analyze, parse_filter_json, parse_projection_json,
-    parse_sort_json, ExplainAnalyze, FilterExpr, FindOptions, QueryContext, QueryCursor,
+    execute_count, execute_find, execute_pipeline_json, explain_analyze, parse_filter_json,
+    parse_projection_json, parse_sort_json, ExplainAnalyze, FilterExpr, FindOptions, QueryContext,
+    QueryCursor,
 };
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId};
 
@@ -132,6 +133,13 @@ impl ReadCollection<'_, '_> {
         let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
         let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
         explain_analyze(&source, &self.entry.name, options, &ctx)
+    }
+
+    /// Executes a JSON aggregation pipeline within this pinned read snapshot.
+    pub fn aggregate_json(&self, pipeline_json: &str) -> Result<Vec<DocumentBuf>> {
+        let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
+        let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
+        execute_pipeline_json(&source, &self.entry.name, pipeline_json, &ctx)
     }
 }
 

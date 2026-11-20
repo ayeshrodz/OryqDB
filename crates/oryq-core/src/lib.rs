@@ -23,8 +23,10 @@ pub use oryq_document::{
 pub use oryq_engine::{CheckpointOutcome, CommitReceipt, PageSize, SyncMode};
 pub use oryq_index::{IndexDescriptor, IndexKind, SortOrder};
 pub use oryq_query::{
-    parse_filter_json, parse_projection_json, parse_sort_json, AccessPlan, ExplainAnalyze,
-    ExplainPlan, FilterExpr, FindOptions, ProjectionSpec, QueryContext, QueryCursor, SortSpec,
+    execute_pipeline, execute_pipeline_json, parse_filter_json, parse_pipeline_json,
+    parse_projection_json, parse_sort_json, AccessPlan, AccumulatorSpec, ExplainAnalyze,
+    ExplainPlan, FilterExpr, FindOptions, PipelineStage, ProjectionSpec, QueryContext, QueryCursor,
+    SortSpec,
 };
 pub use oryq_types::{
     BudgetDomain, BudgetHandle, CancellationSource, CancellationToken, CollectionId, ErrorCategory,
