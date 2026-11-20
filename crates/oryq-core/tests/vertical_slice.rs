@@ -167,3 +167,73 @@ fn end_to_end_crud_mvcc_checkpoint_seal_and_reopen() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn find_count_and_explain_analyze_end_to_end() {
+    let dir = unique_temp_dir("query_e2e");
+    let db_path = dir.join("query_e2e.oryq");
+    let db = Database::open(&db_path, DatabaseConfig::default()).unwrap();
+
+    let mut wtx = db.begin_write().unwrap();
+    wtx.create_collection("users").unwrap();
+    {
+        let mut users = wtx.collection("users").unwrap();
+        users
+            .create_index(
+                "age",
+                oryq_core::SortOrder::Asc,
+                false,
+                false,
+                Some("age_1"),
+            )
+            .unwrap();
+        users
+            .insert_json(r#"{"_id": 1, "name": "Alice", "age": 30, "city": "Auckland"}"#)
+            .unwrap();
+        users
+            .insert_json(r#"{"_id": 2, "name": "Bob", "age": 22, "city": "Wellington"}"#)
+            .unwrap();
+        users
+            .insert_json(r#"{"_id": 3, "name": "Charlie", "age": 30, "city": "Wellington"}"#)
+            .unwrap();
+    }
+    wtx.commit().unwrap();
+
+    let rtx = db.begin_read().unwrap();
+    let users = rtx.collection("users").unwrap();
+
+    // Secondary equality scan + sort + projection
+    let docs = users
+        .find_json(
+            Some(r#"{"age": 30}"#),
+            Some(r#"{"name": 1, "_id": 0}"#),
+            Some(r#"{"name": -1}"#),
+            0,
+            None,
+        )
+        .unwrap()
+        .collect_all();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(
+        docs[0].view().get_field("name").unwrap().to_owned_value(),
+        Value::String("Charlie".into())
+    );
+    assert!(docs[0].view().get_field("_id").is_none());
+
+    // Count matching
+    let f_range = oryq_core::parse_filter_json(r#"{"age": {"$gte": 25}}"#).unwrap();
+    assert_eq!(users.count_matching(Some(&f_range)).unwrap(), 2);
+
+    // Explain analyze chooses secondary range scan
+    let exp = users
+        .explain_analyze(&oryq_core::FindOptions {
+            filter: Some(f_range),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(matches!(
+        exp.plan.access,
+        oryq_core::AccessPlan::SecondaryRangeScan { .. }
+    ));
+    assert_eq!(exp.docs_returned, 2);
+}

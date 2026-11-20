@@ -11,7 +11,7 @@ pub mod config;
 pub mod database;
 pub mod write;
 
-pub use adapters::DocumentRecordCompactor;
+pub use adapters::{CoreQuerySource, DocumentRecordCompactor};
 pub use api::{ReadCollection, ReadTransaction, WriteCollection, WriteTransaction};
 pub use catalog::{CatalogEntry, CatalogMeta, CATALOG_SCHEMA_VERSION};
 pub use composition::CoreRegistries;
@@ -20,6 +20,10 @@ pub use database::Database;
 pub use oryq_document::{DocumentBuf, DocumentView, ObjectId, Uuid, Value, ValueView};
 pub use oryq_engine::{CheckpointOutcome, CommitReceipt, PageSize, SyncMode};
 pub use oryq_index::{IndexDescriptor, IndexKind, SortOrder};
+pub use oryq_query::{
+    parse_filter_json, parse_projection_json, parse_sort_json, AccessPlan, ExplainAnalyze,
+    ExplainPlan, FilterExpr, FindOptions, ProjectionSpec, QueryContext, QueryCursor, SortSpec,
+};
 pub use oryq_types::{
     BudgetDomain, BudgetHandle, CancellationSource, CancellationToken, CollectionId, ErrorCategory,
     ErrorEnvelope, IndexId, PageId, RecordId, Result, SnapshotId, TxId,

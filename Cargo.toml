@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -21,12 +21,12 @@ authors = ["Ayesh Rodrigo <ayeshrodz@gmail.com>"]
 repository = "https://github.com/ayeshrodz/OryqDB"
 
 [workspace.dependencies]
-oryq-types = { path = "crates/oryq-types", version = "0.4.0-alpha.1" }
-oryq-document = { path = "crates/oryq-document", version = "0.4.0-alpha.1" }
-oryq-engine = { path = "crates/oryq-engine", version = "0.4.0-alpha.1" }
-oryq-index = { path = "crates/oryq-index", version = "0.4.0-alpha.1" }
-oryq-query = { path = "crates/oryq-query", version = "0.4.0-alpha.1" }
-oryq-core = { path = "crates/oryq-core", version = "0.4.0-alpha.1" }
+oryq-types = { path = "crates/oryq-types", version = "0.4.0" }
+oryq-document = { path = "crates/oryq-document", version = "0.4.0" }
+oryq-engine = { path = "crates/oryq-engine", version = "0.4.0" }
+oryq-index = { path = "crates/oryq-index", version = "0.4.0" }
+oryq-query = { path = "crates/oryq-query", version = "0.4.0" }
+oryq-core = { path = "crates/oryq-core", version = "0.4.0" }
 fs4 = "0.12"
 serde_json = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

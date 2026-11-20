@@ -13,6 +13,7 @@ oryq-types.workspace = true
 oryq-document.workspace = true
 oryq-engine.workspace = true
 oryq-index.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

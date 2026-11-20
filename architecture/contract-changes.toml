@@ -155,3 +155,24 @@ evidence = [
     "cargo run -p xtask -- modules core",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0010"
+modules = ["query", "core"]
+files = [
+    "crates/oryq-query/src/lib.rs",
+    "crates/oryq-query/src/ports.rs",
+    "crates/oryq-query/src/ast.rs",
+    "crates/oryq-query/src/context.rs",
+    "crates/oryq-query/src/explain.rs",
+    "crates/oryq-core/src/lib.rs",
+]
+reason = "Implement W10 oryq-query filter AST, JSON parser, exact evaluator, rule-based planner, cursors, and core find/count/explain_analyze (v0.4.0)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-query",
+    "cargo test -p oryq-core",
+    "cargo run -p xtask -- modules query",
+    "cargo run -p xtask -- modules core",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
