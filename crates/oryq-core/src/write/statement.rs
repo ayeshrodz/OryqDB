@@ -17,8 +17,8 @@ use oryq_engine::{
     BTree, PageStore, PageStoreMut, RecordCompactor, SlottedPageView, TreeKind, WriteTxn,
 };
 use oryq_index::{
-    decode_record_id, encode_record_id, lookup_primary_id, IndexDescriptor, IndexKind, SortOrder,
-    PRIMARY_PROVIDER_ID,
+    decode_record_id, encode_record_id, lookup_primary_id, IndexDescriptor, IndexFieldSpec,
+    IndexKind, SortOrder, COMPOUND_PROVIDER_ID, PRIMARY_PROVIDER_ID,
 };
 use oryq_types::{
     BudgetDomain, BudgetHandle, CapabilityId, CollectionId, ErrorCategory, ErrorEnvelope,
@@ -822,4 +822,107 @@ fn free_btree_pages(tx: &mut WriteTxn<'_>, root: PageId) -> Result<()> {
         tx.free_page(pid)?;
     }
     Ok(())
+}
+
+/// Atomically creates and backfills a compound/multi-key index inside a savepoint.
+#[allow(clippy::too_many_arguments)]
+pub fn create_compound_index_stmt(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    collection_name: &str,
+    name: Option<&str>,
+    fields: &[(&str, SortOrder)],
+    unique: bool,
+    sparse: bool,
+) -> Result<IndexDescriptor> {
+    if fields.is_empty() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "write::create_compound_index_stmt",
+            "compound index requires at least one field",
+        ));
+    }
+    let mut specs = Vec::with_capacity(fields.len());
+    let mut auto_parts = Vec::with_capacity(fields.len());
+    for &(raw_path, order) in fields {
+        let path = FieldPath::parse(raw_path)?;
+        let dir = match order {
+            SortOrder::Asc => "1",
+            SortOrder::Desc => "-1",
+        };
+        auto_parts.push(format!("{raw_path}_{dir}"));
+        specs.push(IndexFieldSpec { path, order });
+    }
+    let idx_name = match name {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => auto_parts.join("_"),
+    };
+
+    let sp = tx.savepoint();
+    let res = (|| -> Result<IndexDescriptor> {
+        let catalog_root = tx.catalog_root_page_id();
+        let mut entry =
+            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "write::create_compound_index_stmt",
+                    format!("collection '{collection_name}' does not exist"),
+                )
+            })?;
+
+        if entry.indexes.iter().any(|i| i.name == idx_name) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::DuplicateKey,
+                MODULE_ID,
+                "write::create_compound_index_stmt",
+                format!("index '{idx_name}' already exists on collection '{collection_name}'"),
+            ));
+        }
+
+        let mut meta = load_catalog_meta(tx, catalog_root)?;
+        let index_id = IndexId::new(meta.next_index_id)?;
+        meta.next_index_id = meta.next_index_id.checked_add(1).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "write::create_compound_index_stmt",
+                "next_index_id overflow",
+            )
+        })?;
+
+        let provider_id = CapabilityId::new(COMPOUND_PROVIDER_ID)?;
+        let provider = registries.indexes.require(&provider_id)?;
+        let placeholder_root = PageId::new(1);
+        let mut desc =
+            IndexDescriptor::compound(index_id, idx_name, specs, unique, sparse, placeholder_root);
+        desc.root_page_id = provider.create_empty(tx, &desc)?;
+
+        let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let existing = data_tree.scan_all(tx)?;
+        for (raw_rid, raw_rec) in existing {
+            let rid = decode_record_id(&raw_rid)?;
+            let doc = decode_collection_record(&raw_rec)?;
+            let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
+            desc.root_page_id = maint.new_root_page_id;
+        }
+
+        entry.indexes.push(desc.clone());
+        let root_after_meta = save_catalog_meta(tx, catalog_root, &meta)?;
+        let root_after_entry = save_collection_entry(tx, root_after_meta, &entry)?;
+        tx.set_catalog_root_page_id(root_after_entry);
+        Ok(desc)
+    })();
+
+    match res {
+        Ok(desc) => {
+            tx.release_savepoint(sp)?;
+            Ok(desc)
+        }
+        Err(err) => {
+            let _ = tx.rollback_to(sp);
+            Err(err)
+        }
+    }
 }

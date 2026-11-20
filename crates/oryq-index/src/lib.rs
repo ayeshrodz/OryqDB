@@ -4,6 +4,7 @@
 //! owner-local provider registry, restricted plugin storage contexts,
 //! primary `_id -> RecordId` index, and secondary single/nested-path indexes.
 
+pub mod compound;
 pub mod descriptor;
 pub mod key_codec;
 pub mod plugin;
@@ -11,6 +12,12 @@ pub mod primary;
 pub mod provider;
 pub mod registry;
 pub mod secondary;
+
+pub use compound::{
+    decode_prefix_block, encode_prefix_block, extract_compound_key_prefixes,
+    scan_compound_prefix_eq, CompoundIndexProvider, COMPOUND_PROVIDER_ID, MAX_COMPOUND_FIELDS,
+    PREFIX_RESTART_INTERVAL,
+};
 
 pub use descriptor::{
     IndexDescriptor, IndexFieldSpec, IndexKind, IndexReadCapabilities, MaintenanceResult,

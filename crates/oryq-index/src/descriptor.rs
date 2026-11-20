@@ -83,6 +83,30 @@ impl IndexDescriptor {
             options_json: None,
         }
     }
+
+    /// Constructs a compound / multi-key index descriptor (up to 16 fields).
+    pub fn compound(
+        index_id: IndexId,
+        name: String,
+        fields: Vec<IndexFieldSpec>,
+        unique: bool,
+        sparse: bool,
+        root_page_id: PageId,
+    ) -> Self {
+        Self {
+            index_id,
+            name,
+            kind: IndexKind::Compound,
+            fields,
+            unique,
+            sparse,
+            root_page_id,
+            required_feature_bit: None,
+            provider_id: CapabilityId::new("index.compound").expect("valid capability id"),
+            data_version: 1,
+            options_json: None,
+        }
+    }
 }
 
 /// Planner-visible read capability facts declared by an [`crate::provider::IndexProvider`].

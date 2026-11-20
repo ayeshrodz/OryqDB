@@ -6,8 +6,8 @@ use std::fmt;
 use oryq_document::{encode_document, DocumentBuf, Value};
 use oryq_engine::{BTree, PageStore, TreeKind};
 use oryq_index::{
-    decode_record_id, encode_record_id, lookup_primary_id, scan_secondary_eq, scan_secondary_range,
-    IndexDescriptor,
+    decode_record_id, encode_record_id, lookup_primary_id, scan_compound_prefix_eq,
+    scan_secondary_eq, scan_secondary_range, IndexDescriptor, IndexKind,
 };
 use oryq_query::QuerySource;
 use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, RecordId, Result};
@@ -94,7 +94,11 @@ impl<S: PageStore> QuerySource for CoreQuerySource<'_, S> {
     fn scan_secondary_eq(&self, desc: &IndexDescriptor, target: &Value) -> Result<Vec<RecordId>> {
         let (doc, _) = encode_document(&[("v".to_owned(), target.clone())], None)?;
         let view = doc.view().get_field("v").unwrap();
-        scan_secondary_eq(self.store, desc, &view)
+        if desc.kind == IndexKind::Compound {
+            scan_compound_prefix_eq(self.store, desc, &[view])
+        } else {
+            scan_secondary_eq(self.store, desc, &view)
+        }
     }
 
     fn scan_secondary_range(
