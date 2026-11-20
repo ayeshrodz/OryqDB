@@ -93,3 +93,6 @@ jobs:
 
       - name: Run module check for core (oryq-core)
         run: cargo run -p xtask -- modules core
+
+      - name: Run module check for ffi (oryq-ffi)
+        run: cargo run -p xtask -- modules ffi

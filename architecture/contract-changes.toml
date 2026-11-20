@@ -176,3 +176,21 @@ evidence = [
     "cargo run -p xtask -- modules core",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0011"
+modules = ["ffi", "core"]
+files = [
+    "crates/oryq-ffi/src/lib.rs",
+    "crates/oryq-ffi/src/api.rs",
+    "crates/oryq-ffi/src/status.rs",
+    "include/oryq.h",
+    "crates/oryq-core/src/lib.rs",
+]
+reason = "Implement W11 oryq-ffi panic-safe C ABI (status codes, thread-local diagnostics, child-tracked opaque handles, JSON CRUD/find & zero-copy cursor accessors) and include/oryq.h (v0.5.0)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-ffi",
+    "cargo run -p xtask -- modules ffi",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
