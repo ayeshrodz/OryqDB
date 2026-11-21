@@ -7,8 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.10.x` (`X01–X03` / Post-baseline E1–E3): Optional `oryq-fts` / `oryq-vec` search crates, `.oryq-shm` multi-process mode, and E3 batching.
-- `1.0.0`: First public stable release after extended soak, fuzzing, and multi-OS validation.
+- `0.9.2` (#14): Full C ABI parity (`oryq_aggregate_json` + zero-copy `utf8`/`f64`/`bool` cursor getters).
+- `0.10.x` (#15–#18 / `X01–X03`): Optional `oryq-fts` / `oryq-vec` search crates, `.oryq-shm` multi-process mode, and queued write batching (`commit_batch`).
+- `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.9.1] - 2026-11-22
+
+### Added (#13 — Hardening, Crash/Corruption/Concurrency Stress Suite & Miri/Audit)
+- Added deterministic fuzz/property suite in `crates/oryq-document/tests/fuzz_malformed.rs` verifying every truncation prefix, 600 mutated/bitflipped documents, and 300 random buffers fail cleanly without panics across `validate_document`, `DocumentBuf::from_bytes`, and `decode_physical_patch`.
+- Added crash-recovery, page-bitflip, and MVCC snapshot-pinning stress tests in `crates/oryq-engine/tests/crash_stress.rs` (15 repeated crash/torn-WAL-tail cycles, Page/slotted bitflip `Corruption` detection, and 4-reader + writer + pinned-snapshot WAL reset verification).
+- Added end-to-end concurrency, delta-compaction, and savepoint rollback storm test in `crates/oryq-core/tests/stress_concurrency.rs`.
+- Documented the continuous Issue → PR → Independent Reviewer Agent → Fix → Merge workflow in `docs/CONTRIBUTING_WORKFLOW.md`.
+- Verified **74 workspace tests passing** (default + `--no-default-features`), **`cargo audit`: 0 vulnerabilities** across 49 dependencies (1,555 RustSec advisories), and **`cargo +nightly miri test`: 22/22 passed** (`oryq-types`: 7, `oryq-document`: 15) with zero UB or leaks.
 
 ## [0.9.0-rc.1] - 2026-11-20
 
