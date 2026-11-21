@@ -18,7 +18,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 - Added crash-recovery, page-bitflip, and MVCC snapshot-pinning stress tests in `crates/oryq-engine/tests/crash_stress.rs` (15 repeated crash/torn-WAL-tail cycles, Page/slotted bitflip `Corruption` detection, and 4-reader + writer + pinned-snapshot WAL reset verification).
 - Added end-to-end concurrency, delta-compaction, and savepoint rollback storm test in `crates/oryq-core/tests/stress_concurrency.rs`.
 - Documented the continuous Issue → PR → Independent Reviewer Agent → Fix → Merge workflow in `docs/CONTRIBUTING_WORKFLOW.md`.
-- Verified **74 workspace tests passing** (default + `--no-default-features`), **`cargo audit`: 0 vulnerabilities** across 49 dependencies (1,555 RustSec advisories), and **`cargo +nightly miri test`: 22/22 passed** (`oryq-types`: 7, `oryq-document`: 15) with zero UB or leaks.
+- Verified **75 workspace tests passing** (default + `--no-default-features`), **`cargo audit`: 0 vulnerabilities** across 49 dependencies (1,555 RustSec advisories), and **`cargo +nightly miri test`: 24/24 passed** (`oryq-types`: 7, `oryq-document`: 16, `oryq-ffi`: 1 pure-memory safety test) with zero UB or leaks.
 
 ## [0.9.0-rc.1] - 2026-11-20
 

@@ -1,29 +1,49 @@
-//! End-to-end multi-threaded concurrency, delta-compaction, savepoint rollback storm,
-//! and integrity verification stress test for `oryq-core`.
+//! End-to-end multi-threaded concurrency, snapshot atomicity, delta-compaction,
+//! uncheckpointed WAL replay, deletes, savepoint rollback storm, and integrity verification
+//! stress test for `oryq-core`.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_core::{Database, DatabaseConfig, ErrorCategory, PageSize, SortOrder, Value};
 
-fn unique_temp_dir(label: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "oryqdb_core_stress_{label}_{}_{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "oryqdb_core_stress_{label}_{}_{seq}_{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[test]
 fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
-    let dir = unique_temp_dir("concurrency");
-    let db_path = dir.join("stress.oryq");
+    let dir = TempDir::new("concurrency");
+    let db_path = dir.path().join("stress.oryq");
     let cfg = DatabaseConfig {
         page_size: PageSize::Size4096,
         ..DatabaseConfig::default()
@@ -62,6 +82,22 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
                     .unwrap()
                     .collect_all();
                 assert_eq!(docs.len(), 20);
+
+                // Snapshot atomicity invariant: every account in one ReadTransaction must
+                // observe the EXACT same balance (no torn cross-transaction visibility).
+                let expected_bal = docs[0]
+                    .view()
+                    .get_field("balance")
+                    .unwrap()
+                    .to_owned_value();
+                for d in &docs {
+                    assert_eq!(
+                        d.view().get_field("balance").unwrap().to_owned_value(),
+                        expected_bal,
+                        "torn snapshot read detected across accounts"
+                    );
+                }
+
                 let agg = col
                     .aggregate_json(r#"[{"$group": {"_id": null, "cnt": {"$count": {}}}}]"#)
                     .unwrap();
@@ -73,7 +109,7 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
         }));
     }
 
-    // Writer executes 6 rounds of partial updates (triggering delta-chain + compaction)
+    // Writer executes 6 rounds of partial updates (triggering 4-delta chain + 5th-patch compaction)
     // interleaved with intentional unique-key violations that must roll back cleanly via savepoints.
     barrier.wait();
     for round in 1..=6i64 {
@@ -95,7 +131,7 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
             assert_eq!(dup_err.category(), ErrorCategory::DuplicateKey);
         }
         wtx.commit().unwrap();
-        if round % 2 == 0 {
+        if round == 2 || round == 4 {
             let _ = db.checkpoint(true).unwrap();
         }
     }
@@ -104,28 +140,41 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
         h.join().unwrap();
     }
 
-    // Verify full integrity and exact balances (100 + 6 * 10 = 160)
-    let ic = db.integrity_check().unwrap();
-    assert!(ic.ok, "integrity issues: {:?}", ic.issues);
-    assert_eq!(ic.documents_checked, 20);
+    // Round 7 (UNCHECKPOINTED before drop/reopen): partial delta updates + delete_by_id(20)
+    // so reopening from disk exercises uncheckpointed WAL replay of delta chains and deletes!
     {
-        let rtx = db.begin_read().unwrap();
-        let col = rtx.collection("accounts").unwrap();
-        for i in 1..=20i64 {
-            let doc = col.find_by_id(&Value::Int64(i)).unwrap().unwrap();
-            assert_eq!(
-                doc.view().get_field("balance").unwrap().to_owned_value(),
-                Value::Int64(160)
-            );
+        let mut wtx = db.begin_write().unwrap();
+        {
+            let mut col = wtx.collection("accounts").unwrap();
+            for i in 1..=19i64 {
+                assert!(col
+                    .update_by_id(&Value::Int64(i), r#"{"$inc": {"balance": 10}}"#)
+                    .unwrap());
+            }
+            assert!(col.delete_by_id(&Value::Int64(20)).unwrap());
         }
+        wtx.commit().unwrap();
     }
 
-    // Reopen from disk and re-verify
+    // Drop WITHOUT checkpointing, reopen from disk, and verify full WAL recovery + integrity!
     drop(db);
     let reopened = Database::open(&db_path, cfg).unwrap();
-    let ic2 = reopened.integrity_check().unwrap();
-    assert!(ic2.ok);
-    assert_eq!(ic2.documents_checked, 20);
+    let ic = reopened.integrity_check().unwrap();
+    assert!(
+        ic.ok,
+        "integrity issues after uncheckpointed WAL reopen: {:?}",
+        ic.issues
+    );
+    assert_eq!(ic.documents_checked, 19);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let rtx = reopened.begin_read().unwrap();
+    let col = rtx.collection("accounts").unwrap();
+    assert!(col.find_by_id(&Value::Int64(20)).unwrap().is_none());
+    for i in 1..=19i64 {
+        let doc = col.find_by_id(&Value::Int64(i)).unwrap().unwrap();
+        assert_eq!(
+            doc.view().get_field("balance").unwrap().to_owned_value(),
+            Value::Int64(170)
+        );
+    }
 }
