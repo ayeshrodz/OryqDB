@@ -9,8 +9,9 @@ use crate::api::read::{find_all_in_store, find_by_id_in_store};
 use crate::catalog::{list_collection_names, load_collection_entry};
 use crate::composition::CoreRegistries;
 use crate::write::{
-    create_collection_stmt, create_secondary_index_stmt, delete_by_id_stmt, drop_collection_stmt,
-    drop_index_stmt, insert_doc_stmt, replace_by_id_stmt, update_by_id_stmt,
+    create_collection_stmt, create_compound_index_stmt, create_secondary_index_stmt,
+    delete_by_id_stmt, drop_collection_stmt, drop_index_stmt, insert_doc_stmt, replace_by_id_stmt,
+    update_by_id_stmt,
 };
 
 const MODULE_ID: &str = "core";
@@ -182,6 +183,24 @@ impl WriteCollection<'_, '_> {
             name,
             path,
             order,
+            unique,
+            sparse,
+        )
+    }
+
+    pub fn create_compound_index(
+        &mut self,
+        fields: &[(&str, SortOrder)],
+        unique: bool,
+        sparse: bool,
+        name: Option<&str>,
+    ) -> Result<IndexDescriptor> {
+        create_compound_index_stmt(
+            self.tx,
+            self.registries,
+            &self.name,
+            name,
+            fields,
             unique,
             sparse,
         )

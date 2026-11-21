@@ -87,7 +87,15 @@ crate = "oryq-query"
 state = "active"
 owned = ["crates/oryq-query/"]
 production_dependencies = ["oryq-types", "oryq-document", "oryq-engine", "oryq-index"]
-contract_files = ["crates/oryq-query/src/lib.rs"]
+contract_files = [
+    "crates/oryq-query/src/lib.rs",
+    "crates/oryq-query/src/ports.rs",
+    "crates/oryq-query/src/ast.rs",
+    "crates/oryq-query/src/context.rs",
+    "crates/oryq-query/src/explain.rs",
+    "crates/oryq-query/src/pipeline.rs",
+    "crates/oryq-query/src/spill.rs",
+]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-query"]]
 
@@ -116,9 +124,14 @@ test_commands = [["cargo", "test", "-p", "oryq-core"]]
 id = "ffi"
 crate = "oryq-ffi"
 state = "active"
-owned = ["crates/oryq-ffi/"]
+owned = ["crates/oryq-ffi/", "include/"]
 production_dependencies = ["oryq-core"]
-contract_files = ["crates/oryq-ffi/src/lib.rs"]
+contract_files = [
+    "crates/oryq-ffi/src/lib.rs",
+    "crates/oryq-ffi/src/api.rs",
+    "crates/oryq-ffi/src/status.rs",
+    "include/oryq.h",
+]
 optional = false
 test_commands = [["cargo", "test", "-p", "oryq-ffi"]]
 

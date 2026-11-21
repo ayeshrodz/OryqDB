@@ -3,10 +3,18 @@
 use oryq_document::{encode_document, DocumentBuf, Value};
 use oryq_engine::{BTree, PageStore, ReadTxn, TreeKind};
 use oryq_index::{encode_record_id, lookup_primary_id, IndexDescriptor};
+use oryq_query::{
+    execute_count, execute_find, execute_pipeline_json, explain_analyze, parse_filter_json,
+    parse_projection_json, parse_sort_json, ExplainAnalyze, FilterExpr, FindOptions, QueryContext,
+    QueryCursor,
+};
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId};
 
+use crate::adapters::CoreQuerySource;
 use crate::catalog::{list_collection_names, load_collection_entry, CatalogEntry};
 use crate::write::decode_collection_record;
+
+const DEFAULT_QUERY_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 const MODULE_ID: &str = "core";
 
@@ -74,6 +82,64 @@ impl ReadCollection<'_, '_> {
 
     pub fn list_indexes(&self) -> &[IndexDescriptor] {
         &self.entry.indexes
+    }
+
+    /// Executes a structured [`FindOptions`] query within this read snapshot.
+    pub fn find(&self, options: &FindOptions) -> Result<QueryCursor> {
+        let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
+        let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
+        execute_find(&source, &self.entry.name, options, &ctx)
+    }
+
+    /// Convenience JSON wrapper for `find()` supporting optional filter, projection, sort, skip, and limit.
+    pub fn find_json(
+        &self,
+        filter_json: Option<&str>,
+        projection_json: Option<&str>,
+        sort_json: Option<&str>,
+        skip: u64,
+        limit: Option<u64>,
+    ) -> Result<QueryCursor> {
+        let filter = match filter_json {
+            Some(s) if !s.trim().is_empty() => Some(parse_filter_json(s)?),
+            _ => None,
+        };
+        let projection = match projection_json {
+            Some(s) if !s.trim().is_empty() => Some(parse_projection_json(s)?),
+            _ => None,
+        };
+        let sort = match sort_json {
+            Some(s) if !s.trim().is_empty() => Some(parse_sort_json(s)?),
+            _ => None,
+        };
+        self.find(&FindOptions {
+            filter,
+            projection,
+            sort,
+            skip,
+            limit,
+        })
+    }
+
+    /// Counts documents matching `filter` within this read snapshot.
+    pub fn count_matching(&self, filter: Option<&FilterExpr>) -> Result<u64> {
+        let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
+        let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
+        execute_count(&source, &self.entry.name, filter, &ctx)
+    }
+
+    /// Executes `options` and returns the chosen plan alongside execution counters.
+    pub fn explain_analyze(&self, options: &FindOptions) -> Result<ExplainAnalyze> {
+        let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
+        let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
+        explain_analyze(&source, &self.entry.name, options, &ctx)
+    }
+
+    /// Executes a JSON aggregation pipeline within this pinned read snapshot.
+    pub fn aggregate_json(&self, pipeline_json: &str) -> Result<Vec<DocumentBuf>> {
+        let source = CoreQuerySource::new(self.tx, self.tx.catalog_root_page_id());
+        let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
+        execute_pipeline_json(&source, &self.entry.name, pipeline_json, &ctx)
     }
 }
 

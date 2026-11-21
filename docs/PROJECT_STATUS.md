@@ -1,42 +1,46 @@
 # OryqDB Project Status
 
-* **Last Updated:** 2026-11-19
+* **Last Updated:** 2026-11-20
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: 4–5 — Secondary indexes & streaming query engine (`W09` M4 complete / `v0.4.0-alpha.1`)
-STATUS: In Progress — `W01–W09` verified (M1–M4 complete: persistent engine, document codec/updates, primary & secondary indexes, core CRUD/DDL); `W10` (`oryq-query` filter AST, planner & cursors) next
+MILESTONE: 10 — Baseline Format Freeze & Release Candidate (`W00–W16` complete / `v0.9.0-rc.1`)
+STATUS: Complete (Baseline RC1) — All 8 workspace crates (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) implemented and verified.
 
 IMPLEMENTED:
-- Completed `W00` (`v0.0.2`): converged EGM design/modular specs and pinned LiteDB source audit (`dev` @ `b3c4406231908c6ca29f6d4b2769aa08351d6fc2`).
-- Completed `W01` (`v0.1.0-alpha.1`): eight-crate Cargo workspace, `oryq-types`, `architecture/*.toml`, `xtask architecture`/`modules`, and multi-OS GitHub Actions CI.
-- Completed `W02` & `W06` (`oryq-document`): `OryqDoc` v1 codec/views/comparator/JSON, `UpdateRegistry` (`$set`/`$unset`/`$inc`/`$push`/`$pull`), state-normalized physical patches, bloom resolution, and pure `compact_document`.
-- Completed `W03–W05` (`v0.1.0` / `v0.2.0` — M1 & M2 Complete, `oryq-engine`): VFS/PAL, persistent binary codecs, `Pager`/`PageAllocator`/`FreelistManager`/`OverflowStore`, `PageCache`/`VersionIndex`, byte `BTree`/`BTreeCursor`, `SingleProcessCoordinator`, WAL scan/replay, checkpoint/reset/seal, and `StorageEngine`/`ReadTxn`/`WriteTxn` with nested `SavepointId`.
-- Completed `W07` & `W09` (`v0.3.0-alpha.2` / `v0.4.0-alpha.1`, `oryq-index`): exact memcomparable `key_codec`, `IndexDescriptor`, `IndexProvider`, `IndexProviderRegistry`, `IndexReadContext`/`IndexWriteContext`, `PrimaryIndexProvider`, and `SecondaryIndexProvider` (single/nested extraction, `unique`/`sparse`, differential `on_update`, `Asc`/`Desc` equality & range scans).
-- Completed `W08` (`v0.3.0` — M3 Complete) + `W09` DDL (`oryq-core`): `Database`, `DatabaseConfig`, `ReadTransaction`/`ReadCollection`, `WriteTransaction`/`WriteCollection` (including `create_index`/`drop_index`/`list_indexes`), frozen v1 catalog, atomic statement savepoints, `CoreRegistries`, and `DocumentRecordCompactor`.
-- Remaining 3 domain/adapter crates (`oryq-query`, `oryq-ffi`, `oryq-cli`) are minimal compiling scaffolds (scheduled for `W10`, `W11`, `W15`).
+- `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
+- `W06–W09` (`oryq-document`, `oryq-index`, `oryq-core`): Update operators, state-normalized physical patches, memcomparable key codec, primary & secondary indexes, frozen v1 catalog, atomic statement orchestration.
+- `W10` (`v0.4.0`, `oryq-query` & `oryq-core`): Filter/projection/sort AST & JSON parser, exact evaluator, rule-based planner with sparse-index safety, `QueryCursor`, `find`/`count`/`explain_analyze`.
+- `W11` (`v0.5.0`, `oryq-ffi` & `include/oryq.h`): Panic-safe C ABI (`catch_unwind`), stable `OryqStatus` codes, thread-local diagnostics, child-tracked opaque handles, JSON CRUD/find & zero-copy cursor accessors.
+- `W12` (`v0.6.0`, `oryq-core`): State-normalized delta-chain records (`MAX_DELTA_CHAIN = 4`) with automatic `RecordCompactor` compaction on 5th patch + release benchmark suite (`docs/BENCHMARK_RESULTS.md`).
+- `W13a` (`v0.7.0-alpha.1`, `oryq-index` & `oryq-core`): Compound (`1..=16` fields, `R=16` prefix compression) & multi-key array indexes with parallel-array prohibition & dedup.
+- `W13b` (`v0.7.0`, `oryq-query` & `oryq-core`): Spillable aggregation pipelines (`$match`, `$project`, `$sort` w/ RAII `SpillManager`, `$skip`, `$limit`, `$unwind`, `$lookup`, `$group`).
+- `W14` (`v0.8.0-alpha.1`, `oryq-engine` & `oryq-core`): Read-only forensic `inspect_{page,wal,locks}`, `Database::integrity_check`, and sealed standalone online `Database::backup_to`.
+- `W15` (`v0.8.0`, `oryq-cli`): Zero-extra-dependency `oryq` CLI utility (`info`, `collections`, CRUD, `find`, `aggregate`, `checkpoint`, `backup`, `integrity-check`, `inspect`).
+- `W16` (`v0.9.0-rc.1`): M10 baseline format freeze, full 8-crate module/architecture/doc verification, and release binary verification.
 
 VERIFIED:
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings, MSRV 1.80.0 clean).
-- `cargo test --workspace` and `--no-default-features`: 55 tests passed (`oryq-types`: 7; `oryq-document`: 15; `oryq-engine`: 19; `oryq-index`: 4; `oryq-core`: 4; `xtask`: 6).
-- `cargo run -p xtask -- architecture --base origin/main`, `xtask modules types`, `document`, `engine`, `index`, and `core`: passed.
+- `cargo test --workspace` and `--no-default-features`: 69 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 15; `oryq-engine`: 19; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 7; `oryq-ffi`: 2; `oryq-cli`: 1; `xtask`: 6).
+- `cargo run -p xtask -- modules` for all 8 crates (`types`, `document`, `engine`, `index`, `query`, `core`, `ffi`, `cli`) and `xtask architecture --base origin/main`: passed.
+- Native C99 FFI smoke test (`cc -std=c99 -Wall -Wextra -Werror -Iinclude ... -loryq`): passed.
 - `python3 tools/validate_design_docs.py`: passed.
+- `cargo build --release -p oryq-cli -p oryq-ffi`: `oryq` (1.6 MB), `liboryq.so` (1.5 MB), `liboryq.a` (30 MB).
 
-TEST RESULTS:
-- Linux `x86_64` (`rustc 1.99.1`): 55 passed, 0 failed.
-- Multi-OS CI matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`) configured in `.github/workflows/ci.yml` (`actions/checkout@v6`).
+PERFORMANCE (Linux x86_64, 8 KiB pages, SyncMode::Normal):
+- Batched Insert (2,000 docs + 1 secondary index): 151.53 ms (13,199 docs/sec)
+- Primary _id Point Lookup (2,000 lookups): 13.30 ms (150,359 ops/sec)
+- Partial Delta Updates (1,200 ops, 6 rounds w/ compaction): 66.22 ms (18,121 ops/sec)
+- Secondary Range Scan (100 scans x ~200 rows): 140.47 ms (712 scans/sec)
+- WAL Checkpoint + Reset (117 pages copied): 0.60 ms
 
 KNOWN ISSUES:
-- Query engine (`W10`), C ABI (`W11`), delta compaction wiring (`W12`), compound/multikey indexes & aggregation (`W13a–W13b`), and CLI (`W15`) are not yet implemented.
-- Shared-process synchronization (`X02`) and optional search (`X01`) remain post-baseline extensions.
-
-PERFORMANCE:
-- No measured OryqDB database benchmarks yet (scheduled for `W12` / M7).
+- Post-baseline extensions `X01` (`oryq-fts` / `oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (E3 batching) remain planned for `0.10.x`.
 
 NEXT STEPS:
-1. Implement `W10` (`v0.4.0` / M4–M5 Complete): `oryq-query` filter AST, predicate registry, access planner, streaming lending cursors, `explain_analyze()`, and `oryq-core` `find`/`count` integration.
-2. Implement `W11` (`v0.5.0` / M6 Complete): `oryq-ffi` panic-safe C ABI and `include/oryq.h`.
+1. Merge `v0.9.0-rc.1` PR to trigger automated multi-OS GitHub Pre-Release packaging (`.github/workflows/release.yml`).
+2. Begin `0.10.x` post-baseline extensions (`X01–X03`) or `1.0.0` GA stabilization.
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)

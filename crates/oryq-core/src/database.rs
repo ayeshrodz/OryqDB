@@ -1,18 +1,27 @@
 //! Shareable [`Database`] handle coordinating `oryq-engine` and immutable `CoreRegistries`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use oryq_engine::{CheckpointOutcome, OsVfs, StorageEngine, StorageIo};
+use oryq_engine::{
+    CheckpointOutcome, LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine,
+    StorageIo, WalInspectionReport,
+};
 use oryq_types::{Result, TxId};
 
+use crate::admin::{
+    inspect_locks, inspect_page, inspect_wal, run_integrity_check, run_online_backup, BackupReport,
+    IntegrityReport,
+};
 use crate::api::{ReadTransaction, WriteTransaction};
 use crate::composition::CoreRegistries;
 use crate::config::DatabaseConfig;
 
 #[derive(Debug)]
 struct DatabaseInner {
+    path: PathBuf,
+    page_size: PageSize,
     engine: StorageEngine,
     registries: CoreRegistries,
     max_document_bytes: usize,
@@ -42,6 +51,8 @@ impl Database {
         let registries = CoreRegistries::default_v1();
         Ok(Self {
             inner: Arc::new(DatabaseInner {
+                path: path.as_ref().to_path_buf(),
+                page_size: config.page_size,
                 engine,
                 registries,
                 max_document_bytes: config.max_document_bytes,
@@ -82,6 +93,35 @@ impl Database {
 
     pub fn latest_committed_tx_id(&self) -> Result<TxId> {
         self.inner.engine.latest_committed_tx_id()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    /// Verifies snapshot-consistent collection & index integrity across the database.
+    pub fn integrity_check(&self) -> Result<IntegrityReport> {
+        run_integrity_check(self)
+    }
+
+    /// Creates a standalone, sealed online backup of this database at `dest`.
+    pub fn backup_to(&self, dest: impl AsRef<Path>) -> Result<BackupReport> {
+        run_online_backup(self, &self.inner.path, self.inner.page_size, dest.as_ref())
+    }
+
+    /// Read-only forensic inspection of a single physical page without mutating or recovering.
+    pub fn inspect_page(path: impl AsRef<Path>, page_id: u64) -> Result<PageInspectionReport> {
+        inspect_page(path.as_ref(), page_id)
+    }
+
+    /// Read-only forensic inspection of the companion `.wal` file without mutating or replaying.
+    pub fn inspect_wal(path: impl AsRef<Path>) -> Result<WalInspectionReport> {
+        inspect_wal(path.as_ref())
+    }
+
+    /// Non-mutating OS exclusive-lock probe for `path`.
+    pub fn inspect_locks(path: impl AsRef<Path>) -> Result<LockInspectionReport> {
+        inspect_locks(path.as_ref())
     }
 }
 

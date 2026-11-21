@@ -88,5 +88,14 @@ jobs:
       - name: Run module check for index (oryq-index)
         run: cargo run -p xtask -- modules index
 
+      - name: Run module check for query (oryq-query)
+        run: cargo run -p xtask -- modules query
+
       - name: Run module check for core (oryq-core)
         run: cargo run -p xtask -- modules core
+
+      - name: Run module check for ffi (oryq-ffi)
+        run: cargo run -p xtask -- modules ffi
+
+      - name: Run module check for cli (oryq-cli)
+        run: cargo run -p xtask -- modules cli

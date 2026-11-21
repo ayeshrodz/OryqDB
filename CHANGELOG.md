@@ -7,7 +7,56 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.4.0` (`W10` / M4–M5 Complete): `oryq-query` filter AST, access planner, lending cursors & `explain_analyze()`.
+- `0.10.x` (`X01–X03` / Post-baseline E1–E3): Optional `oryq-fts` / `oryq-vec` search crates, `.oryq-shm` multi-process mode, and E3 batching.
+- `1.0.0`: First public stable release after extended soak, fuzzing, and multi-OS validation.
+
+## [0.9.0-rc.1] - 2026-11-20
+
+### Added (`W16` / Milestone 10 — Baseline Format Freeze & Release Candidate)
+- Completed full 8-crate baseline verification across all crates (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) + `xtask`:
+  - **69 workspace tests passing** under both default features and `--no-default-features` (`oryq-types`: 7, `oryq-document`: 15, `oryq-engine`: 19, `oryq-index`: 6, `oryq-query`: 6, `oryq-core`: 7, `oryq-ffi`: 2, `oryq-cli`: 1, `xtask`: 6).
+  - All 8 `xtask modules` owner + downstream consumer checks and `xtask architecture --base origin/main` (`CC-0010`–`CC-0016`) passing.
+  - `python3 tools/validate_design_docs.py` passing (26,809 rational ordering checks, 100 prefix-bound checks, C/C++ header syntax checks).
+  - Linux `x86_64` release artifacts built cleanly: `oryq` (`1.6 MB`), `liboryq.so` (`1.5 MB`), `liboryq.a` (`30 MB`).
+
+## [0.8.0] - 2026-11-20
+
+### Added (`W14–W15` / M8–M9 — Integrity Check, Read-Only Inspection, Sealed Online Backup & `oryq` CLI)
+- **`W14` (`oryq-engine` & `oryq-core`):**
+  - Implemented non-mutating, read-only forensic inspection in `oryq-engine::inspect` (`inspect_page_readonly`, `inspect_wal_readonly`, `inspect_locks_readonly`).
+  - Implemented `Database::integrity_check`, snapshot-consistent standalone sealed `Database::backup_to` (with live-source rejection, atomic publish, and temp cleanup), and `Database::inspect_{page,wal,locks}` in `oryq-core::admin`.
+  - Recorded `CC-0015` and added `crates/oryq-core/tests/backup_integrity.rs`.
+- **`W15` (`oryq-cli`):**
+  - Implemented zero-extra-dependency `oryq` CLI utility (`info`, `collections`, `create-collection`, `drop-collection`, `insert`, `find`, `update`, `delete`, `aggregate`, `checkpoint`, `backup`, `integrity-check`, `inspect <page|wal|locks>`).
+  - Added end-to-end CLI binary test (`crates/oryq-cli/tests/commands.rs`), recorded `CC-0016`, and added `xtask modules cli` to CI.
+
+## [0.7.0] - 2026-11-20
+
+### Added (`W13a–W13b` / M8 Core — Compound & Multi-Key Indexes + Spillable Aggregation Pipelines)
+- **`W13a` (`oryq-index` & `oryq-core`):**
+  - Implemented `CompoundIndexProvider` (`"index.compound"`) supporting up to 16 mixed `Asc`/`Desc` fields, `R=16` prefix-restart compression codec (`encode_prefix_block` / `decode_prefix_block`), multi-key array extraction with within-document deduplication, parallel-array prohibition, differential array updates, and `scan_compound_prefix_eq`.
+  - Exposed `WriteCollection::create_compound_index` on `oryq-core`, added `crates/oryq-index/tests/compound_multikey.rs`, and recorded `CC-0013`.
+- **`W13b` (`oryq-query` & `oryq-core`):**
+  - Implemented spillable aggregation pipelines (`$match`, `$project`, `$sort`, `$skip`, `$limit`, `$unwind`, `$lookup`, `$group` with `$sum`/`$avg`/`$min`/`$max`/`$count`/`$push`/`$addToSet`) with `SpillManager` RAII temp-file cleanup and `BudgetHandle` / `CancellationToken` enforcement.
+  - Exposed `ReadCollection::aggregate_json` on `oryq-core`, added `crates/oryq-query/tests/pipeline.rs`, and recorded `CC-0014`.
+
+## [0.6.0] - 2026-11-20
+
+### Added (`W12` / M7 — Delta-Chain Compaction & Release Benchmark Suite)
+- Integrated state-normalized physical delta-patch chaining (`RECORD_KIND_DELTA_CHAIN = 0x01`, `MAX_DELTA_CHAIN = 4`) with automatic compaction via `DocumentRecordCompactor` (`oryq_engine::RecordCompactor`) on the 5th patch inside `oryq-core::write::statement`.
+- Added crash/reopen oracle test (`crates/oryq-core/tests/delta_compaction.rs`) and reproducible release benchmark suite (`crates/oryq-core/examples/bench_suite.rs`, measured results in `docs/BENCHMARK_RESULTS.md`).
+
+## [0.5.0] - 2026-11-20
+
+### Added (`W11` / M6 — Panic-Safe C ABI & `include/oryq.h`)
+- Implemented `oryq-ffi` (`cdylib` + `staticlib` + `rlib`) with `catch_unwind` panic guards (`guard.rs`), stable `#[repr(i32)] OryqStatus` codes (`status.rs`), thread-local `oryq_last_error_message()` (`diagnostics.rs`), child-tracked opaque handles rejecting close-while-busy (`handles.rs`), JSON CRUD/query APIs, and zero-copy cursor accessors (`oryq_cursor_get_i64`).
+- Authored C99/C++11 header `include/oryq.h`, verified with Rust FFI tests (`crates/oryq-ffi/tests/c_api.rs`) and native `cc -std=c99 -Wall -Wextra -Werror` smoke compilation, recorded `CC-0011`, and added `xtask modules ffi` to CI.
+
+## [0.4.0] - 2026-11-20
+
+### Added (`W10` / M4–M5 Complete — `oryq-query` Filter AST, Planner, Cursors & Core `find`)
+- Implemented `oryq-query` (`#![forbid(unsafe_code)]`): `QuerySource` port, `QueryContext` (budget + cancellation + explain counters), filter/projection/sort AST & JSON parser, exact semantic evaluator (`eval_filter`, `compare_owned_values`), rule-based planner (`plan_find` with sparse-index completeness safety), `QueryCursor`, `execute_find`, `execute_count`, and `explain_analyze`.
+- Wired `CoreQuerySource` and `ReadCollection::{find, find_json, count_matching, explain_analyze}` into `oryq-core`, added tests (`filters.rs`, `planner.rs`, `vertical_slice.rs`), recorded `CC-0010`, and added `xtask modules query` to CI.
 
 ## [0.4.0-alpha.1] - 2026-11-19
 
