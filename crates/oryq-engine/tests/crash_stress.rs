@@ -115,15 +115,15 @@ fn repeated_crash_truncated_wal_tail_and_midframe_truncation_preserve_committed_
                 wal_path.exists(),
                 "WAL must exist on non-checkpoint cycle {cycle}"
             );
-            // Alternate between garbage tail append and simulated partial/mid-frame tail truncation
+            // Open with read+write (not append-only) so `set_len` works on Windows too.
             let mut f = OpenOptions::new()
                 .read(true)
-                .append(true)
+                .write(true)
                 .open(&wal_path)
                 .unwrap();
+            let before_len = f.seek(SeekFrom::End(0)).unwrap();
             if cycle % 2 == 0 {
                 // Simulate a torn mid-header write (< WAL_FRAME_HEADER_SIZE = 40 bytes)
-                let before_len = f.metadata().unwrap().len();
                 f.write_all(&[0x5A; 39]).unwrap();
                 f.sync_all().unwrap();
                 f.set_len(before_len + 23).unwrap();
