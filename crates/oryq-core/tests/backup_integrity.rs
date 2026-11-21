@@ -66,24 +66,31 @@ fn integrity_check_sealed_online_backup_and_readonly_inspection() {
         assert_eq!(report.documents_copied, 2);
         assert!(report.sealed);
 
-        // 4. Read-only inspection while live DB is open
-        let p0 = Database::inspect_page(&src_path, 0).unwrap();
-        assert_eq!(p0.page_type, "StorageHeader");
-        assert!(p0.checksum_valid);
-        assert_eq!(p0.page_size, 4096);
-
-        let wal = Database::inspect_wal(&src_path).unwrap();
-        assert!(wal.wal_exists);
-        assert!(wal.committed_txns >= 1);
-
+        // 4. Non-mutating lock probe while live DB is open
         let locks_while_open = Database::inspect_locks(&src_path).unwrap();
         assert!(locks_while_open.file_exists);
         assert!(!locks_while_open.exclusive_lock_available);
+
+        // On Windows, mandatory locks reject reads from separate handles with LockedByProcess.
+        #[cfg(windows)]
+        {
+            let err = Database::inspect_page(&src_path, 0).unwrap_err();
+            assert_eq!(err.category(), ErrorCategory::LockedByProcess);
+        }
     }
 
-    // After closing live DB, exclusive lock is available again
+    // After closing live DB, exclusive lock is available and read-only page/WAL inspection succeeds on all OSes
     let locks_after_close = Database::inspect_locks(&src_path).unwrap();
     assert!(locks_after_close.exclusive_lock_available);
+
+    let p0 = Database::inspect_page(&src_path, 0).unwrap();
+    assert_eq!(p0.page_type, "StorageHeader");
+    assert!(p0.checksum_valid);
+    assert_eq!(p0.page_size, 4096);
+
+    let wal = Database::inspect_wal(&src_path).unwrap();
+    assert!(wal.wal_exists);
+    assert!(wal.committed_txns >= 1);
 
     // Backup opens cleanly standalone (without WAL!) and contains exact data + indexes
     {

@@ -50,6 +50,25 @@ pub struct LockInspectionReport {
     pub exclusive_lock_available: bool,
 }
 
+fn map_probe_read_err(err: std::io::Error, op: &'static str, context: &str) -> ErrorEnvelope {
+    // Windows mandatory locks (ERROR_LOCK_VIOLATION = 33) block reads on separate file handles.
+    if err.raw_os_error() == Some(33) || err.kind() == std::io::ErrorKind::PermissionDenied {
+        return ErrorEnvelope::new(
+            ErrorCategory::LockedByProcess,
+            MODULE_ID,
+            op,
+            format!("{context}: file is exclusively locked by another handle/process: {err}"),
+        )
+        .with_source(err);
+    }
+    let cat = if err.kind() == std::io::ErrorKind::UnexpectedEof {
+        ErrorCategory::Corruption
+    } else {
+        ErrorCategory::Io
+    };
+    ErrorEnvelope::new(cat, MODULE_ID, op, format!("{context}: {err}")).with_source(err)
+}
+
 /// Inspects a single page (`page_id`) of `db_path` read-only without recovering or mutating.
 pub fn inspect_page_readonly(db_path: &Path, page_id: u64) -> Result<PageInspectionReport> {
     let mut file = File::open(db_path).map_err(|err| {
@@ -64,13 +83,11 @@ pub fn inspect_page_readonly(db_path: &Path, page_id: u64) -> Result<PageInspect
 
     let mut probe = [0u8; 512];
     file.read_exact(&mut probe).map_err(|err| {
-        ErrorEnvelope::new(
-            ErrorCategory::Corruption,
-            MODULE_ID,
+        map_probe_read_err(
+            err,
             "inspect::inspect_page_readonly",
-            format!("database file shorter than 512-byte Page 0 probe: {err}"),
+            "failed reading 512-byte Page 0 probe",
         )
-        .with_source(err)
     })?;
     let (_, active_hdr): (_, StorageHeader) = select_header_slots(&probe)?;
     let page_size = active_hdr.page_size.bytes() as u32;
@@ -203,13 +220,11 @@ pub fn inspect_wal_readonly(db_path: &Path) -> Result<WalInspectionReport> {
     })?;
     let mut probe = [0u8; 512];
     db_file.read_exact(&mut probe).map_err(|err| {
-        ErrorEnvelope::new(
-            ErrorCategory::Corruption,
-            MODULE_ID,
+        map_probe_read_err(
+            err,
             "inspect::inspect_wal_readonly",
-            format!("failed reading Page 0 probe: {err}"),
+            "failed reading Page 0 probe",
         )
-        .with_source(err)
     })?;
     let (_, active_hdr) = select_header_slots(&probe)?;
     let vfs = OsVfs::new();
