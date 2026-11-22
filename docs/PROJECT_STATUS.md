@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: E1b — Optional Vector Similarity Search Provider (`v0.10.1` / Issue #16 / `X01b`)
-STATUS: Active `0.10.x` Extensions — All 8 baseline crates + optional `oryq-fts` (`--features fts`) and `oryq-vec` (`--features vec`) index providers implemented and verified.
+MILESTONE: E2 — Multi-Process Shared-Memory Coordination (`v0.10.2` / Issue #17 / `X02`)
+STATUS: Active `0.10.x` Extensions — All 8 baseline crates + optional `oryq-fts`, `oryq-vec`, and multi-process `.oryq-shm` coordination (`SharedProcessCoordinator`) implemented and verified.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
@@ -38,11 +38,11 @@ PERFORMANCE (Linux x86_64, 8 KiB pages, SyncMode::Normal):
 - WAL Checkpoint + Reset (117 pages copied): 0.60 ms
 
 KNOWN ISSUES:
-- Post-baseline extensions `X02` (`.oryq-shm` multi-process) and `X03` (`commit_batch`) remain planned for `0.10.2–0.10.3`.
+- Post-baseline extension `X03` (`commit_batch`) remains planned for `0.10.3`.
 
 NEXT STEPS:
-1. Merge `v0.10.1` (#16 / `oryq-vec`) after independent reviewer sign-off and green multi-OS CI.
-2. Continue `v0.10.x` extensions: #17 (`.oryq-shm` / `X02`) → #18 (`commit_batch` / `X03`) → #19 (`v0.11.0` bindings & guides).
+1. Merge `v0.10.2` (#17 / `.oryq-shm`) after independent reviewer sign-off and green multi-OS CI.
+2. Continue roadmap: #18 (`commit_batch` / `X03` -> `v0.10.3`) → #19 (`v0.11.0` official language bindings & production guides).
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)
