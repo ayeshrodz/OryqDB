@@ -81,15 +81,21 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
                     .find_json(Some(r#"{"balance": {"$gte": 100}}"#), None, None, 0, None)
                     .unwrap()
                     .collect_all();
-                assert_eq!(docs.len(), 20);
+                // Accounts 1..=20 initially; account 20 is deleted concurrently in round 6.
+                assert!(docs.len() == 20 || docs.len() == 19);
 
                 // Snapshot atomicity invariant: every account in one ReadTransaction must
-                // observe the EXACT same balance (no torn cross-transaction visibility).
+                // observe the EXACT same balance (a valid multiple of 10 above 100).
                 let expected_bal = docs[0]
                     .view()
                     .get_field("balance")
                     .unwrap()
                     .to_owned_value();
+                if let Value::Int64(b) = expected_bal {
+                    assert!(b >= 100 && (b - 100) % 10 == 0, "invalid balance {b}");
+                } else {
+                    panic!("expected Int64 balance, got {expected_bal:?}");
+                }
                 for d in &docs {
                     assert_eq!(
                         d.view().get_field("balance").unwrap().to_owned_value(),
@@ -103,23 +109,28 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
                     .unwrap();
                 assert_eq!(
                     agg[0].view().get_field("cnt").unwrap().to_owned_value(),
-                    Value::Int64(20)
+                    Value::Int64(docs.len() as i64)
                 );
             }
         }));
     }
 
     // Writer executes 6 rounds of partial updates (triggering 4-delta chain + 5th-patch compaction)
-    // interleaved with intentional unique-key violations that must roll back cleanly via savepoints.
+    // interleaved with intentional unique-key violations (savepoint rollbacks) and a concurrent delete.
     barrier.wait();
     for round in 1..=6i64 {
         let mut wtx = db.begin_write().unwrap();
         {
             let mut col = wtx.collection("accounts").unwrap();
-            for i in 1..=20i64 {
+            let upper = if round < 6 { 20 } else { 19 };
+            for i in 1..=upper {
                 assert!(col
                     .update_by_id(&Value::Int64(i), r#"{"$inc": {"balance": 10}}"#)
                     .unwrap());
+            }
+            if round == 6 {
+                // Delete account 20 concurrently while readers are active!
+                assert!(col.delete_by_id(&Value::Int64(20)).unwrap());
             }
             // Intentional duplicate unique email violation — statement savepoint must roll back!
             let dup_err = col
@@ -140,8 +151,8 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
         h.join().unwrap();
     }
 
-    // Round 7 (UNCHECKPOINTED before drop/reopen): partial delta updates + delete_by_id(20)
-    // so reopening from disk exercises uncheckpointed WAL replay of delta chains and deletes!
+    // Round 7 (UNCHECKPOINTED before drop/reopen): partial delta updates on remaining 19 accounts
+    // so reopening from disk exercises uncheckpointed WAL replay of delta chains and the round-6 delete!
     {
         let mut wtx = db.begin_write().unwrap();
         {
@@ -151,7 +162,6 @@ fn concurrent_readers_writers_delta_compaction_and_savepoint_rollback_storm() {
                     .update_by_id(&Value::Int64(i), r#"{"$inc": {"balance": 10}}"#)
                     .unwrap());
             }
-            assert!(col.delete_by_id(&Value::Int64(20)).unwrap());
         }
         wtx.commit().unwrap();
     }
