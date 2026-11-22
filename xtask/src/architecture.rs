@@ -740,6 +740,7 @@ mod tests {
     fn self_test_rejects_dangling_planned_optional_dependency() {
         let (mut m, c, n, mut pkgs) = sample_manifests();
         m.modules.iter_mut().find(|x| x.id == "vec").unwrap().state = ModuleState::Planned;
+        m.modules.iter_mut().find(|x| x.id == "vec").unwrap().state = ModuleState::Planned;
         m.modules
             .iter_mut()
             .find(|x| x.id == "core")

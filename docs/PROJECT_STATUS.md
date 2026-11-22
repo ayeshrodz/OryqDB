@@ -38,7 +38,7 @@ PERFORMANCE (Linux x86_64, 8 KiB pages, SyncMode::Normal):
 - WAL Checkpoint + Reset (117 pages copied): 0.60 ms
 
 KNOWN ISSUES:
-- Post-baseline extensions `X01` (`oryq-fts` / `oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (E3 batching) remain planned for `0.10.x`.
+- Post-baseline extensions `X01b` (`oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (`commit_batch`) remain planned for `0.10.1–0.10.3`.
 
 NEXT STEPS:
 1. Merge `v0.10.0` (#15 / `oryq-fts`) after independent reviewer sign-off and green multi-OS CI.

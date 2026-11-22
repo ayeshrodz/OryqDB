@@ -159,3 +159,95 @@ fn fts_provider_bm25_ranking_update_delete_and_drop() {
         tx.commit().unwrap();
     }
 }
+
+#[test]
+fn fts_provider_handles_empty_transitions_limits_duplicate_terms_and_string_arrays() {
+    let dir = TempDir::new("edge_cases");
+    let db_path = dir.path().join("fts_edge.oryq");
+    let vfs = Arc::new(OsVfs::new());
+    let engine = StorageEngine::open(
+        vfs,
+        &db_path,
+        EngineConfig {
+            page_size: PageSize::Size4096,
+            ..EngineConfig::default()
+        },
+        [0xE1; 16],
+    )
+    .unwrap();
+
+    let provider = FtsIndexProvider;
+    let mut desc = fts_index_descriptor(
+        IndexId::new(11).unwrap(),
+        "tags_fts".to_owned(),
+        vec![FieldPath::parse("tags").unwrap()],
+        PageId::new(1),
+    );
+
+    let r1 = RecordId::new(1).unwrap();
+    let r2 = RecordId::new(2).unwrap();
+    let (d1, _) = from_json_str(
+        r#"{"_id": 1, "tags": ["rust", "embedded", "storage"]}"#,
+        None,
+    )
+    .unwrap();
+    let (d2, _) = from_json_str(r#"{"_id": 2, "tags": ["rust", "cli"]}"#, None).unwrap();
+    let (d1_empty, _) = from_json_str(r#"{"_id": 1, "tags": []}"#, None).unwrap();
+    let (d1_restored, _) = from_json_str(r#"{"_id": 1, "tags": ["rust", "bm25"]}"#, None).unwrap();
+
+    {
+        let mut tx = engine.begin_write().unwrap();
+        desc.root_page_id = provider.create_empty(&mut tx, &desc).unwrap();
+        desc.root_page_id = provider
+            .on_insert(&mut tx, &desc, r1, &d1.view())
+            .unwrap()
+            .new_root_page_id;
+        desc.root_page_id = provider
+            .on_insert(&mut tx, &desc, r2, &d2.view())
+            .unwrap()
+            .new_root_page_id;
+        tx.commit().unwrap();
+    }
+
+    // Duplicate query terms & limit truncation (limit = 0, limit = 1)
+    {
+        let rtx = engine.begin_read().unwrap();
+        let single = search_fts(&rtx, &desc, "rust", 10).unwrap();
+        let dup = search_fts(&rtx, &desc, "rust rust RUST", 10).unwrap();
+        assert_eq!(single, dup);
+        assert_eq!(search_fts(&rtx, &desc, "rust", 1).unwrap().len(), 1);
+        assert!(search_fts(&rtx, &desc, "rust", 0).unwrap().is_empty());
+    }
+
+    // Non-empty -> empty transition removes doc from index & decrements stats
+    {
+        let mut tx = engine.begin_write().unwrap();
+        desc.root_page_id = provider
+            .on_update(&mut tx, &desc, r1, &d1.view(), &d1_empty.view())
+            .unwrap()
+            .new_root_page_id;
+        tx.commit().unwrap();
+    }
+    {
+        let rtx = engine.begin_read().unwrap();
+        let hits = search_fts(&rtx, &desc, "rust", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, r2);
+    }
+
+    // Empty -> non-empty transition re-indexes doc cleanly
+    {
+        let mut tx = engine.begin_write().unwrap();
+        desc.root_page_id = provider
+            .on_update(&mut tx, &desc, r1, &d1_empty.view(), &d1_restored.view())
+            .unwrap()
+            .new_root_page_id;
+        tx.commit().unwrap();
+    }
+    {
+        let rtx = engine.begin_read().unwrap();
+        let hits = search_fts(&rtx, &desc, "bm25", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, r1);
+    }
+}

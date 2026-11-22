@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 pub const MAX_TOKEN_BYTES: usize = 64;
 
 /// Tokenizes `text` into lowercase alphanumeric terms, splitting on non-alphanumeric characters
-/// and truncating/filtering tokens exceeding [`MAX_TOKEN_BYTES`].
+/// and filtering out tokens exceeding [`MAX_TOKEN_BYTES`].
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

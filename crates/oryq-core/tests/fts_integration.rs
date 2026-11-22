@@ -74,13 +74,31 @@ fn core_fts_create_backfill_search_update_delete_reopen_and_drop() {
 
     // Reopen from disk and verify BM25 search, update, delete, and drop_index
     {
-        let db = Database::open(&db_path, cfg).unwrap();
+        let db = Database::open(&db_path, cfg.clone()).unwrap();
         let ic = db.integrity_check().unwrap();
         assert!(ic.ok, "integrity issues: {:?}", ic.issues);
 
         {
             let rtx = db.begin_read().unwrap();
             let col = rtx.collection("articles").unwrap();
+            // Regression check: normal `find()` equality on FTS-indexed leading field `title`
+            // must NOT select the FTS index as a secondary index; it must return the exact doc!
+            let eq_docs = col
+                .find_json(
+                    Some(r#"{"title": "Embedded Rust DB"}"#),
+                    None,
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap()
+                .collect_all();
+            assert_eq!(eq_docs.len(), 1);
+            assert_eq!(
+                eq_docs[0].view().get_field("_id").unwrap().to_owned_value(),
+                Value::Int64(1)
+            );
+
             let hits = col.search_fts("text_idx", "rust database", 10).unwrap();
             assert_eq!(hits.len(), 2);
             assert_eq!(
@@ -121,6 +139,17 @@ fn core_fts_create_backfill_search_update_delete_reopen_and_drop() {
                 .collect();
             assert!(ids.contains(&Value::Int64(1)));
             assert!(ids.contains(&Value::Int64(2)));
+        }
+
+        // Online backup preserves FTS indexes so `search_fts` works on the restored backup!
+        let backup_path = dir.path().join("fts_backup.oryq");
+        db.backup_to(&backup_path).unwrap();
+        {
+            let bdb = Database::open(&backup_path, cfg.clone()).unwrap();
+            let brtx = bdb.begin_read().unwrap();
+            let bcol = brtx.collection("articles").unwrap();
+            let bhits = bcol.search_fts("text_idx", "rust", 10).unwrap();
+            assert_eq!(bhits.len(), 2);
         }
 
         // Drop FTS index cleanly

@@ -204,7 +204,7 @@ impl IndexProvider for FtsIndexProvider {
         before: &DocumentView<'_>,
         after: &DocumentView<'_>,
     ) -> Result<MaintenanceResult> {
-        let (old_freqs, old_total) = extract_doc_terms(desc, before);
+        let (old_freqs, _) = extract_doc_terms(desc, before);
         let (new_freqs, new_total) = extract_doc_terms(desc, after);
 
         if old_freqs == new_freqs {
@@ -255,7 +255,6 @@ impl IndexProvider for FtsIndexProvider {
                 stats.total_tokens = stats.total_tokens.saturating_add(u64::from(new_total));
             }
         } else if new_total > 0 {
-            let _ = old_total;
             tree.insert(&mut ctx, &dl_key, &new_total.to_le_bytes())?;
             stats.doc_count = stats.doc_count.saturating_add(1);
             stats.total_tokens = stats.total_tokens.saturating_add(u64::from(new_total));

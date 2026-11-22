@@ -1,6 +1,5 @@
 //! Deterministic Okapi BM25 full-text search execution over an FTS B+ tree index.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use oryq_engine::{BTree, ReadTxn, TreeKind};
@@ -111,7 +110,6 @@ pub fn search_fts(
         b.score
             .total_cmp(&a.score)
             .then_with(|| a.record_id.cmp(&b.record_id))
-            .then(Ordering::Equal)
     });
     hits.truncate(limit);
     Ok(hits)
