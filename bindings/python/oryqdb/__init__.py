@@ -1,4 +1,4 @@
-"""Official Python ctypes bindings for OryqDB (C ABI v1.1).
+"""Official Python ctypes bindings for OryqDB (C ABI v1.2).
 
 License: MIT
 """
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple, Union
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = [
     "OryqStatus",
     "OryqError",
@@ -26,7 +26,7 @@ __all__ = [
 
 
 class OryqStatus(enum.IntEnum):
-    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.1)."""
+    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.2)."""
 
     OK = 0
     CURSOR_DONE = 1
@@ -131,6 +131,8 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.oryq_db_close.restype = c_int
     lib.oryq_db_checkpoint.argtypes = [c_void_p]
     lib.oryq_db_checkpoint.restype = c_int
+    lib.oryq_db_vacuum.argtypes = [c_void_p]
+    lib.oryq_db_vacuum.restype = c_int
     lib.oryq_db_backup_to.argtypes = [c_void_p, c_char_p]
     lib.oryq_db_backup_to.restype = c_int
     lib.oryq_db_integrity_check.argtypes = [c_void_p, POINTER(c_bool)]
@@ -201,7 +203,7 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
 
 
 def load_library(lib_path: Optional[Union[str, os.PathLike[str]]] = None) -> ctypes.CDLL:
-    """Loads `liboryq` and configures all C ABI v1.1 prototypes."""
+    """Loads `liboryq` and configures all C ABI v1.2 prototypes."""
     global _DEFAULT_LIB
     if lib_path is not None:
         return _configure_prototypes(ctypes.CDLL(str(lib_path)))
@@ -546,6 +548,10 @@ class Database:
 
     def checkpoint(self) -> None:
         _check(self._lib, self._lib.oryq_db_checkpoint(self._require_open()))
+
+    def vacuum(self) -> None:
+        """Compacts the database in place, reclaiming free space and shrinking the `.oryq` file."""
+        _check(self._lib, self._lib.oryq_db_vacuum(self._require_open()))
 
     def backup_to(self, dest_path: Union[str, os.PathLike[str]]) -> None:
         _check(self._lib, self._lib.oryq_db_backup_to(self._require_open(), str(dest_path).encode("utf-8")))

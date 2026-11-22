@@ -14,6 +14,10 @@ pub struct DatabaseConfig {
     pub max_readers: usize,
     pub max_document_bytes: usize,
     pub group_commit: GroupCommitConfig,
+    /// When `true` (default, ignored for `read_only`), dropping the last [`crate::Database`]
+    /// handle automatically checkpoints, seals, and removes the empty `.oryq-wal` sidecar so
+    /// only the single `.oryq` file remains on disk.
+    pub auto_checkpoint_on_close: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -29,6 +33,7 @@ impl Default for DatabaseConfig {
             max_readers: eng.max_readers,
             max_document_bytes: 16 * 1024 * 1024,
             group_commit: GroupCommitConfig::default(),
+            auto_checkpoint_on_close: true,
         }
     }
 }
@@ -43,6 +48,7 @@ impl DatabaseConfig {
             max_cache_bytes: self.max_cache_bytes,
             max_wal_hard_bytes: self.max_wal_hard_bytes,
             max_readers: self.max_readers,
+            auto_checkpoint_on_close: self.auto_checkpoint_on_close,
             ..EngineConfig::default()
         }
     }

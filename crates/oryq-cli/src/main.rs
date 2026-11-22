@@ -214,6 +214,21 @@ fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "vacuum" => {
+            let db_path = req_arg(args, 1, "vacuum <db>")?;
+            let db = open_db(db_path)?;
+            let rep = db.vacuum().map_err(fmt_err)?;
+            println!(
+                "vacuum complete: bytes_before={} bytes_after={} bytes_reclaimed={} collections={} documents={} sealed={}",
+                rep.bytes_before,
+                rep.bytes_after,
+                rep.bytes_reclaimed,
+                rep.collections_compacted,
+                rep.documents_compacted,
+                rep.sealed
+            );
+            Ok(())
+        }
         "backup" => {
             let db_path = req_arg(args, 1, "backup <db> <dest>")?;
             let dest = req_arg(args, 2, "backup <db> <dest>")?;
@@ -351,6 +366,7 @@ fn print_usage() {
            delete <db> <collection> <id-json>\n  \
            aggregate <db> <collection> <pipeline-json>\n  \
            checkpoint <db>\n  \
+           vacuum <db>\n  \
            backup <db> <dest>\n  \
            integrity-check <db>\n  \
            inspect <db> <page <id> | wal | locks>\n  \

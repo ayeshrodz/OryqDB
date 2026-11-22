@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use oryq_engine::{
     inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, wal_path_for,
@@ -15,6 +16,7 @@ use crate::config::DatabaseConfig;
 use crate::database::Database;
 
 const MODULE_ID: &str = "core";
+static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Summary report returned by [`Database::integrity_check`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,17 @@ pub struct BackupReport {
     pub dest_path: PathBuf,
     pub collections_copied: usize,
     pub documents_copied: usize,
+    pub sealed: bool,
+}
+
+/// Summary report returned by [`Database::vacuum`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub bytes_reclaimed: u64,
+    pub collections_compacted: usize,
+    pub documents_compacted: usize,
     pub sealed: bool,
 }
 
@@ -128,7 +141,8 @@ pub fn run_online_backup(
         }
     }
 
-    let tmp_path = dest.with_extension(format!("oryq.backup.tmp.{}", std::process::id()));
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dest.with_extension(format!("oryq.backup.tmp.{}.{seq}", std::process::id()));
     let tmp_wal = wal_path_for(&tmp_path);
     let _ = fs::remove_file(&tmp_path);
     let _ = fs::remove_file(&tmp_wal);
@@ -291,6 +305,59 @@ pub fn run_online_backup(
     }
 
     result
+}
+
+/// Compacts `db` in place (`VACUUM`), reclaiming freelist pages, shrinking the `.oryq` file on
+/// disk, and leaving a single sealed `.oryq` file with no `.oryq-wal` sidecar.
+///
+/// Fails with `ErrorCategory::Busy` if any active read transaction is currently open, or
+/// `ErrorCategory::UnsupportedFeature` if a collection contains a disabled pluggable index.
+pub fn run_vacuum(
+    db: &Database,
+    engine: &oryq_engine::StorageEngine,
+    source_path: &Path,
+    page_size: PageSize,
+) -> Result<VacuumReport> {
+    if engine.is_read_only() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "admin::run_vacuum",
+            "cannot VACUUM a read-only database",
+        ));
+    }
+    if engine.is_poisoned() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::CommitOutcomeUnknown,
+            MODULE_ID,
+            "admin::run_vacuum",
+            "database engine is poisoned; close and reopen to recover before VACUUM",
+        ));
+    }
+
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path =
+        source_path.with_extension(format!("oryq.vacuum.tmp.{}.{seq}", std::process::id()));
+    let tmp_wal = wal_path_for(&tmp_path);
+    let _ = fs::remove_file(&tmp_path);
+    let _ = fs::remove_file(&tmp_wal);
+
+    let res = engine
+        .run_exclusive_vacuum(&tmp_path, |p| {
+            run_online_backup(db, source_path, page_size, p)
+        })
+        .map(|(backup, bytes_before, bytes_after)| VacuumReport {
+            bytes_before,
+            bytes_after,
+            bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
+            collections_compacted: backup.collections_copied,
+            documents_compacted: backup.documents_copied,
+            sealed: true,
+        });
+
+    let _ = fs::remove_file(&tmp_path);
+    let _ = fs::remove_file(&tmp_wal);
+    res
 }
 
 fn paths_refer_to_same_target(a: &Path, b: &Path) -> bool {

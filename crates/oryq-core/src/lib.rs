@@ -13,7 +13,7 @@ pub mod database;
 pub mod write;
 
 pub use adapters::{CoreQuerySource, DocumentRecordCompactor};
-pub use admin::{BackupReport, IntegrityReport};
+pub use admin::{BackupReport, IntegrityReport, VacuumReport};
 pub use api::{ReadCollection, ReadTransaction, WriteCollection, WriteTransaction};
 pub use catalog::{CatalogEntry, CatalogMeta, CATALOG_SCHEMA_VERSION};
 pub use composition::CoreRegistries;

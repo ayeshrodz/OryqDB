@@ -23,7 +23,7 @@ class TestOryqDbPythonBindings(unittest.TestCase):
 
             with Database.open(db_path) as db:
                 self.assertTrue(db.version())
-                self.assertEqual(db.abi_version(), (1, 1))
+                self.assertEqual(db.abi_version(), (1, 2))
 
                 # 1. Create collection, unique index, and insert documents
                 with db.write_txn() as wtx:
@@ -115,8 +115,12 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                     wtx.commit()
 
                 db.checkpoint()
+                db.vacuum()
                 self.assertTrue(db.integrity_check())
                 db.backup_to(backup_path)
+
+            # Auto-seal on close removes `.oryq-wal` so only a single `.oryq` file remains
+            self.assertFalse(Path(f"{db_path}-wal").exists())
 
             # 6. Verify backup opens cleanly and contains exact updated state
             with Database.open(backup_path) as bdb:

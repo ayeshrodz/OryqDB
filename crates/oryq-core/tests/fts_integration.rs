@@ -152,6 +152,16 @@ fn core_fts_create_backfill_search_update_delete_reopen_and_drop() {
             assert_eq!(bhits.len(), 2);
         }
 
+        // In-place VACUUM preserves FTS indexes so `search_fts` continues working!
+        let vac_rep = db.vacuum().unwrap();
+        assert!(vac_rep.sealed);
+        {
+            let rtx = db.begin_read().unwrap();
+            let col = rtx.collection("articles").unwrap();
+            let vhits = col.search_fts("text_idx", "rust", 10).unwrap();
+            assert_eq!(vhits.len(), 2);
+        }
+
         // Drop FTS index cleanly
         {
             let mut wtx = db.begin_write().unwrap();

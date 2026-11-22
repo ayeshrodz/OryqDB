@@ -2,7 +2,7 @@
 
 An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
-> **Current Version:** `0.11.0` (Official Python/C99/C++17 Bindings & Production Developer Guides Complete — all `0.9.x`–`0.11.0` pre-1.0 milestones delivered; see [PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md).)
+> **Current Version:** `0.12.0` (Single-File Auto-Seal on Close & `VACUUM` Compaction, C ABI v1.2, Python/C99/C++17 Bindings, FTS/Vector Search, `.oryq-shm`, Group Commit; see [PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md).)
 
 ## Design Overview
 
