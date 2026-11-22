@@ -177,6 +177,44 @@ impl ReadCollection<'_, '_> {
         }
         Ok(results)
     }
+
+    /// Executes a top-`limit` nearest-neighbor vector similarity search against a named
+    /// `index.vec` index (`--features vec`), returning `(document, distance)` pairs ordered by
+    /// ascending distance.
+    #[cfg(feature = "vec")]
+    pub fn search_vector(
+        &self,
+        index_name: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(DocumentBuf, f64)>> {
+        let desc = self
+            .entry
+            .indexes
+            .iter()
+            .find(|i| i.name == index_name && i.provider_id.as_str() == oryq_vec::VEC_PROVIDER_ID)
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "ReadCollection::search_vector",
+                    format!(
+                        "vector index '{index_name}' not found on collection '{}'",
+                        self.entry.name
+                    ),
+                )
+            })?;
+        let hits = oryq_vec::search_vec(self.tx, desc, query, limit)?;
+        let data_tree = BTree::open(self.entry.data_root_page_id, TreeKind::Collection);
+        let mut results = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let rec_key = encode_record_id(hit.record_id);
+            if let Some(raw) = data_tree.get(self.tx, &rec_key)? {
+                results.push((decode_collection_record(&raw)?, hit.distance));
+            }
+        }
+        Ok(results)
+    }
 }
 
 pub(crate) fn find_by_id_in_store(

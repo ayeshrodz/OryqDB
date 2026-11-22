@@ -215,6 +215,23 @@ impl WriteCollection<'_, '_> {
         crate::write::create_fts_index_stmt(self.tx, self.registries, &self.name, name, fields)
     }
 
+    #[cfg(feature = "vec")]
+    pub fn create_vector_index(
+        &mut self,
+        field: &str,
+        options: oryq_vec::VectorIndexOptions,
+        name: Option<&str>,
+    ) -> Result<IndexDescriptor> {
+        crate::write::create_vector_index_stmt(
+            self.tx,
+            self.registries,
+            &self.name,
+            name,
+            field,
+            options,
+        )
+    }
+
     pub fn drop_index(&mut self, index_name: &str) -> Result<bool> {
         drop_index_stmt(self.tx, self.registries, &self.name, index_name)
     }

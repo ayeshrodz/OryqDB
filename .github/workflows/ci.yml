@@ -39,7 +39,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p oryq-core --features fts,vec --all-targets -- -D warnings
 
       - name: Run architecture boundary check (PR diff)
         if: github.event_name == 'pull_request'
@@ -100,10 +102,13 @@ jobs:
       - name: Run module check for cli (oryq-cli)
         run: cargo run -p xtask -- modules cli
 
-      - name: Run optional FTS extension tests (--features fts)
+      - name: Run optional FTS & Vector extension tests (--features fts, vec, fts+vec)
         run: |
           cargo run -p xtask -- modules fts
+          cargo run -p xtask -- modules vec
           cargo test -p oryq-core --features fts
+          cargo test -p oryq-core --features vec
+          cargo test -p oryq-core --features fts,vec
 
       - name: Compile and run native C99/C++11 FFI integration test
         if: runner.os != 'Windows'

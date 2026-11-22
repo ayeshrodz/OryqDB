@@ -1035,3 +1035,96 @@ pub fn create_fts_index_stmt(
         }
     }
 }
+
+/// Atomically creates and backfills an optional vector similarity (`index.vec`) index
+/// inside a statement savepoint (`--features vec`).
+#[cfg(feature = "vec")]
+pub fn create_vector_index_stmt(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    collection_name: &str,
+    name: Option<&str>,
+    raw_field: &str,
+    options: oryq_vec::VectorIndexOptions,
+) -> Result<IndexDescriptor> {
+    options.validate()?;
+    let field_path = FieldPath::parse(raw_field)?;
+    let idx_name = match name {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => format!("{}_vec", field_path.as_str().replace('.', "_")),
+    };
+
+    let sp = tx.savepoint();
+    let res = (|| -> Result<IndexDescriptor> {
+        let catalog_root = tx.catalog_root_page_id();
+        let mut entry =
+            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "write::create_vector_index_stmt",
+                    format!("collection '{collection_name}' does not exist"),
+                )
+            })?;
+
+        if entry.indexes.iter().any(|i| i.name == idx_name) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::DuplicateKey,
+                MODULE_ID,
+                "write::create_vector_index_stmt",
+                format!("index '{idx_name}' already exists on collection '{collection_name}'"),
+            ));
+        }
+
+        let mut meta = load_catalog_meta(tx, catalog_root)?;
+        let index_id = IndexId::new(meta.next_index_id)?;
+        meta.next_index_id = meta.next_index_id.checked_add(1).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "write::create_vector_index_stmt",
+                "next_index_id overflow",
+            )
+        })?;
+
+        let provider_id = CapabilityId::new(oryq_vec::VEC_PROVIDER_ID)?;
+        let provider = registries.indexes.require(&provider_id)?;
+        let mut desc = oryq_vec::vec_index_descriptor(
+            index_id,
+            idx_name,
+            field_path,
+            options,
+            PageId::new(1),
+        )?;
+        desc.root_page_id = provider.create_empty(tx, &desc)?;
+
+        let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let existing = data_tree.scan_all(tx)?;
+        for (raw_rid, raw_rec) in existing {
+            let rid = decode_record_id(&raw_rid)?;
+            let doc = decode_collection_record(&raw_rec)?;
+            let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
+            desc.root_page_id = maint.new_root_page_id;
+        }
+
+        entry.indexes.push(desc.clone());
+        let vec_bit = FeatureBitmask::from_raw(1u64 << oryq_vec::VEC_FEATURE_BIT);
+        entry.required_write_features = entry.required_write_features.union(vec_bit);
+
+        let root_after_meta = save_catalog_meta(tx, catalog_root, &meta)?;
+        let root_after_entry = save_collection_entry(tx, root_after_meta, &entry)?;
+        tx.set_catalog_root_page_id(root_after_entry);
+        Ok(desc)
+    })();
+
+    match res {
+        Ok(desc) => {
+            tx.release_savepoint(sp)?;
+            Ok(desc)
+        }
+        Err(err) => {
+            let _ = tx.rollback_to(sp);
+            Err(err)
+        }
+    }
+}

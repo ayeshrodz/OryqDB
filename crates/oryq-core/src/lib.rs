@@ -37,6 +37,11 @@ pub use oryq_types::{
     BudgetDomain, BudgetHandle, CancellationSource, CancellationToken, CollectionId, ErrorCategory,
     ErrorEnvelope, IndexId, PageId, RecordId, Result, SnapshotId, TxId,
 };
+#[cfg(feature = "vec")]
+pub use oryq_vec::{
+    DistanceMetric, VectorHit, VectorIndexOptions, VectorIndexProvider, VectorQuantization,
+    VEC_FEATURE_BIT, VEC_PROVIDER_ID,
+};
 
 /// Returns the current workspace version string.
 pub const fn version() -> &'static str {

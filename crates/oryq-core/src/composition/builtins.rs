@@ -26,6 +26,10 @@ impl CoreRegistries {
         {
             indexes.register(Arc::new(oryq_fts::FtsIndexProvider));
         }
+        #[cfg(feature = "vec")]
+        {
+            indexes.register(Arc::new(oryq_vec::VectorIndexProvider));
+        }
         Self {
             updates: UpdateRegistry::default_v1(),
             indexes,

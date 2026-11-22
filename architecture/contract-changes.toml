@@ -291,3 +291,24 @@ evidence = [
     "cargo run -p xtask -- modules fts",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0019"
+modules = ["vec", "core"]
+files = [
+    "crates/oryq-vec/src/lib.rs",
+    "crates/oryq-vec/src/provider.rs",
+    "crates/oryq-vec/src/distance.rs",
+    "crates/oryq-vec/src/search.rs",
+    "crates/oryq-core/src/lib.rs",
+]
+reason = "Implement Issue #16 (v0.10.1 / X01b): optional oryq-vec vector similarity search provider crate (Cosine/L2/DotProduct, F32 & Int8 scalar quantization) behind --features vec with persistent write_bits = [1]."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-vec",
+    "cargo test -p oryq-core --features vec",
+    "cargo test -p oryq-core --features fts,vec",
+    "cargo test --workspace --no-default-features",
+    "cargo run -p xtask -- modules vec",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
