@@ -3,14 +3,16 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use oryq_core::{
-    Database, DatabaseConfig, ErrorCategory, GroupCommitConfig, PageSize, SortOrder, SyncMode,
-    Value,
+    Database, DatabaseConfig, ErrorCategory, ErrorEnvelope, GroupCommitConfig, PageSize, SortOrder,
+    SyncMode, Value,
 };
+use oryq_engine::{FileHandle, FileIdentity, FileRegistry, OpenMode, OsVfs, StorageIo};
 
 static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -185,4 +187,184 @@ fn concurrent_submit_batched_coalesces_writers_and_isolates_failures() {
     let report = db.integrity_check().unwrap();
     assert!(report.ok, "integrity issues: {:?}", report.issues);
     assert_eq!(report.documents_checked, THREADS * OPS_PER_THREAD);
+}
+
+#[derive(Debug)]
+struct FaultSyncVfs {
+    inner: OsVfs,
+    fail_wal_sync: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct FaultFileHandle {
+    inner: Arc<dyn FileHandle>,
+    is_wal: bool,
+    fail_wal_sync: Arc<AtomicBool>,
+}
+
+impl FileHandle for FaultFileHandle {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> oryq_core::Result<()> {
+        self.inner.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> oryq_core::Result<()> {
+        self.inner.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> oryq_core::Result<()> {
+        if self.is_wal && self.fail_wal_sync.load(Ordering::SeqCst) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Io,
+                "test",
+                "FaultFileHandle::sync_data",
+                "injected WAL sync failure",
+            ));
+        }
+        self.inner.sync_data()
+    }
+    fn sync_all(&self) -> oryq_core::Result<()> {
+        if self.is_wal && self.fail_wal_sync.load(Ordering::SeqCst) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Io,
+                "test",
+                "FaultFileHandle::sync_all",
+                "injected WAL sync failure",
+            ));
+        }
+        self.inner.sync_all()
+    }
+    fn len(&self) -> oryq_core::Result<u64> {
+        self.inner.len()
+    }
+    fn set_len(&self, size: u64) -> oryq_core::Result<()> {
+        self.inner.set_len(size)
+    }
+    fn try_lock_exclusive(&self) -> oryq_core::Result<()> {
+        self.inner.try_lock_exclusive()
+    }
+    fn unlock(&self) -> oryq_core::Result<()> {
+        self.inner.unlock()
+    }
+    fn identity(&self) -> &FileIdentity {
+        self.inner.identity()
+    }
+}
+
+impl StorageIo for FaultSyncVfs {
+    fn open(&self, path: &Path, mode: OpenMode) -> oryq_core::Result<Arc<dyn FileHandle>> {
+        let fh = self.inner.open(path, mode)?;
+        let is_wal = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("-wal"))
+            .unwrap_or(false);
+        Ok(Arc::new(FaultFileHandle {
+            inner: fh,
+            is_wal,
+            fail_wal_sync: Arc::clone(&self.fail_wal_sync),
+        }))
+    }
+    fn sync_parent_dir(&self, path: &Path) -> oryq_core::Result<()> {
+        self.inner.sync_parent_dir(path)
+    }
+    fn remove_file(&self, path: &Path) -> oryq_core::Result<()> {
+        self.inner.remove_file(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path)
+    }
+    fn file_registry(&self) -> Arc<FileRegistry> {
+        self.inner.file_registry()
+    }
+}
+
+#[test]
+fn submit_batched_propagates_commit_outcome_unknown_to_all_followers_and_rejects_readonly() {
+    let dir = TempDir::new("fault_and_ro");
+    let db_path = dir.path().join("fault.oryq");
+    let fail_wal_sync = Arc::new(AtomicBool::new(false));
+    let vfs = Arc::new(FaultSyncVfs {
+        inner: OsVfs::new(),
+        fail_wal_sync: Arc::clone(&fail_wal_sync),
+    });
+
+    let cfg = DatabaseConfig {
+        page_size: PageSize::Size4096,
+        sync_mode: SyncMode::Full,
+        group_commit: GroupCommitConfig {
+            max_batch_size: 4,
+            linger: Duration::from_millis(20),
+            max_queue_depth: 64,
+        },
+        ..DatabaseConfig::default()
+    };
+    let db = Database::open_with_io(vfs, &db_path, cfg).unwrap();
+    {
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("logs").unwrap();
+        wtx.commit().unwrap();
+    }
+
+    // Inject WAL sync fault and launch 4 concurrent followers into the same group commit
+    fail_wal_sync.store(true, Ordering::SeqCst);
+    let barrier = Arc::new(Barrier::new(4));
+    let mut handles = Vec::new();
+    for i in 1..=4i64 {
+        let dbc = db.clone();
+        let b = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            b.wait();
+            dbc.submit_batched(move |wtx| {
+                let mut col = wtx.collection("logs")?;
+                col.insert_json(&format!(r#"{{"_id": {i}}}"#))?;
+                Ok(i)
+            })
+        }));
+    }
+    for h in handles {
+        let err = h.join().unwrap().unwrap_err();
+        assert_eq!(err.category(), ErrorCategory::CommitOutcomeUnknown);
+    }
+
+    // Subsequent submit_batched and commit_batch fail closed with CommitOutcomeUnknown
+    assert_eq!(
+        db.submit_batched(|_| Ok(())).unwrap_err().category(),
+        ErrorCategory::CommitOutcomeUnknown
+    );
+    let empty: Vec<fn(&mut oryq_core::WriteTransaction<'_>) -> oryq_core::Result<()>> = Vec::new();
+    assert_eq!(
+        db.commit_batch(empty).unwrap_err().category(),
+        ErrorCategory::CommitOutcomeUnknown
+    );
+    drop(db);
+
+    // Read-only Database rejects both commit_batch and submit_batched with InvalidArgument
+    let ro_path = dir.path().join("ro.oryq");
+    {
+        let _w = Database::open(
+            &ro_path,
+            DatabaseConfig {
+                page_size: PageSize::Size4096,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+    }
+    let ro_db = Database::open(
+        &ro_path,
+        DatabaseConfig {
+            page_size: PageSize::Size4096,
+            read_only: true,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    let empty_ro: Vec<fn(&mut oryq_core::WriteTransaction<'_>) -> oryq_core::Result<()>> =
+        Vec::new();
+    assert_eq!(
+        ro_db.commit_batch(empty_ro).unwrap_err().category(),
+        ErrorCategory::InvalidArgument
+    );
+    assert_eq!(
+        ro_db.submit_batched(|_| Ok(())).unwrap_err().category(),
+        ErrorCategory::InvalidArgument
+    );
 }

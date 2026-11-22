@@ -4,12 +4,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oryq_engine::{
-    commit_batch, BTree, EngineConfig, FileHandle, FileIdentity, FileRegistry, OpenMode, OsVfs,
-    PageSize, StorageEngine, StorageIo, SyncMode, TreeKind,
+    commit_batch, BTree, CommitReceipt, EngineConfig, EngineWriteBatchTx, FileHandle, FileIdentity,
+    FileRegistry, GroupCommitConfig, GroupCommitQueue, OpenMode, OsVfs, PageSize, StorageEngine,
+    StorageIo, SyncMode, TreeKind,
 };
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, TxId};
 
@@ -279,5 +281,194 @@ fn engine_commit_batch_single_fsync_per_item_savepoint_and_sync_fault_poisoning(
     assert_eq!(
         engine.commit_batch(empty).unwrap_err().category(),
         ErrorCategory::CommitOutcomeUnknown
+    );
+}
+
+#[test]
+fn group_commit_queue_early_linger_wakeup_queue_depth_panic_unwind_and_readonly() {
+    // 1. Early linger wakeup: max_batch_size=2 with 5s linger must complete in < 1s once 2 callers arrive
+    let queue = Arc::new(GroupCommitQueue::<EngineWriteBatchTx>::new(
+        GroupCommitConfig {
+            max_batch_size: 2,
+            linger: Duration::from_secs(5),
+            max_queue_depth: 16,
+        },
+    ));
+    let start = Instant::now();
+    let mut handles = Vec::new();
+    for i in 0..2u32 {
+        let q = Arc::clone(&queue);
+        handles.push(thread::spawn(move || {
+            q.submit(
+                move |_| Ok(i),
+                |drained| {
+                    let receipt = CommitReceipt {
+                        tx_id: TxId::new(1),
+                        wal_end_frame_seq: 1,
+                    };
+                    for item in drained {
+                        item.deliver_ok(Box::new(i), receipt);
+                    }
+                },
+            )
+            .unwrap()
+        }));
+    }
+    for h in handles {
+        let _ = h.join().unwrap();
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "lingering leader should wake immediately when max_batch_size is reached, took {:?}",
+        start.elapsed()
+    );
+
+    // 2. Leader panic/unwind recovery: followers get Err(Internal) instead of hanging, and next call succeeds
+    let panic_queue = Arc::new(GroupCommitQueue::<EngineWriteBatchTx>::new(
+        GroupCommitConfig {
+            max_batch_size: 2,
+            linger: Duration::from_millis(50),
+            max_queue_depth: 16,
+        },
+    ));
+    let barrier = Arc::new(Barrier::new(2));
+    let q1 = Arc::clone(&panic_queue);
+    let b1 = Arc::clone(&barrier);
+    let t_leader = thread::spawn(move || {
+        b1.wait();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = q1.submit(
+                |_| Ok(1u32),
+                |_drained| {
+                    panic!("simulated leader panic");
+                },
+            );
+        }));
+    });
+    let q2 = Arc::clone(&panic_queue);
+    let b2 = Arc::clone(&barrier);
+    let t_follower = thread::spawn(move || {
+        b2.wait();
+        std::thread::sleep(Duration::from_millis(5));
+        q2.submit(
+            |_| Ok(2u32),
+            |drained| {
+                let receipt = CommitReceipt {
+                    tx_id: TxId::new(2),
+                    wal_end_frame_seq: 2,
+                };
+                for item in drained {
+                    item.deliver_ok(Box::new(2u32), receipt);
+                }
+            },
+        )
+    });
+    t_leader.join().unwrap();
+    let _ = t_follower.join().unwrap();
+
+    // Queue remains healthy and usable after leader panic
+    let (v, r) = panic_queue
+        .submit(
+            |_| Ok(42u32),
+            |drained| {
+                let receipt = CommitReceipt {
+                    tx_id: TxId::new(3),
+                    wal_end_frame_seq: 3,
+                };
+                for item in drained {
+                    item.deliver_ok(Box::new(42u32), receipt);
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(v, 42);
+    assert_eq!(r.tx_id, TxId::new(3));
+
+    // 3. max_queue_depth enforcement returns ErrorCategory::Busy
+    let bounded = Arc::new(GroupCommitQueue::<EngineWriteBatchTx>::new(
+        GroupCommitConfig {
+            max_batch_size: 1,
+            linger: Duration::ZERO,
+            max_queue_depth: 1,
+        },
+    ));
+    let hold_gate = Arc::new(Barrier::new(2));
+    let release_gate = Arc::new(Barrier::new(2));
+    let qb = Arc::clone(&bounded);
+    let hg = Arc::clone(&hold_gate);
+    let rg = Arc::clone(&release_gate);
+    let leader_t = thread::spawn(move || {
+        qb.submit(
+            |_| Ok(1u32),
+            move |drained| {
+                hg.wait();
+                rg.wait();
+                let receipt = CommitReceipt {
+                    tx_id: TxId::new(1),
+                    wal_end_frame_seq: 1,
+                };
+                for item in drained {
+                    item.deliver_ok(Box::new(1u32), receipt);
+                }
+            },
+        )
+        .unwrap()
+    });
+    hold_gate.wait();
+    // Leader is now executing batch 1; enqueue 1 waiter to fill max_queue_depth=1
+    let qb2 = Arc::clone(&bounded);
+    let waiter_t = thread::spawn(move || {
+        qb2.submit(
+            |_| Ok(2u32),
+            |drained| {
+                let receipt = CommitReceipt {
+                    tx_id: TxId::new(2),
+                    wal_end_frame_seq: 2,
+                };
+                for item in drained {
+                    item.deliver_ok(Box::new(2u32), receipt);
+                }
+            },
+        )
+        .unwrap()
+    });
+    std::thread::sleep(Duration::from_millis(15));
+    let busy_err = bounded.submit(|_| Ok(3u32), |_| {}).unwrap_err();
+    assert_eq!(busy_err.category(), ErrorCategory::Busy);
+    release_gate.wait();
+    leader_t.join().unwrap();
+    waiter_t.join().unwrap();
+
+    // 4. Read-only StorageEngine rejects commit_batch with InvalidArgument
+    let dir = TempDir::new("ro_batch");
+    let db_path = dir.path().join("ro.oryq");
+    {
+        let vfs = Arc::new(OsVfs::new());
+        let _eng = StorageEngine::open(
+            vfs,
+            &db_path,
+            EngineConfig {
+                page_size: PageSize::Size4096,
+                ..EngineConfig::default()
+            },
+            [0x88; 16],
+        )
+        .unwrap();
+    }
+    let ro_eng = StorageEngine::open(
+        Arc::new(OsVfs::new()),
+        &db_path,
+        EngineConfig {
+            page_size: PageSize::Size4096,
+            read_only: true,
+            ..EngineConfig::default()
+        },
+        [0x88; 16],
+    )
+    .unwrap();
+    let empty: Vec<fn(&mut oryq_engine::WriteTxn<'_>) -> Result<()>> = Vec::new();
+    assert_eq!(
+        ro_eng.commit_batch(empty).unwrap_err().category(),
+        ErrorCategory::InvalidArgument
     );
 }

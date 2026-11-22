@@ -30,8 +30,8 @@ use crate::transaction::publish::{
 };
 
 pub use batch::{
-    clone_error_envelope, commit_batch, BatchCommitReport, BatchItem, GroupCommitConfig,
-    GroupCommitQueue,
+    clone_error_envelope, commit_batch, BatchCommitReport, BatchItem, BatchTx, EngineWriteBatchTx,
+    GroupCommitConfig, GroupCommitQueue,
 };
 pub use read::ReadTxn;
 pub use savepoint::SavepointId;

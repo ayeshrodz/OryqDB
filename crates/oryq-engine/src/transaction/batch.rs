@@ -4,9 +4,10 @@
 //! - Explicit ordered batch execution ([`commit_batch`], [`StorageEngine::commit_batch`]) where
 //!   each item executes inside its own statement savepoint so validation failures roll back only
 //!   the failing item while all valid items commit in a single WAL write + fsync.
-//! - Lock-free-of-daemons leader-follower [`GroupCommitQueue`] coalescing concurrent writer
-//!   submissions into bounded single-fsync group commits with full unwind safety and
-//!   `CommitOutcomeUnknown` propagation.
+//! - Zero-daemon leader-follower [`GroupCommitQueue`] parameterized by a GAT [`BatchTx`] marker
+//!   so both `oryq-engine::WriteTxn<'_>` and `oryq-core::WriteTransaction<'_>` share the exact
+//!   same unwind-safe group-commit coordinator with early linger wakeup, bounded queue depth,
+//!   and `CommitOutcomeUnknown` propagation.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -103,7 +104,10 @@ where
         let sp = wtx.savepoint();
         match item(&mut wtx) {
             Ok(val) => {
-                wtx.release_savepoint(sp)?;
+                if let Err(err) = wtx.release_savepoint(sp) {
+                    let _ = wtx.rollback_to(sp);
+                    return Err(err);
+                }
                 results.push(Ok(val));
                 committed_count += 1;
             }
@@ -134,31 +138,46 @@ where
     })
 }
 
-/// Type-erased queued write task for leader-follower [`GroupCommitQueue`].
+/// GAT marker trait associating a lifetime-parameterized transaction handle (such as
+/// `oryq_engine::WriteTxn<'a>` or `oryq_core::WriteTransaction<'a>`) with a [`GroupCommitQueue`].
+pub trait BatchTx {
+    type Tx<'a>;
+}
+
+/// Built-in [`BatchTx`] marker for [`WriteTxn`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EngineWriteBatchTx;
+
+impl BatchTx for EngineWriteBatchTx {
+    type Tx<'a> = WriteTxn<'a>;
+}
+
 type BoxedAny = Box<dyn Any + Send>;
 type ResultSlot<T> = Arc<Mutex<Option<Result<(T, CommitReceipt)>>>>;
-type TaskRunFn<Tx> = Box<dyn FnOnce(&mut Tx) -> Result<BoxedAny> + Send>;
+type TaskRunFn<B> = Box<dyn for<'a> FnOnce(&mut <B as BatchTx>::Tx<'a>) -> Result<BoxedAny> + Send>;
 type TaskDeliverFn = Box<dyn FnOnce(Result<(BoxedAny, CommitReceipt)>) + Send>;
 
-struct QueuedTask<Tx> {
-    run: TaskRunFn<Tx>,
+struct QueuedTask<B: BatchTx> {
+    run: TaskRunFn<B>,
     deliver: TaskDeliverFn,
 }
 
-struct QueueState<Tx> {
-    pending: VecDeque<QueuedTask<Tx>>,
+struct QueueState<B: BatchTx> {
+    pending: VecDeque<QueuedTask<B>>,
     leader_active: bool,
+    leader_lingering: bool,
 }
 
 /// Unwind-safe leader-follower group-commit queue that coalesces concurrent write submissions
 /// into ordered single-fsync batches without spawning background daemon threads.
-pub struct GroupCommitQueue<Tx> {
+pub struct GroupCommitQueue<B: BatchTx> {
     config: GroupCommitConfig,
-    state: Mutex<QueueState<Tx>>,
+    state: Mutex<QueueState<B>>,
     cv: Condvar,
+    leader_cv: Condvar,
 }
 
-impl<Tx> fmt::Debug for GroupCommitQueue<Tx> {
+impl<B: BatchTx> fmt::Debug for GroupCommitQueue<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GroupCommitQueue")
             .field("config", &self.config)
@@ -166,7 +185,7 @@ impl<Tx> fmt::Debug for GroupCommitQueue<Tx> {
     }
 }
 
-impl<Tx> GroupCommitQueue<Tx> {
+impl<B: BatchTx> GroupCommitQueue<B> {
     pub fn new(config: GroupCommitConfig) -> Self {
         let sanitized = GroupCommitConfig {
             max_batch_size: config.max_batch_size.max(1),
@@ -178,8 +197,10 @@ impl<Tx> GroupCommitQueue<Tx> {
             state: Mutex::new(QueueState {
                 pending: VecDeque::new(),
                 leader_active: false,
+                leader_lingering: false,
             }),
             cv: Condvar::new(),
+            leader_cv: Condvar::new(),
         }
     }
 
@@ -190,20 +211,20 @@ impl<Tx> GroupCommitQueue<Tx> {
     /// Submits a single write operation to the group-commit queue and waits for its durable
     /// `(result, CommitReceipt)` outcome.
     ///
-    /// `execute_batch` is invoked ONLY by the elected leader with a drained FIFO slice of tasks
-    /// and must execute each task inside its own savepoint and commit all succeeded tasks in a
-    /// single WAL fsync.
+    /// `execute_batch` is invoked ONLY by the elected leader with a drained FIFO batch of items
+    /// and must execute each item inside its own savepoint and deliver every item's outcome via
+    /// [`BatchItem::deliver_ok`] or [`BatchItem::deliver_err`].
     pub fn submit<T, F, E>(&self, op: F, mut execute_batch: E) -> Result<(T, CommitReceipt)>
     where
         T: Send + 'static,
-        F: FnOnce(&mut Tx) -> Result<T> + Send + 'static,
-        E: FnMut(Vec<BatchItem<Tx>>) -> Result<()>,
+        F: for<'a> FnOnce(&mut B::Tx<'a>) -> Result<T> + Send + 'static,
+        E: FnMut(Vec<BatchItem<B>>),
     {
         let slot: ResultSlot<T> = Arc::new(Mutex::new(None));
         let slot_for_deliver = Arc::clone(&slot);
 
         let task = QueuedTask {
-            run: Box::new(move |tx: &mut Tx| -> Result<BoxedAny> {
+            run: Box::new(move |tx: &mut B::Tx<'_>| -> Result<BoxedAny> {
                 let val = op(tx)?;
                 Ok(Box::new(val))
             }),
@@ -238,6 +259,11 @@ impl<Tx> GroupCommitQueue<Tx> {
         }
         st.pending.push_back(task);
 
+        // Wake a lingering leader immediately once the batch reaches `max_batch_size`.
+        if st.leader_lingering && st.pending.len() >= self.config.max_batch_size {
+            self.leader_cv.notify_one();
+        }
+
         loop {
             if let Some(res) = slot.lock().map_err(|_| queue_poisoned())?.take() {
                 return res;
@@ -246,22 +272,25 @@ impl<Tx> GroupCommitQueue<Tx> {
             if !st.leader_active {
                 st.leader_active = true;
 
-                // Optional linger to coalesce arriving burst before draining.
+                // Optional linger to coalesce arriving burst before draining; wakes early on full batch.
                 if !self.config.linger.is_zero() && st.pending.len() < self.config.max_batch_size {
-                    let deadline = Instant::now() + self.config.linger;
-                    while st.pending.len() < self.config.max_batch_size {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            break;
+                    if let Some(deadline) = Instant::now().checked_add(self.config.linger) {
+                        st.leader_lingering = true;
+                        while st.pending.len() < self.config.max_batch_size {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                break;
+                            }
+                            let (guard, timeout) = self
+                                .leader_cv
+                                .wait_timeout(st, deadline - now)
+                                .map_err(|_| queue_poisoned())?;
+                            st = guard;
+                            if timeout.timed_out() {
+                                break;
+                            }
                         }
-                        let (guard, timeout) = self
-                            .cv
-                            .wait_timeout(st, deadline - now)
-                            .map_err(|_| queue_poisoned())?;
-                        st = guard;
-                        if timeout.timed_out() {
-                            break;
-                        }
+                        st.leader_lingering = false;
                     }
                 }
 
@@ -278,20 +307,21 @@ impl<Tx> GroupCommitQueue<Tx> {
                 drop(st);
 
                 // RAII guard ensures `leader_active` is ALWAYS cleared and waiters woken even on panic.
-                struct LeaderGuard<'q, Tx> {
-                    queue: &'q GroupCommitQueue<Tx>,
+                struct LeaderGuard<'q, B: BatchTx> {
+                    queue: &'q GroupCommitQueue<B>,
                 }
-                impl<Tx> Drop for LeaderGuard<'_, Tx> {
+                impl<B: BatchTx> Drop for LeaderGuard<'_, B> {
                     fn drop(&mut self) {
                         if let Ok(mut st) = self.queue.state.lock() {
                             st.leader_active = false;
+                            st.leader_lingering = false;
                             self.queue.cv.notify_all();
                         }
                     }
                 }
                 let _leader_guard = LeaderGuard { queue: self };
 
-                let _ = execute_batch(drained);
+                execute_batch(drained);
 
                 drop(_leader_guard);
                 st = self.state.lock().map_err(|_| queue_poisoned())?;
@@ -307,12 +337,12 @@ impl<Tx> GroupCommitQueue<Tx> {
 ///
 /// If dropped without calling [`Self::deliver_ok`] or [`Self::deliver_err`] (for example on panic),
 /// automatically delivers an `Internal` error so waiting followers never hang.
-pub struct BatchItem<Tx> {
-    run: Option<TaskRunFn<Tx>>,
+pub struct BatchItem<B: BatchTx> {
+    run: Option<TaskRunFn<B>>,
     deliver: Option<TaskDeliverFn>,
 }
 
-impl<Tx> fmt::Debug for BatchItem<Tx> {
+impl<B: BatchTx> fmt::Debug for BatchItem<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BatchItem")
             .field("pending_run", &self.run.is_some())
@@ -321,9 +351,9 @@ impl<Tx> fmt::Debug for BatchItem<Tx> {
     }
 }
 
-impl<Tx> BatchItem<Tx> {
+impl<B: BatchTx> BatchItem<B> {
     /// Executes the queued closure against `tx`.
-    pub fn execute(&mut self, tx: &mut Tx) -> Result<BoxedAny> {
+    pub fn execute(&mut self, tx: &mut B::Tx<'_>) -> Result<BoxedAny> {
         let f = self.run.take().ok_or_else(|| {
             ErrorEnvelope::new(
                 ErrorCategory::Internal,
@@ -350,7 +380,7 @@ impl<Tx> BatchItem<Tx> {
     }
 }
 
-impl<Tx> Drop for BatchItem<Tx> {
+impl<B: BatchTx> Drop for BatchItem<B> {
     fn drop(&mut self) {
         if let Some(d) = self.deliver.take() {
             d(Err(ErrorEnvelope::new(

@@ -47,6 +47,7 @@ pub use pager::{FreelistManager, OverflowStore, PageAllocator, PageBuf, PageGuar
 pub use ports::{CheckpointOutcome, CommitReceipt, RecordCompactor};
 pub use recovery::{CommittedDbMeta, RecoveredPageFrame, RecoveredTx, WalScanResult};
 pub use transaction::{
-    clone_error_envelope, commit_batch, wal_path_for, BatchCommitReport, BatchItem,
-    GroupCommitConfig, GroupCommitQueue, ReadTxn, SavepointId, StorageEngine, WriteTxn,
+    clone_error_envelope, commit_batch, wal_path_for, BatchCommitReport, BatchItem, BatchTx,
+    EngineWriteBatchTx, GroupCommitConfig, GroupCommitQueue, ReadTxn, SavepointId, StorageEngine,
+    WriteTxn,
 };

@@ -1,16 +1,14 @@
 //! Shareable [`Database`] handle coordinating `oryq-engine` and immutable `CoreRegistries`.
 
 use std::any::Any;
-use std::collections::VecDeque;
-use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_engine::{
-    clone_error_envelope, BatchCommitReport, CheckpointOutcome, CommitReceipt, GroupCommitConfig,
-    LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine, StorageIo,
-    WalInspectionReport,
+    clone_error_envelope, BatchCommitReport, BatchItem, BatchTx, CheckpointOutcome, CommitReceipt,
+    GroupCommitQueue, LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine,
+    StorageIo, WalInspectionReport,
 };
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, TxId};
 
@@ -24,90 +22,11 @@ use crate::config::DatabaseConfig;
 
 const MODULE_ID: &str = "core";
 
-type BoxedAny = Box<dyn Any + Send>;
-type ResultSlot<T> = Arc<Mutex<Option<Result<(T, CommitReceipt)>>>>;
-type CoreBatchRunFn =
-    Box<dyn for<'db> FnOnce(&mut WriteTransaction<'db>) -> Result<BoxedAny> + Send>;
-type CoreBatchDeliverFn = Box<dyn FnOnce(Result<(BoxedAny, CommitReceipt)>) + Send>;
+#[derive(Debug, Default, Clone, Copy)]
+struct CoreWriteBatchTx;
 
-struct CoreQueuedTask {
-    run: Option<CoreBatchRunFn>,
-    deliver: Option<CoreBatchDeliverFn>,
-}
-
-impl CoreQueuedTask {
-    fn execute(&mut self, wtx: &mut WriteTransaction<'_>) -> Result<BoxedAny> {
-        let f = self.run.take().ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCategory::Internal,
-                MODULE_ID,
-                "Database::submit_batched",
-                "queued batch task already executed",
-            )
-        })?;
-        f(wtx)
-    }
-
-    fn deliver_ok(mut self, val: BoxedAny, receipt: CommitReceipt) {
-        if let Some(d) = self.deliver.take() {
-            d(Ok((val, receipt)));
-        }
-    }
-
-    fn deliver_err(mut self, err: ErrorEnvelope) {
-        if let Some(d) = self.deliver.take() {
-            d(Err(err));
-        }
-    }
-}
-
-impl Drop for CoreQueuedTask {
-    fn drop(&mut self) {
-        if let Some(d) = self.deliver.take() {
-            d(Err(ErrorEnvelope::new(
-                ErrorCategory::Internal,
-                MODULE_ID,
-                "Database::submit_batched",
-                "group commit leader aborted before delivering batch item outcome",
-            )));
-        }
-    }
-}
-
-struct CoreBatchQueueState {
-    pending: VecDeque<CoreQueuedTask>,
-    leader_active: bool,
-}
-
-struct CoreBatchQueue {
-    config: GroupCommitConfig,
-    state: Mutex<CoreBatchQueueState>,
-    cv: Condvar,
-}
-
-impl fmt::Debug for CoreBatchQueue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CoreBatchQueue")
-            .field("config", &self.config)
-            .finish()
-    }
-}
-
-impl CoreBatchQueue {
-    fn new(config: GroupCommitConfig) -> Self {
-        Self {
-            config: GroupCommitConfig {
-                max_batch_size: config.max_batch_size.max(1),
-                linger: config.linger,
-                max_queue_depth: config.max_queue_depth.max(1),
-            },
-            state: Mutex::new(CoreBatchQueueState {
-                pending: VecDeque::new(),
-                leader_active: false,
-            }),
-            cv: Condvar::new(),
-        }
-    }
+impl BatchTx for CoreWriteBatchTx {
+    type Tx<'a> = WriteTransaction<'a>;
 }
 
 #[derive(Debug)]
@@ -117,7 +36,7 @@ struct DatabaseInner {
     engine: StorageEngine,
     registries: CoreRegistries,
     max_document_bytes: usize,
-    batch_queue: CoreBatchQueue,
+    batch_queue: GroupCommitQueue<CoreWriteBatchTx>,
 }
 
 /// Shareable (`Clone + Send + Sync`) embedded OryqDB database handle.
@@ -142,7 +61,7 @@ impl Database {
         let uuid = generate_database_uuid();
         let engine = StorageEngine::open(io, path.as_ref(), config.to_engine_config(), uuid)?;
         let registries = CoreRegistries::default_v1();
-        let batch_queue = CoreBatchQueue::new(config.group_commit);
+        let batch_queue = GroupCommitQueue::new(config.group_commit);
         Ok(Self {
             inner: Arc::new(DatabaseInner {
                 path: path.as_ref().to_path_buf(),
@@ -224,7 +143,10 @@ impl Database {
             let sp = wtx.savepoint();
             match item(&mut wtx) {
                 Ok(val) => {
-                    wtx.release_savepoint(sp)?;
+                    if let Err(err) = wtx.release_savepoint(sp) {
+                        let _ = wtx.rollback_to(sp);
+                        return Err(err);
+                    }
                     results.push(Ok(val));
                     committed_count += 1;
                 }
@@ -282,129 +204,40 @@ impl Database {
             ));
         }
 
-        let slot: ResultSlot<T> = Arc::new(Mutex::new(None));
-        let slot_for_deliver = Arc::clone(&slot);
-
-        let task = CoreQueuedTask {
-            run: Some(Box::new(
-                move |wtx: &mut WriteTransaction<'_>| -> Result<BoxedAny> {
-                    let val = op(wtx)?;
-                    Ok(Box::new(val))
-                },
-            )),
-            deliver: Some(Box::new(move |res: Result<(BoxedAny, CommitReceipt)>| {
-                let typed = res.and_then(|(boxed, receipt)| {
-                    boxed.downcast::<T>().map(|v| (*v, receipt)).map_err(|_| {
-                        ErrorEnvelope::new(
-                            ErrorCategory::Internal,
-                            MODULE_ID,
-                            "Database::submit_batched",
-                            "group commit result type downcast mismatch",
-                        )
-                    })
-                });
-                if let Ok(mut guard) = slot_for_deliver.lock() {
-                    *guard = Some(typed);
-                }
-            })),
-        };
-
-        let q = &self.inner.batch_queue;
-        let mut st = q.state.lock().map_err(|_| batch_queue_poisoned())?;
-        if st.pending.len() >= q.config.max_queue_depth {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Busy,
-                MODULE_ID,
-                "Database::submit_batched",
-                format!(
-                    "group commit queue full (max_queue_depth={})",
-                    q.config.max_queue_depth
-                ),
-            ));
-        }
-        st.pending.push_back(task);
-
-        loop {
-            if let Some(res) = slot.lock().map_err(|_| batch_queue_poisoned())?.take() {
-                return res;
-            }
-
-            if !st.leader_active {
-                st.leader_active = true;
-
-                if !q.config.linger.is_zero() && st.pending.len() < q.config.max_batch_size {
-                    let deadline = Instant::now() + q.config.linger;
-                    while st.pending.len() < q.config.max_batch_size {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            break;
-                        }
-                        let (guard, timeout) =
-                            q.cv.wait_timeout(st, deadline - now)
-                                .map_err(|_| batch_queue_poisoned())?;
-                        st = guard;
-                        if timeout.timed_out() {
-                            break;
-                        }
-                    }
-                }
-
-                let drain_count = st.pending.len().min(q.config.max_batch_size);
-                let mut drained = Vec::with_capacity(drain_count);
-                for _ in 0..drain_count {
-                    if let Some(t) = st.pending.pop_front() {
-                        drained.push(t);
-                    }
-                }
-                drop(st);
-
-                struct LeaderGuard<'q>(&'q CoreBatchQueue);
-                impl Drop for LeaderGuard<'_> {
-                    fn drop(&mut self) {
-                        if let Ok(mut st) = self.0.state.lock() {
-                            st.leader_active = false;
-                            self.0.cv.notify_all();
-                        }
-                    }
-                }
-                let _leader_guard = LeaderGuard(q);
-
-                self.execute_drained_batch(drained);
-
-                drop(_leader_guard);
-                st = q.state.lock().map_err(|_| batch_queue_poisoned())?;
-                continue;
-            }
-
-            st = q.cv.wait(st).map_err(|_| batch_queue_poisoned())?;
-        }
+        self.inner
+            .batch_queue
+            .submit(op, |drained| self.execute_drained_batch(drained))
     }
 
-    fn execute_drained_batch(&self, drained: Vec<CoreQueuedTask>) {
+    fn execute_drained_batch(&self, drained: Vec<BatchItem<CoreWriteBatchTx>>) {
         if drained.is_empty() {
             return;
         }
         let mut wtx = match self.begin_write() {
             Ok(tx) => tx,
             Err(err) => {
-                for task in drained {
-                    task.deliver_err(clone_error_envelope(&err));
+                for item in drained {
+                    item.deliver_err(clone_error_envelope(&err));
                 }
                 return;
             }
         };
 
-        let mut succeeded: Vec<(CoreQueuedTask, BoxedAny)> = Vec::with_capacity(drained.len());
-        for mut task in drained {
+        let mut succeeded: Vec<(BatchItem<CoreWriteBatchTx>, Box<dyn Any + Send>)> =
+            Vec::with_capacity(drained.len());
+        for mut item in drained {
             let sp = wtx.savepoint();
-            match task.execute(&mut wtx) {
+            match item.execute(&mut wtx) {
                 Ok(val) => match wtx.release_savepoint(sp) {
-                    Ok(()) => succeeded.push((task, val)),
-                    Err(err) => task.deliver_err(err),
+                    Ok(()) => succeeded.push((item, val)),
+                    Err(err) => {
+                        let _ = wtx.rollback_to(sp);
+                        item.deliver_err(err);
+                    }
                 },
                 Err(err) => {
                     let _ = wtx.rollback_to(sp);
-                    task.deliver_err(err);
+                    item.deliver_err(err);
                 }
             }
         }
@@ -416,13 +249,13 @@ impl Database {
 
         match wtx.commit() {
             Ok(receipt) => {
-                for (task, val) in succeeded {
-                    task.deliver_ok(val, receipt);
+                for (item, val) in succeeded {
+                    item.deliver_ok(val, receipt);
                 }
             }
             Err(commit_err) => {
-                for (task, _) in succeeded {
-                    task.deliver_err(clone_error_envelope(&commit_err));
+                for (item, _) in succeeded {
+                    item.deliver_err(clone_error_envelope(&commit_err));
                 }
             }
         }
@@ -468,15 +301,6 @@ impl Database {
     pub fn inspect_locks(path: impl AsRef<Path>) -> Result<LockInspectionReport> {
         inspect_locks(path.as_ref())
     }
-}
-
-fn batch_queue_poisoned() -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        ErrorCategory::Internal,
-        MODULE_ID,
-        "Database::submit_batched",
-        "group commit queue mutex poisoned",
-    )
 }
 
 fn generate_database_uuid() -> [u8; 16] {
