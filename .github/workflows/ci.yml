@@ -110,12 +110,26 @@ jobs:
           cargo test -p oryq-core --features vec
           cargo test -p oryq-core --features fts,vec
 
-      - name: Compile and run native C99/C++11 FFI integration test
+      - name: Compile and run native C99/C++17 FFI integration tests & examples
         if: runner.os != 'Windows'
         run: |
           cargo build -p oryq-ffi
           TMPDIR_FFI=$(mktemp -d)
           cc -std=c99 -Wall -Wextra -Werror -Iinclude crates/oryq-ffi/tests/c99_integration.c -Ltarget/debug -loryq -Wl,-rpath,target/debug -lm -o "$TMPDIR_FFI/c99_test"
           "$TMPDIR_FFI/c99_test" "$TMPDIR_FFI/test.oryq" "$TMPDIR_FFI/backup.oryq"
+          cc -std=c99 -Wall -Wextra -Werror -Iinclude bindings/c/quickstart.c -Ltarget/debug -loryq -Wl,-rpath,target/debug -lm -o "$TMPDIR_FFI/quickstart_c"
+          "$TMPDIR_FFI/quickstart_c" "$TMPDIR_FFI/qs_c.oryq" "$TMPDIR_FFI/qs_c_bk.oryq"
           c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++ -Iinclude - <<< '#include "oryq.h"'
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude bindings/cpp/quickstart.cpp -Ltarget/debug -loryq -Wl,-rpath,target/debug -lm -o "$TMPDIR_FFI/quickstart_cpp"
+          "$TMPDIR_FFI/quickstart_cpp" "$TMPDIR_FFI/qs_cpp.oryq"
           rm -rf "$TMPDIR_FFI"
+
+      - name: Run Python ctypes binding tests (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s bindings/python/tests -v
+
+      - name: Run Python ctypes binding tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build -p oryq-ffi
+          python -m unittest discover -s bindings/python/tests -v

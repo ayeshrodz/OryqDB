@@ -2,7 +2,7 @@
 
 An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
-> **Current Version:** `0.10.3` (`X03` Queued Write Batching & Group Commit Complete — `commit_batch` & `Database::submit_batched`, multi-process `.oryq-shm`, optional `oryq-fts` & `oryq-vec`, C ABI v1.1; see [CONTRIBUTING_WORKFLOW.md](docs/CONTRIBUTING_WORKFLOW.md).)
+> **Current Version:** `0.11.0` (Official Python/C99/C++17 Bindings & Production Developer Guides Complete — all `0.9.x`–`0.11.0` pre-1.0 milestones delivered; see [PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md).)
 
 ## Design Overview
 
@@ -14,6 +14,9 @@ OryqDB combines single-file embedded portability with MongoDB-style document cap
 
 ## Documentation Map
 
+* **Production Developer Guides & Bindings (`v0.11.0`):**
+  * [docs/guides/quickstart.md](docs/guides/quickstart.md) · [docs/guides/query-and-aggregation.md](docs/guides/query-and-aggregation.md) · [docs/guides/c-abi-guide.md](docs/guides/c-abi-guide.md) · [docs/guides/operations-and-recovery.md](docs/guides/operations-and-recovery.md)
+  * [bindings/README.md](bindings/README.md) (Python `ctypes`, C99, C++17) · [docs/PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md)
 * **Master Design & Modularity:**
   * [docs/designs/modular-architecture.md](docs/designs/modular-architecture.md) — Crate dependency allowlist, file ownership tree, boundary traits, and `xtask` architecture checker contracts.
   * [docs/designs/oryqdb.md](docs/designs/oryqdb.md) — Master engine architecture specification.
