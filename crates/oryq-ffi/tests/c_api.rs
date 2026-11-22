@@ -343,8 +343,11 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
 
 #[test]
 fn ffi_rejects_null_arguments_and_catches_panics() {
-    // SAFETY: Testing explicit null argument rejection across FFI boundaries (Miri-verified).
+    assert_eq!(oryq_abi_version(), (1 << 16) | 1);
+    // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string; `oryq_free_string(null)` is a no-op.
     unsafe {
+        assert!(!CStr::from_ptr(oryq_version()).to_str().unwrap().is_empty());
+        oryq_free_string(ptr::null_mut());
         assert_eq!(
             oryq_db_open(ptr::null(), ptr::null_mut()),
             OryqStatus::ErrInvalidArgument

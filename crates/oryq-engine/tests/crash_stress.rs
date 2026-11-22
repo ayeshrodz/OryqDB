@@ -135,17 +135,47 @@ fn repeated_crash_truncated_wal_tail_and_midframe_truncation_preserve_committed_
         }
     }
 
-    // Final reopen verifies all 15 cycles intact
+    // Real mid-frame WAL truncation test: write tx #16, then shorten its ACTUAL written
+    // WAL frame mid-record via `set_len(len - 37)` and assert tx #1..=15 survive while tx #16
+    // is cleanly discarded as an incomplete tail!
+    {
+        let vfs = Arc::new(OsVfs::new());
+        let engine = StorageEngine::open(vfs, &db_path, cfg.clone(), [0x42; 16]).unwrap();
+        let mut wtx = engine.begin_write().unwrap();
+        let mut wtree = BTree::open(root_page_id.unwrap(), TreeKind::Collection);
+        wtree
+            .insert(
+                &mut wtx,
+                &16u64.to_be_bytes(),
+                b"will_be_truncated_mid_frame",
+            )
+            .unwrap();
+        wtx.set_catalog_root_page_id(wtree.root());
+        wtx.commit().unwrap();
+    }
+    assert!(wal_path.exists());
+    {
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
+        let len = f.metadata().unwrap().len();
+        assert!(len > 100);
+        f.set_len(len - 37).unwrap();
+        f.sync_all().unwrap();
+    }
     {
         let vfs = Arc::new(OsVfs::new());
         let engine = StorageEngine::open(vfs, &db_path, cfg.clone(), [0x42; 16]).unwrap();
         let rtx = engine.begin_read().unwrap();
-        let tree = BTree::open(root_page_id.unwrap(), TreeKind::Collection);
+        let tree = BTree::open(rtx.catalog_root_page_id(), TreeKind::Collection);
         assert_eq!(tree.scan_all(&rtx).unwrap().len(), 15);
+        assert_eq!(tree.get(&rtx, &16u64.to_be_bytes()).unwrap(), None);
 
         // Write one more uncheckpointed tx so we can test complete WAL frame bitflip -> Corruption
         let mut wtx = engine.begin_write().unwrap();
-        let mut wtree = BTree::open(root_page_id.unwrap(), TreeKind::Collection);
+        let mut wtree = BTree::open(rtx.catalog_root_page_id(), TreeKind::Collection);
         wtree
             .insert(&mut wtx, &99u64.to_be_bytes(), b"wal_bitflip_test")
             .unwrap();
