@@ -552,7 +552,8 @@ pub unsafe extern "C" fn oryq_cursor_get_i64(
 /// Closes and frees a cursor handle.
 ///
 /// # Safety
-/// `cursor` must be null or a valid pointer from `oryq_find_json` not yet closed.
+/// `cursor` must be null or a valid pointer from `oryq_find_json` or `oryq_aggregate_json`
+/// not yet closed.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_cursor_close(cursor: *mut OryqCursor) -> OryqStatus {
     ffi_guard(|| {
@@ -615,6 +616,11 @@ pub unsafe extern "C" fn oryq_cursor_get_utf8(
                 "cursor, out_ptr, and out_len must not be null".to_owned(),
             ));
         }
+        // SAFETY: `out_ptr` and `out_len` are verified non-null; initialize before fallible work.
+        unsafe {
+            *out_ptr = std::ptr::null();
+            *out_len = 0;
+        }
         let field_name = read_cstr(field, "field")?;
         // SAFETY: `cursor` is valid for this call.
         let cur = unsafe { &*cursor };
@@ -663,6 +669,10 @@ pub unsafe extern "C" fn oryq_cursor_get_f64(
                 "cursor and out_val must not be null".to_owned(),
             ));
         }
+        // SAFETY: `out_val` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_val = 0.0;
+        }
         let field_name = read_cstr(field, "field")?;
         // SAFETY: `cursor` is valid for this call.
         let cur = unsafe { &*cursor };
@@ -708,6 +718,10 @@ pub unsafe extern "C" fn oryq_cursor_get_bool(
                 OryqStatus::ErrInvalidArgument,
                 "cursor and out_val must not be null".to_owned(),
             ));
+        }
+        // SAFETY: `out_val` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_val = false;
         }
         let field_name = read_cstr(field, "field")?;
         // SAFETY: `cursor` is valid for this call.
@@ -755,6 +769,10 @@ pub unsafe extern "C" fn oryq_aggregate_json(
                 OryqStatus::ErrInvalidArgument,
                 "txn and out_cursor must not be null".to_owned(),
             ));
+        }
+        // SAFETY: `out_cursor` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_cursor = std::ptr::null_mut();
         }
         let col_name = read_cstr(collection, "collection")?;
         let pipe = read_cstr(pipeline_json, "pipeline_json")?;
@@ -858,7 +876,10 @@ pub unsafe extern "C" fn oryq_drop_index(
         if dropped {
             Ok(OryqStatus::Ok)
         } else {
-            Ok(OryqStatus::ErrIndexNotFound)
+            Err((
+                OryqStatus::ErrIndexNotFound,
+                format!("index '{idx_name}' not found on collection '{col_name}'"),
+            ))
         }
     })
 }
@@ -903,6 +924,10 @@ pub unsafe extern "C" fn oryq_db_integrity_check(
                 OryqStatus::ErrInvalidArgument,
                 "db and out_ok must not be null".to_owned(),
             ));
+        }
+        // SAFETY: `out_ok` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_ok = false;
         }
         // SAFETY: `db` is valid for this call.
         let db_ref = unsafe { &*db };

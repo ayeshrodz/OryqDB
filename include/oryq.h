@@ -84,10 +84,11 @@ oryq_status oryq_find_json(const OryqReadTxn *txn, const char *collection, const
 oryq_status oryq_aggregate_json(const OryqReadTxn *txn, const char *collection, const char *pipeline_json, OryqCursor **out_cursor);
 oryq_status oryq_cursor_next(OryqCursor *cursor);
 oryq_status oryq_cursor_next_json(OryqCursor *cursor, char **out_json);
+/* Top-level field getters on the cursor's current document. */
 oryq_status oryq_cursor_get_i64(const OryqCursor *cursor, const char *field, int64_t *out_val);
 oryq_status oryq_cursor_get_f64(const OryqCursor *cursor, const char *field, double *out_val);
 oryq_status oryq_cursor_get_bool(const OryqCursor *cursor, const char *field, bool *out_val);
-/* Borrowed UTF-8 byte slice (NOT NUL-terminated); valid until next cursor advance or close. */
+/* Borrowed UTF-8 byte slice for a top-level field (NOT NUL-terminated); valid until next cursor advance or close. */
 oryq_status oryq_cursor_get_utf8(const OryqCursor *cursor, const char *field, const char **out_ptr, size_t *out_len);
 oryq_status oryq_cursor_close(OryqCursor *cursor);
 

@@ -151,11 +151,11 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         let f_sku = CString::new("sku").unwrap();
         let idx_name = CString::new("sku_uniq").unwrap();
         let d1 = CString::new(
-            r#"{"_id": 1, "sku": "A-100", "price": 19.5, "in_stock": true, "qty": 10}"#,
+            r#"{"_id": 1, "sku": "A-100", "note": "", "price": 19.5, "in_stock": true, "qty": 10}"#,
         )
         .unwrap();
         let d2 = CString::new(
-            r#"{"_id": 2, "sku": "B-200", "price": 40.5, "in_stock": false, "qty": 5}"#,
+            r#"{"_id": 2, "sku": "B-200", "note": "ok", "price": 40.5, "in_stock": false, "qty": 5}"#,
         )
         .unwrap();
 
@@ -176,7 +176,7 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
             ),
             OryqStatus::ErrInvalidArgument
         );
-        // Valid unique secondary index creation
+        // Valid unique secondary index creation (Asc + explicit name)
         assert_eq!(
             oryq_create_index(
                 wtx,
@@ -186,6 +186,20 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
                 true,
                 false,
                 idx_name.as_ptr()
+            ),
+            OryqStatus::Ok
+        );
+        // Descending index with auto-generated name (`name_or_null = NULL`)
+        let f_price_idx = CString::new("price").unwrap();
+        assert_eq!(
+            oryq_create_index(
+                wtx,
+                col.as_ptr(),
+                f_price_idx.as_ptr(),
+                -1,
+                false,
+                false,
+                ptr::null()
             ),
             OryqStatus::Ok
         );
@@ -209,6 +223,15 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
             oryq_find_json(rtx, col.as_ptr(), filter.as_ptr(), &mut cur),
             OryqStatus::Ok
         );
+
+        // Calling getters before first `oryq_cursor_next` must return ErrNotFound and zero out-param
+        let mut pre_val: f64 = 123.4;
+        assert_eq!(
+            oryq_cursor_get_f64(cur, f_price_idx.as_ptr(), &mut pre_val),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(pre_val, 0.0);
+
         assert_eq!(oryq_cursor_next(cur), OryqStatus::Ok);
 
         let mut utf8_ptr: *const std::ffi::c_char = ptr::null();
@@ -219,6 +242,15 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         );
         let sku_slice = std::slice::from_raw_parts(utf8_ptr.cast::<u8>(), utf8_len);
         assert_eq!(sku_slice, b"A-100");
+
+        // Empty UTF-8 string check
+        let f_note = CString::new("note").unwrap();
+        assert_eq!(
+            oryq_cursor_get_utf8(cur, f_note.as_ptr(), &mut utf8_ptr, &mut utf8_len),
+            OryqStatus::Ok
+        );
+        assert_eq!(utf8_len, 0);
+        assert!(!utf8_ptr.is_null());
 
         let f_price = CString::new("price").unwrap();
         let mut price: f64 = 0.0;
@@ -243,6 +275,11 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         );
 
         assert_eq!(oryq_cursor_next(cur), OryqStatus::CursorDone);
+        // Calling getters after ORYQ_CURSOR_DONE must return ErrNotFound
+        assert_eq!(
+            oryq_cursor_get_bool(cur, f_stock.as_ptr(), &mut in_stock),
+            OryqStatus::ErrNotFound
+        );
         assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
 
         // Aggregation pipeline via `oryq_aggregate_json`
@@ -284,6 +321,7 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
             oryq_drop_index(wtx2, col.as_ptr(), idx_name.as_ptr()),
             OryqStatus::ErrIndexNotFound
         );
+        assert!(!oryq_last_error_message().is_null());
         assert_eq!(oryq_write_txn_commit(wtx2), OryqStatus::Ok);
 
         // Integrity check & sealed online backup
@@ -334,6 +372,26 @@ fn ffi_rejects_null_arguments_and_catches_panics() {
         );
         assert_eq!(
             oryq_db_integrity_check(ptr::null(), ptr::null_mut()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_index(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                1,
+                false,
+                false,
+                ptr::null()
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_drop_index(ptr::null_mut(), ptr::null(), ptr::null()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_db_backup_to(ptr::null(), ptr::null()),
             OryqStatus::ErrInvalidArgument
         );
     }
