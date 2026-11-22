@@ -183,7 +183,24 @@ pub fn run_online_backup(
                                     Some(&idx.name),
                                 )?;
                             }
-                            IndexKind::Pluggable(_) => {}
+                            IndexKind::Pluggable(ref kind_name) => {
+                                #[cfg(feature = "fts")]
+                                if kind_name == "fts" {
+                                    let field_paths: Vec<&str> =
+                                        idx.fields.iter().map(|f| f.path.as_str()).collect();
+                                    dst_col.create_fts_index(&field_paths, Some(&idx.name))?;
+                                    continue;
+                                }
+                                return Err(ErrorEnvelope::new(
+                                    ErrorCategory::UnsupportedFeature,
+                                    MODULE_ID,
+                                    "admin::run_online_backup",
+                                    format!(
+                                        "cannot back up pluggable index '{}' (kind '{kind_name}') without its provider enabled",
+                                        idx.name
+                                    ),
+                                ));
+                            }
                         }
                     }
 

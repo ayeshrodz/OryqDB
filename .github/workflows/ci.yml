@@ -100,6 +100,11 @@ jobs:
       - name: Run module check for cli (oryq-cli)
         run: cargo run -p xtask -- modules cli
 
+      - name: Run optional FTS extension tests (--features fts)
+        run: |
+          cargo run -p xtask -- modules fts
+          cargo test -p oryq-core --features fts
+
       - name: Compile and run native C99/C++11 FFI integration test
         if: runner.os != 'Windows'
         run: |

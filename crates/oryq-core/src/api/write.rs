@@ -206,6 +206,15 @@ impl WriteCollection<'_, '_> {
         )
     }
 
+    #[cfg(feature = "fts")]
+    pub fn create_fts_index(
+        &mut self,
+        fields: &[&str],
+        name: Option<&str>,
+    ) -> Result<IndexDescriptor> {
+        crate::write::create_fts_index_stmt(self.tx, self.registries, &self.name, name, fields)
+    }
+
     pub fn drop_index(&mut self, index_name: &str) -> Result<bool> {
         drop_index_stmt(self.tx, self.registries, &self.name, index_name)
     }

@@ -20,9 +20,15 @@ impl CoreRegistries {
     /// Assembles the standard v1 baseline registries (`$set`/`$unset`/`$inc`/`$push`/`$pull`,
     /// `index.primary`, and `DocumentRecordCompactor`).
     pub fn default_v1() -> Self {
+        #[allow(unused_mut)]
+        let mut indexes = IndexProviderRegistry::default_v1();
+        #[cfg(feature = "fts")]
+        {
+            indexes.register(Arc::new(oryq_fts::FtsIndexProvider));
+        }
         Self {
             updates: UpdateRegistry::default_v1(),
-            indexes: IndexProviderRegistry::default_v1(),
+            indexes,
             compactor: Arc::new(DocumentRecordCompactor),
         }
     }

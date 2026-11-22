@@ -56,9 +56,11 @@ pub fn plan_find(
         }
     }
 
-    // 2. Secondary equality scan on leading indexed field.
+    // 2. Secondary equality scan on leading indexed field (Secondary & Compound only; never Pluggable).
     for desc in indexes {
-        if desc.kind == IndexKind::Primary || desc.fields.is_empty() {
+        if !matches!(desc.kind, IndexKind::Secondary | IndexKind::Compound)
+            || desc.fields.is_empty()
+        {
             continue;
         }
         let lead = &desc.fields[0].path;
@@ -80,9 +82,11 @@ pub fn plan_find(
         }
     }
 
-    // 3. Secondary range scan on leading indexed field ($gt/$gte/$lt/$lte).
+    // 3. Secondary range scan on leading indexed field ($gt/$gte/$lt/$lte; Secondary & Compound only).
     for desc in indexes {
-        if desc.kind == IndexKind::Primary || desc.fields.is_empty() {
+        if !matches!(desc.kind, IndexKind::Secondary | IndexKind::Compound)
+            || desc.fields.is_empty()
+        {
             continue;
         }
         let lead = &desc.fields[0].path;

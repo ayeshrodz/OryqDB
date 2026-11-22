@@ -772,6 +772,18 @@ pub fn drop_index_stmt(
         let provider = registries.indexes.require(&desc.provider_id)?;
         provider.drop_index(tx, &desc)?;
 
+        // Recompute required_write_features from remaining indexes so dropping the last
+        // optional-feature index clears its write feature bit cleanly.
+        let mut req_write = FeatureBitmask::EMPTY;
+        for remaining in &entry.indexes {
+            if let Some(bit) = remaining.required_feature_bit {
+                if bit < 64 {
+                    req_write = req_write.union(FeatureBitmask::from_raw(1u64 << bit));
+                }
+            }
+        }
+        entry.required_write_features = req_write;
+
         let new_root = save_collection_entry(tx, catalog_root, &entry)?;
         tx.set_catalog_root_page_id(new_root);
         Ok(true)
@@ -909,6 +921,103 @@ pub fn create_compound_index_stmt(
         }
 
         entry.indexes.push(desc.clone());
+        let root_after_meta = save_catalog_meta(tx, catalog_root, &meta)?;
+        let root_after_entry = save_collection_entry(tx, root_after_meta, &entry)?;
+        tx.set_catalog_root_page_id(root_after_entry);
+        Ok(desc)
+    })();
+
+    match res {
+        Ok(desc) => {
+            tx.release_savepoint(sp)?;
+            Ok(desc)
+        }
+        Err(err) => {
+            let _ = tx.rollback_to(sp);
+            Err(err)
+        }
+    }
+}
+
+/// Atomically creates and backfills an optional full-text search (`index.fts`) index
+/// inside a statement savepoint (`--features fts`).
+#[cfg(feature = "fts")]
+pub fn create_fts_index_stmt(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    collection_name: &str,
+    name: Option<&str>,
+    fields: &[&str],
+) -> Result<IndexDescriptor> {
+    if fields.is_empty() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "write::create_fts_index_stmt",
+            "FTS index requires at least one text field path",
+        ));
+    }
+    let mut parsed_paths = Vec::with_capacity(fields.len());
+    for &raw_path in fields {
+        parsed_paths.push(FieldPath::parse(raw_path)?);
+    }
+    let idx_name = match name {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => format!("{}_fts", fields.join("_")),
+    };
+
+    let sp = tx.savepoint();
+    let res = (|| -> Result<IndexDescriptor> {
+        let catalog_root = tx.catalog_root_page_id();
+        let mut entry =
+            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "write::create_fts_index_stmt",
+                    format!("collection '{collection_name}' does not exist"),
+                )
+            })?;
+
+        if entry.indexes.iter().any(|i| i.name == idx_name) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::DuplicateKey,
+                MODULE_ID,
+                "write::create_fts_index_stmt",
+                format!("index '{idx_name}' already exists on collection '{collection_name}'"),
+            ));
+        }
+
+        let mut meta = load_catalog_meta(tx, catalog_root)?;
+        let index_id = IndexId::new(meta.next_index_id)?;
+        meta.next_index_id = meta.next_index_id.checked_add(1).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "write::create_fts_index_stmt",
+                "next_index_id overflow",
+            )
+        })?;
+
+        let provider_id = CapabilityId::new(oryq_fts::FTS_PROVIDER_ID)?;
+        let provider = registries.indexes.require(&provider_id)?;
+        let mut desc =
+            oryq_fts::fts_index_descriptor(index_id, idx_name, parsed_paths, PageId::new(1));
+        desc.root_page_id = provider.create_empty(tx, &desc)?;
+
+        let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let existing = data_tree.scan_all(tx)?;
+        for (raw_rid, raw_rec) in existing {
+            let rid = decode_record_id(&raw_rid)?;
+            let doc = decode_collection_record(&raw_rec)?;
+            let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
+            desc.root_page_id = maint.new_root_page_id;
+        }
+
+        entry.indexes.push(desc.clone());
+        let fts_bit = FeatureBitmask::from_raw(1u64 << oryq_fts::FTS_FEATURE_BIT);
+        entry.required_write_features = entry.required_write_features.union(fts_bit);
+
         let root_after_meta = save_catalog_meta(tx, catalog_root, &meta)?;
         let root_after_entry = save_collection_entry(tx, root_after_meta, &entry)?;
         tx.set_catalog_root_page_id(root_after_entry);
