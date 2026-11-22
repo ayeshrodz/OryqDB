@@ -739,16 +739,17 @@ mod tests {
     #[test]
     fn self_test_rejects_dangling_planned_optional_dependency() {
         let (mut m, c, n, mut pkgs) = sample_manifests();
+        m.modules.iter_mut().find(|x| x.id == "vec").unwrap().state = ModuleState::Planned;
         m.modules
             .iter_mut()
             .find(|x| x.id == "core")
             .unwrap()
             .production_dependencies
-            .push("oryq-fts".to_string());
+            .push("oryq-vec".to_string());
         pkgs.get_mut("oryq-core")
             .unwrap()
             .normal_deps
-            .insert("oryq-fts".to_string());
+            .insert("oryq-vec".to_string());
         let err = validate_static(&workspace_root(), &m, &c, &n, &pkgs).unwrap_err();
         assert!(err.contains("cannot depend on planned module"));
     }

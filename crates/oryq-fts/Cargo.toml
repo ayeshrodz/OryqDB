@@ -1,0 +1,18 @@
+[package]
+name = "oryq-fts"
+description = "Optional full-text search (BM25 inverted index) provider crate for OryqDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+oryq-types.workspace = true
+oryq-document.workspace = true
+oryq-engine.workspace = true
+oryq-index.workspace = true
+
+[lints]
+workspace = true

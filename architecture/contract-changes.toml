@@ -272,3 +272,22 @@ evidence = [
     "cargo run -p xtask -- modules ffi",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0018"
+modules = ["fts", "core"]
+files = [
+    "crates/oryq-fts/src/lib.rs",
+    "crates/oryq-fts/src/provider.rs",
+    "crates/oryq-fts/src/bm25.rs",
+    "crates/oryq-core/src/lib.rs",
+]
+reason = "Implement Issue #15 (v0.10.0 / X01a): optional oryq-fts full-text search (Okapi BM25 inverted index) provider crate behind --features fts with persistent write_bits = [0]."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-fts",
+    "cargo test -p oryq-core --features fts",
+    "cargo test --workspace --no-default-features",
+    "cargo run -p xtask -- modules fts",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

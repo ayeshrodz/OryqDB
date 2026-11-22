@@ -7,8 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.10.x` (#15–#18 / `X01–X03`): Optional `oryq-fts` / `oryq-vec` search crates, `.oryq-shm` multi-process mode, and queued write batching (`commit_batch`).
+- `0.10.1` (#16 / `X01b`): Optional vector similarity search index provider crate (`oryq-vec`).
+- `0.10.2` (#17 / `X02`): Multi-process shared-memory coordination (`.oryq-shm`).
+- `0.10.3` (#18 / `X03`): Queued write batching & group commit (`commit_batch`).
 - `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.10.0] - 2026-11-22
+
+### Added (#15 / `X01a` — Optional Full-Text Search Provider `oryq-fts`)
+- Added optional workspace crate `crates/oryq-fts` (`#![forbid(unsafe_code)]`) implementing `oryq_index::IndexProvider` (`index.fts`) with zero dependency on `oryq-core`:
+  - Unicode-aware lowercase alphanumeric tokenizer (`tokenizer.rs`, `MAX_TOKEN_BYTES = 64`).
+  - Inverted-index B+ tree persistence (`codec.rs`) via restricted `IndexWriteContext` / `IndexReadContext` storing corpus stats, per-document lengths, and `(term, RecordId) -> tf` postings.
+  - Deterministic Okapi BM25 ranking (`bm25.rs`, `k1 = 1.2`, `b = 0.75`) with `RecordId` ascending tie-breaker.
+  - Persistent `write_bits = [0]` (`FTS_FEATURE_BIT = 0`) matching `architecture/capabilities.toml` (`oryq.index.fts.v1`).
+- Wired optional Cargo feature `--features fts` in `oryq-core` (disabled by default so minimal builds stay unchanged): `WriteCollection::create_fts_index` (with backfill & savepoint rollback), `ReadCollection::search_fts`, and automatic `required_write_features` recomputation on `drop_index`.
+- Activated `fts` in `architecture/modules.toml`, recorded `CC-0018`, added `fts_provider.rs`, `fts_integration.rs`, and `fts_reduced_build.rs`, and wired `--features fts` + `xtask modules fts` into CI.
 
 ## [0.9.2] - 2026-11-22
 

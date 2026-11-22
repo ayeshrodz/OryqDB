@@ -141,6 +141,42 @@ impl ReadCollection<'_, '_> {
         let ctx = QueryContext::default_with_limit(DEFAULT_QUERY_MEMORY_LIMIT);
         execute_pipeline_json(&source, &self.entry.name, pipeline_json, &ctx)
     }
+
+    /// Executes an Okapi BM25 full-text search against a named `index.fts` index (`--features fts`).
+    #[cfg(feature = "fts")]
+    pub fn search_fts(
+        &self,
+        index_name: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(DocumentBuf, f64)>> {
+        let desc = self
+            .entry
+            .indexes
+            .iter()
+            .find(|i| i.name == index_name && i.provider_id.as_str() == oryq_fts::FTS_PROVIDER_ID)
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "ReadCollection::search_fts",
+                    format!(
+                        "FTS index '{index_name}' not found on collection '{}'",
+                        self.entry.name
+                    ),
+                )
+            })?;
+        let hits = oryq_fts::search_fts(self.tx, desc, query, limit)?;
+        let data_tree = BTree::open(self.entry.data_root_page_id, TreeKind::Collection);
+        let mut results = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let rec_key = encode_record_id(hit.record_id);
+            if let Some(raw) = data_tree.get(self.tx, &rec_key)? {
+                results.push((decode_collection_record(&raw)?, hit.score));
+            }
+        }
+        Ok(results)
+    }
 }
 
 pub(crate) fn find_by_id_in_store(

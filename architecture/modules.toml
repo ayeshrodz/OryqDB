@@ -110,6 +110,7 @@ production_dependencies = [
     "oryq-engine",
     "oryq-index",
     "oryq-query",
+    "oryq-fts",
 ]
 contract_files = [
     "crates/oryq-core/src/lib.rs",
@@ -148,10 +149,14 @@ test_commands = [["cargo", "test", "-p", "oryq-cli"]]
 [[modules]]
 id = "fts"
 crate = "oryq-fts"
-state = "planned"
+state = "active"
 owned = ["crates/oryq-fts/"]
 production_dependencies = ["oryq-types", "oryq-document", "oryq-engine", "oryq-index"]
-contract_files = ["crates/oryq-fts/src/lib.rs"]
+contract_files = [
+    "crates/oryq-fts/src/lib.rs",
+    "crates/oryq-fts/src/provider.rs",
+    "crates/oryq-fts/src/bm25.rs",
+]
 optional = true
 test_commands = [["cargo", "test", "-p", "oryq-fts"]]
 

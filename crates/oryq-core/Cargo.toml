@@ -8,12 +8,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+fts = ["dep:oryq-fts"]
+
 [dependencies]
 oryq-types.workspace = true
 oryq-document.workspace = true
 oryq-engine.workspace = true
 oryq-index.workspace = true
 oryq-query.workspace = true
+oryq-fts = { workspace = true, optional = true }
 
 [lints]
 workspace = true
