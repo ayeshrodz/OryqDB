@@ -57,9 +57,9 @@ If an OS write or `fsync` fails mid-commit, OryqDB cannot know whether the commi
 ### Forensic Read-Only Inspection (Non-Mutating)
 Use the `oryq inspect` commands on a suspect or locked database without mutating or replaying it:
 ```bash
-oryq inspect-page prod.oryq 0
-oryq inspect-wal prod.oryq
-oryq inspect-locks prod.oryq
+oryq inspect prod.oryq page 0
+oryq inspect prod.oryq wal
+oryq inspect prod.oryq locks
 ```
 
 ### Multi-Process `.oryq-shm` Stale Peer Recovery

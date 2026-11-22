@@ -22,7 +22,8 @@ IMPLEMENTED:
 VERIFIED:
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings, MSRV 1.80.0 clean).
-- `cargo test --workspace` and `--no-default-features`: 76 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 16; `oryq-engine`: 23; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 8; `oryq-ffi`: 3; `oryq-cli`: 1; `xtask`: 6).
+- `cargo test --workspace`, `--no-default-features`, `--features fts`, `--features vec`, and `--features fts,vec`: all 10 workspace crates (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-fts`, `oryq-vec`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) + `xtask` passing across Linux, macOS, and Windows CI.
+- Official Python `ctypes` bindings (`bindings/python/tests/test_oryqdb.py`) and native C99/C++17 quickstart examples (`bindings/c/quickstart.c`, `bindings/cpp/quickstart.cpp`): passing in CI.
 - `cargo +nightly miri test` (`oryq-types`: 7, `oryq-document`: 16, `oryq-ffi`: 1): 24 passed, 0 failed (zero UB/leaks).
 - `cargo audit`: 0 vulnerabilities across 49 crate dependencies (1,555 advisories scanned).
 - `cargo run -p xtask -- modules` for all 8 crates and `xtask architecture --base origin/main`: passed.

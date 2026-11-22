@@ -128,6 +128,52 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                     with rtx.find("users") as cur:
                         self.assertEqual(len(list(cur)), 2)
 
+    def test_string_id_utf8_edge_cases_busy_close_retry_and_use_after_close(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="oryqdb_py_edge_") as tmpdir:
+            db_path = Path(tmpdir) / "edge.oryq"
+            db = Database.open(db_path)
+
+            # 1. String _id insert, update_by_id, delete_by_id + empty & multi-byte UTF-8 get_utf8
+            with db.write_txn() as wtx:
+                wtx.create_collection("items")
+                wtx.insert(
+                    "items",
+                    {"_id": "item-alpha", "empty": "", "label": "日本語 🚀 café"},
+                )
+                wtx.update_by_id("items", "item-alpha", {"$set": {"updated": True}})
+                wtx.commit()
+
+            with db.read_txn() as rtx:
+                with rtx.find("items", {"_id": "item-alpha"}) as cur:
+                    self.assertTrue(cur.step())
+                    self.assertEqual(cur.get_utf8("_id"), "item-alpha")
+                    self.assertEqual(cur.get_utf8("empty"), "")
+                    self.assertEqual(cur.get_utf8("label"), "日本語 🚀 café")
+                    self.assertTrue(cur.get_bool("updated"))
+
+            with db.write_txn() as wtx:
+                wtx.delete_by_id("items", "item-alpha")
+                wtx.commit()
+
+            with db.read_txn() as rtx:
+                with rtx.find("items") as cur:
+                    self.assertEqual(len(list(cur)), 0)
+
+            # 2. Database.close() while a ReadTxn is open raises ERR_BUSY without leaking handle;
+            #    closing the ReadTxn and retrying db.close() succeeds cleanly.
+            rtx = db.read_txn()
+            with self.assertRaises(OryqError) as ctx:
+                db.close()
+            self.assertEqual(ctx.exception.status, OryqStatus.ERR_BUSY)
+            rtx.close()
+            db.close()
+
+            # 3. Double-close is idempotent; use-after-close raises ERR_INVALID_ARGUMENT
+            db.close()
+            with self.assertRaises(OryqError) as ctx:
+                db.read_txn()
+            self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
+
 
 if __name__ == "__main__":
     unittest.main()

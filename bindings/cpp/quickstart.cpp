@@ -17,7 +17,8 @@ namespace oryq {
 
 inline void check(oryq_status st, const char* op) {
     if (st != ORYQ_OK) {
-        throw std::runtime_error(std::string(op) + ": " + oryq_last_error_message());
+        const char* msg = oryq_last_error_message();
+        throw std::runtime_error(std::string(op) + ": " + (msg ? msg : "(no error message)"));
     }
 }
 

@@ -84,16 +84,18 @@ def _discover_library_path() -> Optional[Path]:
 
     # Check workspace target/release and target/debug relative to bindings/python/oryqdb/__init__.py,
     # preferring whichever library artifact was built most recently.
-    repo_root = Path(__file__).resolve().parents[3]
-    candidates = []
-    for profile in ("release", "debug"):
-        for name in _platform_lib_names():
-            candidate = repo_root / "target" / profile / name
-            if candidate.is_file():
-                candidates.append(candidate)
-    if candidates:
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0]
+    parents = Path(__file__).resolve().parents
+    if len(parents) > 3:
+        repo_root = parents[3]
+        candidates = []
+        for profile in ("release", "debug"):
+            for name in _platform_lib_names():
+                candidate = repo_root / "target" / profile / name
+                if candidate.is_file():
+                    candidates.append(candidate)
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0]
     return None
 
 
@@ -376,9 +378,8 @@ class ReadTxn:
 
     def close(self) -> None:
         if self._handle is not None:
-            h = self._handle
+            _check(self._lib, self._lib.oryq_read_txn_close(self._handle))
             self._handle = None
-            _check(self._lib, self._lib.oryq_read_txn_close(h))
 
     def __enter__(self) -> ReadTxn:
         return self
@@ -460,7 +461,7 @@ class WriteTxn:
             self._lib.oryq_update_by_id_json(
                 self._require_open(),
                 collection.encode("utf-8"),
-                _to_json_bytes(doc_id),
+                json.dumps(doc_id, separators=(",", ":")).encode("utf-8"),
                 _to_json_bytes(update),
             ),
         )
@@ -471,7 +472,7 @@ class WriteTxn:
             self._lib.oryq_delete_by_id_json(
                 self._require_open(),
                 collection.encode("utf-8"),
-                _to_json_bytes(doc_id),
+                json.dumps(doc_id, separators=(",", ":")).encode("utf-8"),
             ),
         )
 
@@ -559,9 +560,8 @@ class Database:
 
     def close(self) -> None:
         if self._handle is not None:
-            h = self._handle
+            _check(self._lib, self._lib.oryq_db_close(self._handle))
             self._handle = None
-            _check(self._lib, self._lib.oryq_db_close(h))
 
     def __enter__(self) -> Database:
         return self

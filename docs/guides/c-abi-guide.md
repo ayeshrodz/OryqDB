@@ -31,7 +31,7 @@ cargo build --release -p oryq-ffi
 Every fallible C ABI function returns `oryq_status`:
 - `ORYQ_OK (0)`: Success.
 - `ORYQ_CURSOR_DONE (1)`: Normal end of cursor iteration.
-- `ORYQ_ERR_* (2..=25, 255)`: Error; call `oryq_last_error_message()` on the same thread for a human-readable diagnostic string.
+- `ORYQ_ERR_* (2..=25, 255)`: Error; call `oryq_last_error_message()` on the same thread for a human-readable diagnostic string (note: `oryq_last_error_message()` may return `NULL` if no message was set, so callers should always guard against `NULL`).
 - Rust panics never unwind across the FFI boundary; any unexpected panic is caught and returned as `ORYQ_ERR_INTERNAL_PANIC (255)`.
 
 ## 4. Building Bindings in Other Languages

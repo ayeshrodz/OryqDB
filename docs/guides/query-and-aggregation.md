@@ -29,7 +29,7 @@ let rows = col
 
 ### Inspecting Query Plans (`explain_analyze`)
 
-Use `ReadCollection::explain_analyze(&FindOptions { ... })` to inspect the chosen `AccessPlan` (`PrimaryIdLookup`, `SecondaryIndexEq`, `SecondaryIndexRange`, `CompoundIndexPrefix`, or `CollectionScan`), rows scanned, and rows returned.
+Use `ReadCollection::explain_analyze(&FindOptions { ... })` to inspect the chosen `AccessPlan` (`PrimaryIdLookup`, `SecondaryEqScan`, `SecondaryRangeScan`, or `CollectionScan`), rows scanned, and rows returned.
 
 ## 3. Indexes
 
@@ -51,7 +51,7 @@ OryqDB executes memory-bounded, spillable JSON aggregation pipelines within a pi
 - **`$project`:** Field inclusion/exclusion and computed renaming.
 - **`$unwind`:** Expands array fields into one document per element.
 - **`$lookup`:** Left outer join against another collection in the same snapshot (`from`, `localField`, `foreignField`, `as`).
-- **`$group`:** Groups by `_id` expression with accumulators (`$sum`, `$avg`, `$min`, `$max`, `$count`, `$first`, `$last`, `$push`).
+- **`$group`:** Groups by `_id` expression with accumulators (`$sum`, `$avg`, `$min`, `$max`, `$count`, `$push`, `$addToSet`).
 - **`$sort`:** Memory-bounded external merge sort that spills temporary runs via RAII `SpillManager` when exceeding the query memory budget (automatically cleaned up on completion or error).
 - **`$skip` / `$limit`:** Deterministic pagination.
 

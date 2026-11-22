@@ -13,8 +13,9 @@
 
 static void die_if_err(oryq_status st, const char *step) {
     if (st != ORYQ_OK) {
+        const char *msg = oryq_last_error_message();
         fprintf(stderr, "OryqDB error at %s (status=%d): %s\n",
-                step, (int)st, oryq_last_error_message());
+                step, (int)st, msg ? msg : "(no error message)");
         exit(1);
     }
 }

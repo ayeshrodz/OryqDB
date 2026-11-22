@@ -42,7 +42,7 @@ fn main() -> oryq_core::Result<()> {
 
     // Point lookup by _id
     let ada = col.find_by_id(&Value::Int64(1))?.expect("user 1 exists");
-    println!("{}", oryq_core::to_json_string(&ada.view()));
+    println!("{}", oryq_core::to_json_string(&ada.view())?);
     Ok(())
 }
 ```
@@ -92,7 +92,7 @@ cargo build --release -p oryq-cli
 ./target/release/oryq info app.oryq
 ./target/release/oryq collections app.oryq
 ./target/release/oryq insert app.oryq users '{"_id": 10, "name": "CLI User"}'
-./target/release/oryq find app.oryq users '{"_id": {"$gte": 1}}'
+./target/release/oryq find app.oryq users --filter '{"_id": {"$gte": 1}}'
 ./target/release/oryq integrity-check app.oryq
 ./target/release/oryq backup app.oryq app_backup.oryq
 ```
