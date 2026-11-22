@@ -1,11 +1,11 @@
 # OryqDB Project Status
 
-* **Last Updated:** 2026-11-20
+* **Last Updated:** 2026-11-22
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: 10 — Baseline Format Freeze & Release Candidate (`W00–W16` complete / `v0.9.0-rc.1`)
-STATUS: Complete (Baseline RC1) — All 8 workspace crates (`oryq-types`, `oryq-document`, `oryq-engine`, `oryq-index`, `oryq-query`, `oryq-core`, `oryq-ffi`, `oryq-cli`) implemented and verified.
+MILESTONE: 10+ — Pre-1.0 Hardening (`v0.9.1` / Issue #13)
+STATUS: Active `0.x` Hardening & Extensions — All 8 baseline crates complete + crash/corruption/concurrency stress suite, `cargo audit`, and Miri verification passing.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
@@ -22,8 +22,10 @@ IMPLEMENTED:
 VERIFIED:
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings, MSRV 1.80.0 clean).
-- `cargo test --workspace` and `--no-default-features`: 69 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 15; `oryq-engine`: 19; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 7; `oryq-ffi`: 2; `oryq-cli`: 1; `xtask`: 6).
-- `cargo run -p xtask -- modules` for all 8 crates (`types`, `document`, `engine`, `index`, `query`, `core`, `ffi`, `cli`) and `xtask architecture --base origin/main`: passed.
+- `cargo test --workspace` and `--no-default-features`: 75 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 16; `oryq-engine`: 23; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 8; `oryq-ffi`: 2; `oryq-cli`: 1; `xtask`: 6).
+- `cargo +nightly miri test` (`oryq-types`: 7, `oryq-document`: 16, `oryq-ffi`: 1): 24 passed, 0 failed (zero UB/leaks).
+- `cargo audit`: 0 vulnerabilities across 49 crate dependencies (1,555 advisories scanned).
+- `cargo run -p xtask -- modules` for all 8 crates and `xtask architecture --base origin/main`: passed.
 - Native C99 FFI smoke test (`cc -std=c99 -Wall -Wextra -Werror -Iinclude ... -loryq`): passed.
 - `python3 tools/validate_design_docs.py`: passed.
 - `cargo build --release -p oryq-cli -p oryq-ffi`: `oryq` (1.6 MB), `liboryq.so` (1.5 MB), `liboryq.a` (30 MB).
@@ -39,8 +41,8 @@ KNOWN ISSUES:
 - Post-baseline extensions `X01` (`oryq-fts` / `oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (E3 batching) remain planned for `0.10.x`.
 
 NEXT STEPS:
-1. Merge `v0.9.0-rc.1` PR to trigger automated multi-OS GitHub Pre-Release packaging (`.github/workflows/release.yml`).
-2. Begin `0.10.x` post-baseline extensions (`X01–X03`) or `1.0.0` GA stabilization.
+1. Merge `v0.9.1` (#13) after independent agent review and green multi-OS CI.
+2. Proceed sequentially through the tracked `0.x` roadmap: #14 (`v0.9.2` C ABI parity) → #15–#18 (`v0.10.x` `X01–X03` extensions) → #19 (`v0.11.0` bindings & developer guides).
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)
