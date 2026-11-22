@@ -191,6 +191,39 @@ pub fn run_online_backup(
                                     dst_col.create_fts_index(&field_paths, Some(&idx.name))?;
                                     continue;
                                 }
+                                #[cfg(feature = "vec")]
+                                if kind_name == "vec" {
+                                    let field = idx.fields.first().ok_or_else(|| {
+                                        ErrorEnvelope::new(
+                                            ErrorCategory::Corruption,
+                                            MODULE_ID,
+                                            "admin::run_online_backup",
+                                            format!(
+                                                "vector index '{}' missing field specification",
+                                                idx.name
+                                            ),
+                                        )
+                                    })?;
+                                    let opts_raw =
+                                        idx.options_json.as_deref().ok_or_else(|| {
+                                            ErrorEnvelope::new(
+                                                ErrorCategory::Corruption,
+                                                MODULE_ID,
+                                                "admin::run_online_backup",
+                                                format!(
+                                                    "vector index '{}' missing options_json",
+                                                    idx.name
+                                                ),
+                                            )
+                                        })?;
+                                    let opts = oryq_vec::VectorIndexOptions::from_json(opts_raw)?;
+                                    dst_col.create_vector_index(
+                                        field.path.as_str(),
+                                        opts,
+                                        Some(&idx.name),
+                                    )?;
+                                    continue;
+                                }
                                 return Err(ErrorEnvelope::new(
                                     ErrorCategory::UnsupportedFeature,
                                     MODULE_ID,

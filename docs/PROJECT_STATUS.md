@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: E1a — Optional Full-Text Search Provider (`v0.10.0` / Issue #15 / `X01a`)
-STATUS: Active `0.10.x` Extensions — All 8 baseline crates + optional `oryq-fts` (`--features fts`) Okapi BM25 inverted-index provider implemented and verified.
+MILESTONE: E1b — Optional Vector Similarity Search Provider (`v0.10.1` / Issue #16 / `X01b`)
+STATUS: Active `0.10.x` Extensions — All 8 baseline crates + optional `oryq-fts` (`--features fts`) and `oryq-vec` (`--features vec`) index providers implemented and verified.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
@@ -38,11 +38,11 @@ PERFORMANCE (Linux x86_64, 8 KiB pages, SyncMode::Normal):
 - WAL Checkpoint + Reset (117 pages copied): 0.60 ms
 
 KNOWN ISSUES:
-- Post-baseline extensions `X01b` (`oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (`commit_batch`) remain planned for `0.10.1–0.10.3`.
+- Post-baseline extensions `X02` (`.oryq-shm` multi-process) and `X03` (`commit_batch`) remain planned for `0.10.2–0.10.3`.
 
 NEXT STEPS:
-1. Merge `v0.10.0` (#15 / `oryq-fts`) after independent reviewer sign-off and green multi-OS CI.
-2. Continue `v0.10.x` extensions: #16 (`oryq-vec` / `X01b`) → #17 (`.oryq-shm` / `X02`) → #18 (`commit_batch` / `X03`) → #19 (`v0.11.0` bindings & guides).
+1. Merge `v0.10.1` (#16 / `oryq-vec`) after independent reviewer sign-off and green multi-OS CI.
+2. Continue `v0.10.x` extensions: #17 (`.oryq-shm` / `X02`) → #18 (`commit_batch` / `X03`) → #19 (`v0.11.0` bindings & guides).
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)

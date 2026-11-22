@@ -7,10 +7,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.10.1` (#16 / `X01b`): Optional vector similarity search index provider crate (`oryq-vec`).
 - `0.10.2` (#17 / `X02`): Multi-process shared-memory coordination (`.oryq-shm`).
 - `0.10.3` (#18 / `X03`): Queued write batching & group commit (`commit_batch`).
 - `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.10.1] - 2026-11-22
+
+### Added (#16 / `X01b` — Optional Vector Similarity Search Provider `oryq-vec`)
+- Added optional workspace crate `crates/oryq-vec` (`#![forbid(unsafe_code)]`) implementing `oryq_index::IndexProvider` (`index.vec`) with zero dependency on `oryq-core`:
+  - Distance metrics (`distance.rs`): **Cosine**, **L2 (Euclidean)**, and **DotProduct** (negated inner product so smaller distance always ranks first), with finite-value validation and deterministic zero-vector Cosine safety.
+  - B+ tree vector persistence (`codec.rs`) via restricted `IndexWriteContext` / `IndexReadContext` supporting exact **F32** and 4× smaller **Int8** per-vector min/max scalar quantization with precomputed L2 norms.
+  - Deterministic top-k nearest-neighbor search (`search.rs`) with `(distance ASC, RecordId ASC)` tie-breaking.
+  - Persistent `write_bits = [1]` (`VEC_FEATURE_BIT = 1`) matching `architecture/capabilities.toml` (`oryq.index.vector.v1`).
+- Wired optional Cargo feature `--features vec` (and combined `--features fts,vec`) in `oryq-core` (disabled by default): `WriteCollection::create_vector_index` (with backfill & savepoint rollback), `ReadCollection::search_vector`, online `backup_to` vector index preservation / fail-closed protection, and automatic `required_write_features` recomputation on `drop_index`.
+- Activated `vec` in `architecture/modules.toml`, recorded `CC-0019`, added `vec_provider.rs`, `vec_integration.rs`, and `vec_reduced_build.rs`, and wired `--features vec` / `--features fts,vec` + `xtask modules vec` into CI.
 
 ## [0.10.0] - 2026-11-22
 

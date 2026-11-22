@@ -11,6 +11,7 @@ repository.workspace = true
 [features]
 default = []
 fts = ["dep:oryq-fts"]
+vec = ["dep:oryq-vec"]
 
 [dependencies]
 oryq-types.workspace = true
@@ -19,6 +20,7 @@ oryq-engine.workspace = true
 oryq-index.workspace = true
 oryq-query.workspace = true
 oryq-fts = { workspace = true, optional = true }
+oryq-vec = { workspace = true, optional = true }
 
 [lints]
 workspace = true
