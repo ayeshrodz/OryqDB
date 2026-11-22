@@ -93,17 +93,39 @@ impl Drop for OryqWriteTxn {
     }
 }
 
-/// Opaque C handle representing a query result cursor.
+#[derive(Debug)]
+pub(crate) enum CursorBacking {
+    Query(QueryCursor),
+    Docs(std::vec::IntoIter<DocumentBuf>),
+}
+
+impl CursorBacking {
+    pub(crate) fn next_doc(&mut self) -> Option<DocumentBuf> {
+        match self {
+            Self::Query(q) => q.next_doc(),
+            Self::Docs(it) => it.next(),
+        }
+    }
+}
+
+/// Opaque C handle representing a query or aggregation result cursor.
 #[derive(Debug)]
 pub struct OryqCursor {
-    pub(crate) cursor: QueryCursor,
+    pub(crate) backing: CursorBacking,
     pub(crate) current: Option<DocumentBuf>,
 }
 
 impl OryqCursor {
     pub(crate) fn new(cursor: QueryCursor) -> Self {
         Self {
-            cursor,
+            backing: CursorBacking::Query(cursor),
+            current: None,
+        }
+    }
+
+    pub(crate) fn from_docs(docs: Vec<DocumentBuf>) -> Self {
+        Self {
+            backing: CursorBacking::Docs(docs.into_iter()),
             current: None,
         }
     }

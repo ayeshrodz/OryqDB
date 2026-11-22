@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: 10+ — Pre-1.0 Hardening (`v0.9.1` / Issue #13)
-STATUS: Active `0.x` Hardening & Extensions — All 8 baseline crates complete + crash/corruption/concurrency stress suite, `cargo audit`, and Miri verification passing.
+MILESTONE: 10+ — Pre-1.0 Full C ABI Parity (`v0.9.2` / Issue #14)
+STATUS: Active `0.x` Hardening & Extensions — All 8 baseline crates complete + crash/corruption/concurrency stress suite + full C ABI v1.1 parity (`include/oryq.h`).
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
@@ -22,7 +22,7 @@ IMPLEMENTED:
 VERIFIED:
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed (0 warnings, MSRV 1.80.0 clean).
-- `cargo test --workspace` and `--no-default-features`: 75 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 16; `oryq-engine`: 23; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 8; `oryq-ffi`: 2; `oryq-cli`: 1; `xtask`: 6).
+- `cargo test --workspace` and `--no-default-features`: 76 tests passed, 0 failed (`oryq-types`: 7; `oryq-document`: 16; `oryq-engine`: 23; `oryq-index`: 6; `oryq-query`: 6; `oryq-core`: 8; `oryq-ffi`: 3; `oryq-cli`: 1; `xtask`: 6).
 - `cargo +nightly miri test` (`oryq-types`: 7, `oryq-document`: 16, `oryq-ffi`: 1): 24 passed, 0 failed (zero UB/leaks).
 - `cargo audit`: 0 vulnerabilities across 49 crate dependencies (1,555 advisories scanned).
 - `cargo run -p xtask -- modules` for all 8 crates and `xtask architecture --base origin/main`: passed.
@@ -41,8 +41,8 @@ KNOWN ISSUES:
 - Post-baseline extensions `X01` (`oryq-fts` / `oryq-vec`), `X02` (`.oryq-shm` multi-process), and `X03` (E3 batching) remain planned for `0.10.x`.
 
 NEXT STEPS:
-1. Merge `v0.9.1` (#13) after independent agent review and green multi-OS CI.
-2. Proceed sequentially through the tracked `0.x` roadmap: #14 (`v0.9.2` C ABI parity) → #15–#18 (`v0.10.x` `X01–X03` extensions) → #19 (`v0.11.0` bindings & developer guides).
+1. Merge `v0.9.2` (#14) after independent agent review and green multi-OS CI.
+2. Begin `v0.10.x` post-baseline extensions: #15 (`oryq-fts` / `X01a`) → #16 (`oryq-vec` / `X01b`) → #17 (`.oryq-shm` / `X02`) → #18 (`commit_batch` / `X03`) → #19 (`v0.11.0` bindings & guides).
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)

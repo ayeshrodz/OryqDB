@@ -3,15 +3,17 @@
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
-use oryq_core::{from_json_str, to_json_string, Database, DatabaseConfig, Value, ValueView};
+use oryq_core::{
+    from_json_str, to_json_string, Database, DatabaseConfig, SortOrder, Value, ValueView,
+};
 
 use crate::diagnostics::last_error_ptr;
 use crate::guard::ffi_guard;
 use crate::handles::{OryqCursor, OryqDb, OryqReadTxn, OryqWriteTxn};
 use crate::status::OryqStatus;
 
-/// ABI version packed as `(major << 16) | minor` (`1.0` -> `0x0001_0000`).
-pub const ORYQ_ABI_VERSION: u32 = 1 << 16;
+/// ABI version packed as `(major << 16) | minor` (`1.1` -> `0x0001_0001`).
+pub const ORYQ_ABI_VERSION: u32 = (1 << 16) | 1;
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -472,7 +474,7 @@ pub unsafe extern "C" fn oryq_cursor_next_json(
         }
         // SAFETY: `cursor` is exclusively borrowed for this call.
         let cur = unsafe { &mut *cursor };
-        match cur.cursor.next_doc() {
+        match cur.backing.next_doc() {
             None => {
                 cur.current = None;
                 // SAFETY: `out_json` is non-null.
@@ -559,5 +561,366 @@ pub unsafe extern "C" fn oryq_cursor_close(cursor: *mut OryqCursor) -> OryqStatu
             let _ = unsafe { Box::from_raw(cursor) };
         }
         Ok(OryqStatus::Ok)
+    })
+}
+
+/// Advances `cursor` to the next matching document without serializing JSON.
+/// Use with zero-copy `oryq_cursor_get_*` accessors. Returns `ORYQ_CURSOR_DONE` at end.
+///
+/// # Safety
+/// `cursor` must be a valid pointer from `oryq_find_json` or `oryq_aggregate_json`.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_cursor_next(cursor: *mut OryqCursor) -> OryqStatus {
+    ffi_guard(|| {
+        if cursor.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "cursor must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `cursor` is exclusively borrowed for this call.
+        let cur = unsafe { &mut *cursor };
+        match cur.backing.next_doc() {
+            None => {
+                cur.current = None;
+                Ok(OryqStatus::CursorDone)
+            }
+            Some(doc) => {
+                cur.current = Some(doc);
+                Ok(OryqStatus::Ok)
+            }
+        }
+    })
+}
+
+/// Zero-copy UTF-8 string field accessor on the cursor's current document.
+///
+/// Sets `*out_ptr` to a borrowed UTF-8 byte pointer (NOT NUL-terminated) and `*out_len` to its
+/// byte length. The returned pointer remains valid until the next `oryq_cursor_next*` or
+/// `oryq_cursor_close` call on `cursor`.
+///
+/// # Safety
+/// `cursor`, `field`, `out_ptr`, and `out_len` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_cursor_get_utf8(
+    cursor: *const OryqCursor,
+    field: *const c_char,
+    out_ptr: *mut *const c_char,
+    out_len: *mut usize,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if cursor.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "cursor, out_ptr, and out_len must not be null".to_owned(),
+            ));
+        }
+        let field_name = read_cstr(field, "field")?;
+        // SAFETY: `cursor` is valid for this call.
+        let cur = unsafe { &*cursor };
+        let doc = cur.current.as_ref().ok_or_else(|| {
+            (
+                OryqStatus::ErrNotFound,
+                "cursor has no active current document".to_owned(),
+            )
+        })?;
+        match doc.view().get_field(field_name) {
+            Some(ValueView::String(s)) => {
+                // SAFETY: `out_ptr` and `out_len` are non-null and writable.
+                // `s` borrows directly from `cur.current`'s immutable `Arc<[u8]>` buffer.
+                unsafe {
+                    *out_ptr = s.as_ptr().cast::<c_char>();
+                    *out_len = s.len();
+                }
+                Ok(OryqStatus::Ok)
+            }
+            Some(_) => Err((
+                OryqStatus::ErrTypeMismatch,
+                format!("field '{field_name}' is not a String"),
+            )),
+            None => Err((
+                OryqStatus::ErrNotFound,
+                format!("field '{field_name}' not found"),
+            )),
+        }
+    })
+}
+
+/// Zero-copy `f64` field accessor on the cursor's current document.
+///
+/// # Safety
+/// `cursor`, `field`, and `out_val` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_cursor_get_f64(
+    cursor: *const OryqCursor,
+    field: *const c_char,
+    out_val: *mut f64,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if cursor.is_null() || out_val.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "cursor and out_val must not be null".to_owned(),
+            ));
+        }
+        let field_name = read_cstr(field, "field")?;
+        // SAFETY: `cursor` is valid for this call.
+        let cur = unsafe { &*cursor };
+        let doc = cur.current.as_ref().ok_or_else(|| {
+            (
+                OryqStatus::ErrNotFound,
+                "cursor has no active current document".to_owned(),
+            )
+        })?;
+        match doc.view().get_field(field_name) {
+            Some(ValueView::Float64(v)) => {
+                // SAFETY: `out_val` is non-null.
+                unsafe {
+                    *out_val = v;
+                }
+                Ok(OryqStatus::Ok)
+            }
+            Some(_) => Err((
+                OryqStatus::ErrTypeMismatch,
+                format!("field '{field_name}' is not a Float64"),
+            )),
+            None => Err((
+                OryqStatus::ErrNotFound,
+                format!("field '{field_name}' not found"),
+            )),
+        }
+    })
+}
+
+/// Zero-copy `bool` field accessor on the cursor's current document.
+///
+/// # Safety
+/// `cursor`, `field`, and `out_val` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_cursor_get_bool(
+    cursor: *const OryqCursor,
+    field: *const c_char,
+    out_val: *mut bool,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if cursor.is_null() || out_val.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "cursor and out_val must not be null".to_owned(),
+            ));
+        }
+        let field_name = read_cstr(field, "field")?;
+        // SAFETY: `cursor` is valid for this call.
+        let cur = unsafe { &*cursor };
+        let doc = cur.current.as_ref().ok_or_else(|| {
+            (
+                OryqStatus::ErrNotFound,
+                "cursor has no active current document".to_owned(),
+            )
+        })?;
+        match doc.view().get_field(field_name) {
+            Some(ValueView::Bool(b)) => {
+                // SAFETY: `out_val` is non-null.
+                unsafe {
+                    *out_val = b;
+                }
+                Ok(OryqStatus::Ok)
+            }
+            Some(_) => Err((
+                OryqStatus::ErrTypeMismatch,
+                format!("field '{field_name}' is not a Bool"),
+            )),
+            None => Err((
+                OryqStatus::ErrNotFound,
+                format!("field '{field_name}' not found"),
+            )),
+        }
+    })
+}
+
+/// Executes a JSON aggregation pipeline on a read transaction and returns an [`OryqCursor`].
+///
+/// # Safety
+/// `txn`, `collection`, `pipeline_json`, and `out_cursor` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_aggregate_json(
+    txn: *const OryqReadTxn,
+    collection: *const c_char,
+    pipeline_json: *const c_char,
+    out_cursor: *mut *mut OryqCursor,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() || out_cursor.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "txn and out_cursor must not be null".to_owned(),
+            ));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let pipe = read_cstr(pipeline_json, "pipeline_json")?;
+        // SAFETY: `txn` is valid for this call.
+        let rtx = unsafe { &*txn }
+            .tx
+            .as_ref()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn closed".to_owned()))?;
+        let col = rtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let docs = col
+            .aggregate_json(pipe)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        // SAFETY: `out_cursor` is non-null and writable.
+        unsafe {
+            *out_cursor = Box::into_raw(Box::new(OryqCursor::from_docs(docs)));
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Creates a secondary index on `field_path` inside an open write transaction.
+/// `sort_order`: `1` for ascending, `-1` for descending (0 is rejected as invalid).
+/// `name_or_null`: optional index name (null auto-generates a name).
+///
+/// # Safety
+/// `txn`, `collection`, and `field_path` must be valid; `name_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_create_index(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    field_path: *const c_char,
+    sort_order: i32,
+    unique: bool,
+    sparse: bool,
+    name_or_null: *const c_char,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let order = match sort_order {
+            1 => SortOrder::Asc,
+            -1 => SortOrder::Desc,
+            other => {
+                return Err((
+                    OryqStatus::ErrInvalidArgument,
+                    format!("sort_order must be 1 (Asc) or -1 (Desc), got {other}"),
+                ));
+            }
+        };
+        let col_name = read_cstr(collection, "collection")?;
+        let path = read_cstr(field_path, "field_path")?;
+        let name_opt = if name_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(name_or_null, "name_or_null")?)
+        };
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        col.create_index(path, order, unique, sparse, name_opt)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Drops a non-primary index by name inside an open write transaction.
+///
+/// # Safety
+/// `txn`, `collection`, and `index_name` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_drop_index(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    index_name: *const c_char,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let idx_name = read_cstr(index_name, "index_name")?;
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let dropped = col
+            .drop_index(idx_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        if dropped {
+            Ok(OryqStatus::Ok)
+        } else {
+            Ok(OryqStatus::ErrIndexNotFound)
+        }
+    })
+}
+
+/// Creates a standalone sealed online backup of `db` at `dest_path_utf8`.
+///
+/// # Safety
+/// `db` and `dest_path_utf8` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_db_backup_to(
+    db: *const OryqDb,
+    dest_path_utf8: *const c_char,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if db.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "db is null".to_owned()));
+        }
+        let dest = read_cstr(dest_path_utf8, "dest_path_utf8")?;
+        // SAFETY: `db` is valid for this call.
+        let db_ref = unsafe { &*db };
+        db_ref
+            .db
+            .backup_to(Path::new(dest))
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Runs a snapshot-consistent integrity check on `db`.
+/// Writes `true` to `*out_ok` if clean; returns `ORYQ_ERR_CORRUPTION` if issues are found.
+///
+/// # Safety
+/// `db` and `out_ok` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_db_integrity_check(
+    db: *const OryqDb,
+    out_ok: *mut bool,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if db.is_null() || out_ok.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "db and out_ok must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `db` is valid for this call.
+        let db_ref = unsafe { &*db };
+        let report = db_ref
+            .db
+            .integrity_check()
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        // SAFETY: `out_ok` is non-null.
+        unsafe {
+            *out_ok = report.ok;
+        }
+        if report.ok {
+            Ok(OryqStatus::Ok)
+        } else {
+            Err((
+                OryqStatus::ErrCorruption,
+                format!("integrity check failed: {}", report.issues.join("; ")),
+            ))
+        }
     })
 }
