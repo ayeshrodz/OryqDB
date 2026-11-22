@@ -1,9 +1,12 @@
 //! Reproducible local benchmark suite measuring OryqDB insert, point lookup,
 //! partial delta update + compaction, secondary range scan, and WAL checkpoint throughput.
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use oryq_core::{Database, DatabaseConfig, PageSize, SortOrder, SyncMode, Value};
+use oryq_core::{
+    Database, DatabaseConfig, GroupCommitConfig, PageSize, SortOrder, SyncMode, Value,
+};
 
 fn main() {
     let nanos = SystemTime::now()
@@ -121,6 +124,139 @@ fn main() {
         outcome.pages_copied, ckpt_ms
     );
 
+    // 6. Comparative Group Commit Benchmark (8 concurrent writer threads x 50 durable writes = 400 writes, SyncMode::Full)
+    const CONC_THREADS: usize = 8;
+    const CONC_OPS: usize = 50;
+    const TOTAL_CONC: usize = CONC_THREADS * CONC_OPS;
+
+    let indiv_path = dir.join("bench_indiv.oryq");
+    let indiv_db = Database::open(
+        &indiv_path,
+        DatabaseConfig {
+            page_size: PageSize::Size8192,
+            sync_mode: SyncMode::Full,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    {
+        let mut wtx = indiv_db.begin_write().unwrap();
+        wtx.create_collection("events").unwrap();
+        wtx.commit().unwrap();
+    }
+    let t5 = Instant::now();
+    let mut handles = Vec::with_capacity(CONC_THREADS);
+    for t in 0..CONC_THREADS {
+        let dbc = indiv_db.clone();
+        handles.push(thread::spawn(move || {
+            for i in 0..CONC_OPS {
+                let id = (t * 1000 + i + 1) as i64;
+                let mut wtx = dbc.begin_write().unwrap();
+                {
+                    let mut col = wtx.collection("events").unwrap();
+                    col.insert_json(&format!(r#"{{"_id": {id}, "t": {t}, "i": {i}}}"#))
+                        .unwrap();
+                }
+                wtx.commit().unwrap();
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let indiv_ms = t5.elapsed().as_secs_f64() * 1000.0;
+
+    let group_path = dir.join("bench_group.oryq");
+    let group_db = Database::open(
+        &group_path,
+        DatabaseConfig {
+            page_size: PageSize::Size8192,
+            sync_mode: SyncMode::Full,
+            group_commit: GroupCommitConfig {
+                max_batch_size: 64,
+                linger: Duration::ZERO,
+                max_queue_depth: 512,
+            },
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    {
+        let mut wtx = group_db.begin_write().unwrap();
+        wtx.create_collection("events").unwrap();
+        wtx.commit().unwrap();
+    }
+    let t6 = Instant::now();
+    let mut ghandles = Vec::with_capacity(CONC_THREADS);
+    for t in 0..CONC_THREADS {
+        let dbc = group_db.clone();
+        ghandles.push(thread::spawn(move || {
+            for i in 0..CONC_OPS {
+                let id = (t * 1000 + i + 1) as i64;
+                dbc.submit_batched(move |wtx| {
+                    let mut col = wtx.collection("events")?;
+                    col.insert_json(&format!(r#"{{"_id": {id}, "t": {t}, "i": {i}}}"#))?;
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }));
+    }
+    for h in ghandles {
+        h.join().unwrap();
+    }
+    let group_ms = t6.elapsed().as_secs_f64() * 1000.0;
+
+    let batch_path = dir.join("bench_explicit_batch.oryq");
+    let batch_db = Database::open(
+        &batch_path,
+        DatabaseConfig {
+            page_size: PageSize::Size8192,
+            sync_mode: SyncMode::Full,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    {
+        let mut wtx = batch_db.begin_write().unwrap();
+        wtx.create_collection("events").unwrap();
+        wtx.commit().unwrap();
+    }
+    let t7 = Instant::now();
+    let ops: Vec<_> = (1..=(TOTAL_CONC as i64))
+        .map(|id| {
+            move |wtx: &mut oryq_core::WriteTransaction<'_>| {
+                let mut col = wtx.collection("events")?;
+                col.insert_json(&format!(r#"{{"_id": {id}, "batched": true}}"#))?;
+                Ok(())
+            }
+        })
+        .collect();
+    let rep = batch_db.commit_batch(ops).unwrap();
+    assert_eq!(rep.committed_count, TOTAL_CONC);
+    let batch_ms = t7.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "Concurrent Individual Commits ({TOTAL_CONC} ops, {CONC_THREADS} threads): {:.2} ms ({:.0} ops/sec)",
+        indiv_ms,
+        (TOTAL_CONC as f64) / (indiv_ms / 1000.0)
+    );
+    println!(
+        "Concurrent Group Commit submit_batched ({TOTAL_CONC} ops, {CONC_THREADS} threads): {:.2} ms ({:.0} ops/sec, {:.2}x speedup)",
+        group_ms,
+        (TOTAL_CONC as f64) / (group_ms / 1000.0),
+        indiv_ms / group_ms
+    );
+    println!(
+        "Explicit Single-Fsync commit_batch ({TOTAL_CONC} ops): {:.2} ms ({:.0} ops/sec, {:.2}x speedup)",
+        batch_ms,
+        (TOTAL_CONC as f64) / (batch_ms / 1000.0),
+        indiv_ms / batch_ms
+    );
+
+    drop(batch_db);
+    drop(group_db);
+    drop(indiv_db);
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }

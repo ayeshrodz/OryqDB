@@ -23,8 +23,8 @@ pub use oryq_document::{
     from_json_str, to_json_string, DocumentBuf, DocumentView, ObjectId, Uuid, Value, ValueView,
 };
 pub use oryq_engine::{
-    CheckpointOutcome, CommitReceipt, LockInspectionReport, PageInspectionReport, PageSize,
-    SyncMode, WalInspectionReport,
+    BatchCommitReport, CheckpointOutcome, CommitReceipt, GroupCommitConfig, LockInspectionReport,
+    PageInspectionReport, PageSize, SavepointId, SyncMode, WalInspectionReport,
 };
 pub use oryq_index::{IndexDescriptor, IndexKind, SortOrder};
 pub use oryq_query::{

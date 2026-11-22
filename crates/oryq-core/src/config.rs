@@ -1,6 +1,6 @@
 //! Public [`DatabaseConfig`] facade options.
 
-use oryq_engine::{EngineConfig, PageSize, SyncMode};
+use oryq_engine::{EngineConfig, GroupCommitConfig, PageSize, SyncMode};
 
 /// Application-facing configuration for opening or creating an OryqDB [`crate::Database`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub struct DatabaseConfig {
     pub max_wal_hard_bytes: u64,
     pub max_readers: usize,
     pub max_document_bytes: usize,
+    pub group_commit: GroupCommitConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -27,6 +28,7 @@ impl Default for DatabaseConfig {
             max_wal_hard_bytes: eng.max_wal_hard_bytes,
             max_readers: eng.max_readers,
             max_document_bytes: 16 * 1024 * 1024,
+            group_commit: GroupCommitConfig::default(),
         }
     }
 }

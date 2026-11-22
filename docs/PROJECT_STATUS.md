@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: E2 — Multi-Process Shared-Memory Coordination (`v0.10.2` / Issue #17 / `X02`)
-STATUS: Active `0.10.x` Extensions — All 8 baseline crates + optional `oryq-fts`, `oryq-vec`, and multi-process `.oryq-shm` coordination (`SharedProcessCoordinator`) implemented and verified.
+MILESTONE: E3 — Queued Write Batching & Group Commit (`v0.10.3` / Issue #18 / `X03`)
+STATUS: All `0.10.x` Extensions Complete (`X01a` `oryq-fts`, `X01b` `oryq-vec`, `X02` `.oryq-shm`, `X03` `commit_batch` / group commit) — ready for `v0.11.0` official language bindings & production guides.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
@@ -38,11 +38,11 @@ PERFORMANCE (Linux x86_64, 8 KiB pages, SyncMode::Normal):
 - WAL Checkpoint + Reset (117 pages copied): 0.60 ms
 
 KNOWN ISSUES:
-- Post-baseline extension `X03` (`commit_batch`) remains planned for `0.10.3`.
+- Official external language bindings (Python/C/Go/Node) & production developer guides remain planned for `v0.11.0` (#19).
 
 NEXT STEPS:
-1. Merge `v0.10.2` (#17 / `.oryq-shm`) after independent reviewer sign-off and green multi-OS CI.
-2. Continue roadmap: #18 (`commit_batch` / `X03` -> `v0.10.3`) → #19 (`v0.11.0` official language bindings & production guides).
+1. Merge `v0.10.3` (#18 / `commit_batch` & group commit) after independent reviewer sign-off and green multi-OS CI.
+2. Complete Issue #19 (`v0.11.0` official language bindings & production guides) before evaluating `v1.0.0` readiness.
 ```
 
 [Initial review report](reviews/initial-design/goldfish_review_report.md) · [Modular review report](reviews/modular-architecture/goldfish_review_report.md) · [Roadmap](ROADMAP.md) · [Risks](KNOWN_ISSUES.md)

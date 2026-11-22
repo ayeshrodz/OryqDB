@@ -46,4 +46,7 @@ pub use oryq_types::{PageId, Result, SnapshotId, TxId};
 pub use pager::{FreelistManager, OverflowStore, PageAllocator, PageBuf, PageGuard, Pager};
 pub use ports::{CheckpointOutcome, CommitReceipt, RecordCompactor};
 pub use recovery::{CommittedDbMeta, RecoveredPageFrame, RecoveredTx, WalScanResult};
-pub use transaction::{wal_path_for, ReadTxn, SavepointId, StorageEngine, WriteTxn};
+pub use transaction::{
+    clone_error_envelope, commit_batch, wal_path_for, BatchCommitReport, BatchItem,
+    GroupCommitConfig, GroupCommitQueue, ReadTxn, SavepointId, StorageEngine, WriteTxn,
+};

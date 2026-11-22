@@ -7,8 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.10.3` (#18 / `X03`): Queued write batching & group commit (`commit_batch`).
 - `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.10.3] - 2026-11-22
+
+### Added (#18 / `X03` — Queued Write Batching & Group Commit)
+- Added `oryq-engine::commit_batch`, `StorageEngine::commit_batch`, `BatchCommitReport`, `GroupCommitConfig`, and leader-follower `GroupCommitQueue` (`crates/oryq-engine/src/transaction/batch.rs`, `#![forbid(unsafe_code)]`):
+  - Ordered batch admission inside a single `WriteTxn` and a single durable WAL fsync.
+  - Per-item statement savepoint isolation so validation failures roll back only the failing item while all valid items commit together (and all-failed batches perform zero WAL writes/fsyncs).
+  - Strict `ErrorCategory::CommitOutcomeUnknown` propagation and engine poisoning on WAL write/sync failure so no caller observes a false durable commit.
+- Exposed batched & queued group-commit APIs on `oryq-core::Database`:
+  - `Database::commit_batch` (explicit ordered batch with per-item savepoint rollback and single fsync).
+  - `Database::submit_batched` (zero-daemon leader-follower group-commit queue coalescing concurrent writer threads, configured via `DatabaseConfig::group_commit`).
+  - Exposed `WriteTransaction::savepoint`, `rollback_to`, and `release_savepoint`.
+- Added unit/integration suites (`crates/oryq-engine/tests/group_commit.rs`, `crates/oryq-core/tests/group_commit.rs`) and comparative group-commit throughput benchmarks in `crates/oryq-core/examples/bench_suite.rs` and `docs/BENCHMARK_RESULTS.md`.
+- Recorded `CC-0021` in `architecture/contract-changes.toml`.
 
 ## [0.10.2] - 2026-11-22
 

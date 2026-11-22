@@ -328,3 +328,22 @@ evidence = [
     "cargo run -p xtask -- modules engine",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0021"
+modules = ["engine", "core"]
+files = [
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-core/src/lib.rs",
+]
+reason = "Implement Issue #18 (v0.10.3 / X03): queued write batching and single-fsync group commit (oryq-engine::commit_batch, GroupCommitQueue, Database::commit_batch, Database::submit_batched) with per-item savepoint rollback and CommitOutcomeUnknown propagation."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-engine --test group_commit",
+    "cargo test -p oryq-core --test group_commit",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- modules core",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
