@@ -349,6 +349,61 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
 }
 
 #[test]
+fn ffi_in_memory_database_crud_vacuum_and_backup_to_disk() {
+    let dir = TempDir::new("in_memory");
+    let backup_path = CString::new(dir.0.join("mem_export.oryq").to_str().unwrap()).unwrap();
+    let mem = CString::new(":memory:").unwrap();
+    let col = CString::new("cache").unwrap();
+    let d1 = CString::new(r#"{"_id": 1, "k": "alpha", "v": 42}"#).unwrap();
+
+    // SAFETY: All C pointers are valid NUL-terminated strings or writable stack slots.
+    unsafe {
+        let mut db: *mut OryqDb = ptr::null_mut();
+        assert_eq!(oryq_db_open(mem.as_ptr(), &mut db), OryqStatus::Ok);
+        assert!(!db.is_null());
+
+        let mut wtx: *mut OryqWriteTxn = ptr::null_mut();
+        assert_eq!(oryq_write_txn_begin(db, &mut wtx), OryqStatus::Ok);
+        assert_eq!(oryq_create_collection(wtx, col.as_ptr()), OryqStatus::Ok);
+        assert_eq!(
+            oryq_insert_json(wtx, col.as_ptr(), d1.as_ptr()),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_write_txn_commit(wtx), OryqStatus::Ok);
+
+        assert_eq!(oryq_db_checkpoint(db), OryqStatus::Ok);
+        assert_eq!(oryq_db_vacuum(db), OryqStatus::Ok);
+        let mut ok = false;
+        assert_eq!(oryq_db_integrity_check(db, &mut ok), OryqStatus::Ok);
+        assert!(ok);
+        assert_eq!(oryq_db_backup_to(db, backup_path.as_ptr()), OryqStatus::Ok);
+        assert_eq!(oryq_db_close(db), OryqStatus::Ok);
+
+        // Reopen exported `.oryq` from disk and verify document persisted
+        let mut bdb: *mut OryqDb = ptr::null_mut();
+        assert_eq!(oryq_db_open(backup_path.as_ptr(), &mut bdb), OryqStatus::Ok);
+        let mut rtx: *mut OryqReadTxn = ptr::null_mut();
+        assert_eq!(oryq_read_txn_begin(bdb, &mut rtx), OryqStatus::Ok);
+        let mut cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut cur),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(cur), OryqStatus::Ok);
+        let f_v = CString::new("v").unwrap();
+        let mut v: i64 = 0;
+        assert_eq!(
+            oryq_cursor_get_i64(cur, f_v.as_ptr(), &mut v),
+            OryqStatus::Ok
+        );
+        assert_eq!(v, 42);
+        assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
+        assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
+        assert_eq!(oryq_db_close(bdb), OryqStatus::Ok);
+    }
+}
+
+#[test]
 fn ffi_rejects_null_arguments_and_catches_panics() {
     assert_eq!(oryq_abi_version(), (1 << 16) | 2);
     // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string; `oryq_free_string(null)` is a no-op.

@@ -77,6 +77,21 @@ pub trait StorageIo: Debug + Send + Sync {
     fn open(&self, path: &Path, mode: OpenMode) -> Result<Arc<dyn FileHandle>>;
     fn sync_parent_dir(&self, path: &Path) -> Result<()>;
     fn remove_file(&self, path: &Path) -> Result<()>;
+    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        std::fs::rename(from, to).map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorCategory::Io,
+                MODULE_ID,
+                "StorageIo::rename",
+                format!(
+                    "failed to rename '{}' to '{}': {err}",
+                    from.display(),
+                    to.display()
+                ),
+            )
+            .with_source(err)
+        })
+    }
     fn exists(&self, path: &Path) -> bool;
     fn file_registry(&self) -> Arc<FileRegistry>;
 }

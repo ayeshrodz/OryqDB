@@ -56,7 +56,7 @@ uint32_t    oryq_abi_version(void);
 const char *oryq_last_error_message(void);
 void        oryq_free_string(char *ptr);
 
-/* Database Lifecycle & Administration */
+/* Database Lifecycle & Administration (`path_utf8` accepts `":memory:"` for ephemeral in-memory DBs) */
 oryq_status oryq_db_open(const char *path_utf8, OryqDb **out_db);
 oryq_status oryq_db_close(OryqDb *db);
 oryq_status oryq_db_checkpoint(const OryqDb *db);

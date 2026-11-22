@@ -7,10 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.12.1` (#29): In-memory ephemeral databases (`:memory:`).
 - `0.12.2` (#30): Hybrid FTS & Vector search in C ABI v1.2, CLI, and Python.
 - `0.12.3` (#31): Official Go (`cgo`), Node.js, and C# (.NET P/Invoke) bindings.
 - `0.12.4` (#32): Binary footprint optimization, SQLite comparison benchmark & final pre-1.0 soak audit.
+
+## [0.12.1] - 2026-11-22
+
+### Added (#29 — In-Memory Ephemeral Databases `:memory:`)
+- Added pure-safe (`#![forbid(unsafe_code)]`) `oryq_engine::MemoryVfs` implementing `StorageIo` + `FileHandle` with isolated virtual file tables, exclusive locking, and `StorageIo::rename`.
+- Added `Database::IN_MEMORY_PATH` (`":memory:"`), `Database::open_in_memory()`, `Database::open_in_memory_with_config(...)`, and `Database::is_in_memory()`, plus automatic `:memory:` routing in `Database::open`, C ABI `oryq_db_open(":memory:", ...)`, and Python `Database.open(":memory:")` / `Database.open_in_memory()`.
+- Supported full CRUD, indexing, queries, aggregation, checkpoint, integrity check, zero-disk in-memory `VACUUM`, and online `backup_to(disk_path)` from an in-memory database to a real single-file `.oryq` file.
+- Recorded `CC-0023` in `architecture/contract-changes.toml` and added `crates/oryq-core/tests/in_memory.rs`, FFI, and Python tests.
 
 ## [0.12.0] - 2026-11-22
 

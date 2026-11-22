@@ -269,6 +269,11 @@ impl StorageEngine {
         self.page_size
     }
 
+    #[inline]
+    pub fn io(&self) -> &Arc<dyn StorageIo> {
+        &self.io
+    }
+
     pub fn latest_committed_tx_id(&self) -> Result<TxId> {
         self.coordinator.latest_committed()
     }
@@ -744,18 +749,8 @@ fn stage_vacuum_sidecar(
             fh.sync_all()?;
         }
     }
-    std::fs::rename(&stage_path, vacuum_path).map_err(|err| {
+    io.rename(&stage_path, vacuum_path).inspect_err(|_| {
         let _ = io.remove_file(&stage_path);
-        ErrorEnvelope::new(
-            ErrorCategory::Io,
-            MODULE_ID,
-            "stage_vacuum_sidecar",
-            format!(
-                "failed to atomically publish vacuum sidecar '{}': {err}",
-                vacuum_path.display()
-            ),
-        )
-        .with_source(err)
     })?;
     if sync_mode != crate::config::SyncMode::Off {
         io.sync_parent_dir(vacuum_path)?;

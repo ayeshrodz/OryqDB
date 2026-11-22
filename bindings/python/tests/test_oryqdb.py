@@ -178,6 +178,34 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                 db.read_txn()
             self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
 
+    def test_in_memory_database_isolation_vacuum_and_backup_to_disk(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="oryqdb_py_mem_") as tmpdir:
+            backup_path = Path(tmpdir) / "from_memory.oryq"
+
+            with Database.open_in_memory() as db1, Database.open(":memory:") as db2:
+                with db1.write_txn() as wtx:
+                    wtx.create_collection("kv")
+                    wtx.insert("kv", {"_id": 1, "key": "mode", "value": "ephemeral"})
+                    wtx.commit()
+
+                # db2 is isolated from db1
+                with db2.read_txn() as rtx:
+                    with self.assertRaises(OryqError) as ctx:
+                        rtx.find("kv")
+                    self.assertEqual(ctx.exception.status, OryqStatus.ERR_NOT_FOUND)
+
+                db1.checkpoint()
+                db1.vacuum()
+                self.assertTrue(db1.integrity_check())
+                db1.backup_to(backup_path)
+
+            with Database.open(backup_path) as disk_db:
+                self.assertTrue(disk_db.integrity_check())
+                with disk_db.read_txn() as rtx:
+                    with rtx.find("kv", {"_id": 1}) as cur:
+                        self.assertTrue(cur.step())
+                        self.assertEqual(cur.get_utf8("value"), "ephemeral")
+
 
 if __name__ == "__main__":
     unittest.main()
