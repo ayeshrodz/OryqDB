@@ -71,7 +71,49 @@ fn memory_vfs_positioned_io_locking_rename_and_remove() {
         ErrorCategory::Io
     );
 
+    // Overflow checks on u64::MAX offsets
+    assert_eq!(
+        fh.read_exact_at(&mut eof_buf, u64::MAX)
+            .unwrap_err()
+            .category(),
+        ErrorCategory::Overflow
+    );
+    assert_eq!(
+        fh.write_all_at(b"x", u64::MAX).unwrap_err().category(),
+        ErrorCategory::Overflow
+    );
+
+    // Empty write past EOF is a POSIX-compatible no-op (does not zero-extend)
+    fh.write_all_at(&[], 100).unwrap();
+    assert_eq!(fh.len().unwrap(), 9);
+
+    // set_len grow & shrink
+    fh.set_len(16).unwrap();
+    assert_eq!(fh.len().unwrap(), 16);
+    fh.set_len(5).unwrap();
+    assert_eq!(fh.len().unwrap(), 5);
+
+    // Read-only handle rejects write_all_at and set_len
+    let ro = vfs.open(p1, OpenMode::READ_ONLY).unwrap();
+    assert_eq!(
+        ro.write_all_at(b"a", 0).unwrap_err().category(),
+        ErrorCategory::Io
+    );
+    assert_eq!(ro.set_len(0).unwrap_err().category(), ErrorCategory::Io);
+    drop(ro);
+
+    // Truncate open mode clears contents
+    let trunc_mode = OpenMode {
+        truncate: true,
+        ..OpenMode::READ_WRITE
+    };
+    let tfh = vfs.open(p1, trunc_mode).unwrap();
+    assert_eq!(tfh.len().unwrap(), 0);
+    drop(tfh);
+
     // Exclusive lock blocks second handle until first handle unlocks or drops
+    fh.try_lock_exclusive().unwrap();
+    // Re-acquiring lock on the same handle is idempotent
     fh.try_lock_exclusive().unwrap();
     let fh2 = vfs.open(p1, OpenMode::READ_WRITE).unwrap();
     assert_eq!(
@@ -83,10 +125,15 @@ fn memory_vfs_positioned_io_locking_rename_and_remove() {
     fh2.unlock().unwrap();
     drop(fh2);
 
-    // Rename & remove
+    // Rename onto same path is a no-op; rename onto existing path overwrites cleanly
+    vfs.rename(p1, p1).unwrap();
+    let fh_other = vfs.open(p2, OpenMode::CREATE_NEW).unwrap();
+    fh_other.write_all_at(b"old", 0).unwrap();
+    drop(fh_other);
     vfs.rename(p1, p2).unwrap();
     assert!(!vfs.exists(p1));
     assert!(vfs.exists(p2));
+    assert_eq!(vfs.open(p2, OpenMode::READ_ONLY).unwrap().len().unwrap(), 0);
     vfs.remove_file(p2).unwrap();
     assert!(!vfs.exists(p2));
     assert_eq!(vfs.file_count(), 0);
@@ -206,4 +253,83 @@ fn in_memory_databases_are_isolated_support_full_sql_parity_and_backup_to_disk()
             .collect_all();
         assert_eq!(found.len(), 5);
     }
+
+    // Zero-disk check: no `:memory:` or sidecar files were created in the working directory
+    assert!(!Path::new(":memory:").exists());
+    assert!(!Path::new(":memory:-wal").exists());
+    assert!(!Path::new(":memory:-vacuum").exists());
+}
+
+#[test]
+fn in_memory_edge_cases_readonly_create_flag_and_custom_memory_vfs_vacuum() {
+    use std::sync::Arc;
+
+    // 1. Opening a fresh `:memory:` DB with `read_only: true` (invalid combo or missing) or
+    //    `create_if_missing: false` fails cleanly.
+    assert_eq!(
+        Database::open_in_memory_with_config(DatabaseConfig {
+            read_only: true,
+            ..DatabaseConfig::default()
+        })
+        .unwrap_err()
+        .category(),
+        ErrorCategory::InvalidArgument
+    );
+    assert_eq!(
+        Database::open_in_memory_with_config(DatabaseConfig {
+            read_only: true,
+            create_if_missing: false,
+            ..DatabaseConfig::default()
+        })
+        .unwrap_err()
+        .category(),
+        ErrorCategory::NotFound
+    );
+    assert_eq!(
+        Database::open_in_memory_with_config(DatabaseConfig {
+            create_if_missing: false,
+            ..DatabaseConfig::default()
+        })
+        .unwrap_err()
+        .category(),
+        ErrorCategory::NotFound
+    );
+
+    // 2. `Database::open_with_io` with `MemoryVfs` and a custom virtual path (not `:memory:`)
+    //    must still be detected as in-memory and perform zero-disk VACUUM cleanly.
+    let vfs = Arc::new(MemoryVfs::new());
+    let virtual_path = Path::new("custom_virtual_db.oryq");
+    let db = Database::open_with_io(vfs.clone(), virtual_path, DatabaseConfig::default()).unwrap();
+    assert!(db.is_in_memory());
+    {
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("notes").unwrap();
+        {
+            let mut col = wtx.collection("notes").unwrap();
+            let pad = "z".repeat(256);
+            for i in 1..=40i64 {
+                col.insert_json(&format!(r#"{{"_id": {i}, "pad": "{pad}"}}"#))
+                    .unwrap();
+            }
+        }
+        wtx.commit().unwrap();
+    }
+    {
+        let mut wtx = db.begin_write().unwrap();
+        {
+            let mut col = wtx.collection("notes").unwrap();
+            for i in 6..=40i64 {
+                assert!(col.delete_by_id(&Value::Int64(i)).unwrap());
+            }
+        }
+        wtx.commit().unwrap();
+    }
+    db.checkpoint(true).unwrap();
+    let rep = db.vacuum().unwrap();
+    assert!(rep.sealed);
+    assert!(rep.bytes_after < rep.bytes_before);
+    assert_eq!(rep.documents_compacted, 5);
+    assert!(db.integrity_check().unwrap().ok);
+    // Confirm nothing leaked onto real disk
+    assert!(!virtual_path.exists());
 }

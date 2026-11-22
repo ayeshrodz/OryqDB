@@ -81,7 +81,7 @@ impl Database {
         config: DatabaseConfig,
     ) -> Result<Self> {
         let path_ref = path.as_ref();
-        let in_memory = path_ref == Path::new(Self::IN_MEMORY_PATH);
+        let in_memory = io.is_in_memory() || path_ref == Path::new(Self::IN_MEMORY_PATH);
         Self::open_with_io_internal(io, path_ref, config, in_memory)
     }
 

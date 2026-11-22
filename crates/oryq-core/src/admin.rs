@@ -378,7 +378,7 @@ pub fn run_vacuum(
     if in_memory {
         let tmp_path = PathBuf::from(format!(
             "{}.vacuum.tmp.{}.{seq}",
-            Database::IN_MEMORY_PATH,
+            source_path.display(),
             std::process::id()
         ));
         let tmp_wal = wal_path_for(&tmp_path);

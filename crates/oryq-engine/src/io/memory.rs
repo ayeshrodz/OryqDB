@@ -69,8 +69,8 @@ struct MemoryFileHandle {
 
 impl Drop for MemoryFileHandle {
     fn drop(&mut self) {
-        if self.holds_lock.swap(false, Ordering::AcqRel) {
-            if let Ok(mut locked) = self.file.locked.lock() {
+        if let Ok(mut locked) = self.file.locked.lock() {
+            if self.holds_lock.swap(false, Ordering::AcqRel) {
                 *locked = false;
             }
         }
@@ -135,6 +135,9 @@ impl FileHandle for MemoryFileHandle {
                 "MemoryFileHandle::write_all_at",
                 "file handle is not opened for writing",
             ));
+        }
+        if buf.is_empty() {
+            return Ok(());
         }
         let start = usize::try_from(offset).map_err(|_| {
             ErrorEnvelope::new(
@@ -212,14 +215,15 @@ impl FileHandle for MemoryFileHandle {
                 "memory file lock poisoned",
             )
         })?;
+        let prev_len = data.len();
         data.resize(new_len, 0);
+        if new_len < prev_len {
+            data.shrink_to_fit();
+        }
         Ok(())
     }
 
     fn try_lock_exclusive(&self) -> Result<()> {
-        if self.holds_lock.load(Ordering::Acquire) {
-            return Ok(());
-        }
         let mut locked = self.file.locked.lock().map_err(|_| {
             ErrorEnvelope::new(
                 ErrorCategory::Internal,
@@ -228,6 +232,9 @@ impl FileHandle for MemoryFileHandle {
                 "memory file lock poisoned",
             )
         })?;
+        if self.holds_lock.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if *locked {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::LockedByProcess,
@@ -242,15 +249,15 @@ impl FileHandle for MemoryFileHandle {
     }
 
     fn unlock(&self) -> Result<()> {
+        let mut locked = self.file.locked.lock().map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Internal,
+                MODULE_ID,
+                "MemoryFileHandle::unlock",
+                "memory file lock poisoned",
+            )
+        })?;
         if self.holds_lock.swap(false, Ordering::AcqRel) {
-            let mut locked = self.file.locked.lock().map_err(|_| {
-                ErrorEnvelope::new(
-                    ErrorCategory::Internal,
-                    MODULE_ID,
-                    "MemoryFileHandle::unlock",
-                    "memory file lock poisoned",
-                )
-            })?;
             *locked = false;
         }
         Ok(())
@@ -355,6 +362,17 @@ impl StorageIo for MemoryVfs {
                 "memory VFS map lock poisoned",
             )
         })?;
+        if from == to {
+            if files.contains_key(from) {
+                return Ok(());
+            }
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::NotFound,
+                MODULE_ID,
+                "MemoryVfs::rename",
+                format!("virtual source file not found: {}", from.display()),
+            ));
+        }
         let file = files.remove(from).ok_or_else(|| {
             ErrorEnvelope::new(
                 ErrorCategory::NotFound,
@@ -372,6 +390,10 @@ impl StorageIo for MemoryVfs {
             .lock()
             .map(|g| g.contains_key(path))
             .unwrap_or(false)
+    }
+
+    fn is_in_memory(&self) -> bool {
+        true
     }
 
     fn file_registry(&self) -> Arc<FileRegistry> {

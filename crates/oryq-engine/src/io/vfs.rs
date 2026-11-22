@@ -93,6 +93,10 @@ pub trait StorageIo: Debug + Send + Sync {
         })
     }
     fn exists(&self, path: &Path) -> bool;
+    /// Returns `true` if this VFS is purely in-memory (no host filesystem persistence).
+    fn is_in_memory(&self) -> bool {
+        false
+    }
     fn file_registry(&self) -> Arc<FileRegistry>;
 }
 
