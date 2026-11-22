@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: Pre-1.0 Complete (`v0.11.0` / Issue #19 — Official Bindings & Production Developer Guides)
-STATUS: All tracked pre-1.0 roadmap issues (#13–#19) implemented and verified across Linux, macOS, and Windows — ready for `v1.0.0` evaluation.
+MILESTONE: v0.12.0 — Single-File Auto-Seal on Close & `VACUUM` Compaction (Issue #28)
+STATUS: Active `v0.12.x` SQLite-Parity Polish — single-file auto-seal on close and in-place `VACUUM` compaction implemented across Rust, C ABI v1.2, CLI, and Python.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

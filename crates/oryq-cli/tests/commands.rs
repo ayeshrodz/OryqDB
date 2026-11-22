@@ -93,6 +93,11 @@ fn cli_end_to_end_crud_aggregate_backup_integrity_and_inspect() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("ok=true"));
 
+    // vacuum
+    let out = oryq_bin().args(["vacuum", db_s]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("sealed=true"));
+
     // backup
     let out = oryq_bin().args(["backup", db_s, bk_s]).output().unwrap();
     assert!(out.status.success());

@@ -13,8 +13,8 @@ use oryq_engine::{
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, TxId};
 
 use crate::admin::{
-    inspect_locks, inspect_page, inspect_wal, run_integrity_check, run_online_backup, BackupReport,
-    IntegrityReport,
+    inspect_locks, inspect_page, inspect_wal, run_integrity_check, run_online_backup, run_vacuum,
+    BackupReport, IntegrityReport, VacuumReport,
 };
 use crate::api::{ReadTransaction, WriteTransaction};
 use crate::composition::CoreRegistries;
@@ -285,6 +285,17 @@ impl Database {
     /// Creates a standalone, sealed online backup of this database at `dest`.
     pub fn backup_to(&self, dest: impl AsRef<Path>) -> Result<BackupReport> {
         run_online_backup(self, &self.inner.path, self.inner.page_size, dest.as_ref())
+    }
+
+    /// Compacts this database in place (`VACUUM`), reclaiming free space, shrinking the `.oryq`
+    /// file on disk, and leaving a single sealed `.oryq` file without a `.oryq-wal` sidecar.
+    pub fn vacuum(&self) -> Result<VacuumReport> {
+        run_vacuum(
+            self,
+            &self.inner.engine,
+            &self.inner.path,
+            self.inner.page_size,
+        )
     }
 
     /// Read-only forensic inspection of a single physical page without mutating or recovering.

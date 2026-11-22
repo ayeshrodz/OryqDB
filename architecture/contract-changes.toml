@@ -347,3 +347,24 @@ evidence = [
     "cargo run -p xtask -- modules core",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0022"
+modules = ["engine", "core", "ffi", "cli"]
+files = [
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-core/src/lib.rs",
+    "crates/oryq-ffi/src/api.rs",
+    "include/oryq.h",
+    "crates/oryq-cli/src/main.rs",
+]
+reason = "Implement Issue #28 (v0.12.0): single-file auto-seal & WAL cleanup on close (auto_checkpoint_on_close) and in-place VACUUM file compaction (Database::vacuum, oryq_db_vacuum ABI v1.2, oryq vacuum CLI)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-core --test vacuum_and_autoseal",
+    "cargo test -p oryq-ffi",
+    "cargo test -p oryq-cli",
+    "python3 -m unittest discover -s bindings/python/tests -v",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

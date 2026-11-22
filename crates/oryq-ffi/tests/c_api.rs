@@ -8,7 +8,7 @@ use oryq::{
     oryq_abi_version, oryq_aggregate_json, oryq_create_collection, oryq_create_index,
     oryq_cursor_close, oryq_cursor_get_bool, oryq_cursor_get_f64, oryq_cursor_get_i64,
     oryq_cursor_get_utf8, oryq_cursor_next, oryq_cursor_next_json, oryq_db_backup_to,
-    oryq_db_checkpoint, oryq_db_close, oryq_db_integrity_check, oryq_db_open,
+    oryq_db_checkpoint, oryq_db_close, oryq_db_integrity_check, oryq_db_open, oryq_db_vacuum,
     oryq_delete_by_id_json, oryq_drop_index, oryq_find_json, oryq_free_string, oryq_insert_json,
     oryq_last_error_message, oryq_read_txn_begin, oryq_read_txn_close, oryq_update_by_id_json,
     oryq_version, oryq_write_txn_begin, oryq_write_txn_commit, oryq_write_txn_rollback, OryqCursor,
@@ -47,7 +47,7 @@ impl Drop for TempDir {
 
 #[test]
 fn ffi_crud_find_lifecycle_and_child_busy_guard() {
-    assert_eq!(oryq_abi_version(), (1 << 16) | 1);
+    assert_eq!(oryq_abi_version(), (1 << 16) | 2);
     // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string.
     let ver = unsafe { CStr::from_ptr(oryq_version()) }.to_str().unwrap();
     assert!(!ver.is_empty());
@@ -343,7 +343,7 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
 
 #[test]
 fn ffi_rejects_null_arguments_and_catches_panics() {
-    assert_eq!(oryq_abi_version(), (1 << 16) | 1);
+    assert_eq!(oryq_abi_version(), (1 << 16) | 2);
     // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string; `oryq_free_string(null)` is a no-op.
     unsafe {
         assert!(!CStr::from_ptr(oryq_version()).to_str().unwrap().is_empty());
@@ -397,6 +397,7 @@ fn ffi_rejects_null_arguments_and_catches_panics() {
             oryq_db_backup_to(ptr::null(), ptr::null()),
             OryqStatus::ErrInvalidArgument
         );
+        assert_eq!(oryq_db_vacuum(ptr::null()), OryqStatus::ErrInvalidArgument);
     }
 
     let status = oryq::guard::ffi_guard(|| -> Result<OryqStatus, (OryqStatus, String)> {

@@ -24,6 +24,8 @@ fn integrity_check_sealed_online_backup_and_readonly_inspection() {
 
     let cfg = DatabaseConfig {
         page_size: PageSize::Size4096,
+        // Keep unsealed `.oryq-wal` after drop so `inspect_wal` below can inspect committed WAL frames.
+        auto_checkpoint_on_close: false,
         ..DatabaseConfig::default()
     };
 

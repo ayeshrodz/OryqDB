@@ -1,4 +1,4 @@
-/* OryqDB C Application Binary Interface (v1.1)
+/* OryqDB C Application Binary Interface (v1.2)
  * License: MIT
  */
 #ifndef ORYQ_H
@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define ORYQ_ABI_VERSION_MAJOR 1
-#define ORYQ_ABI_VERSION_MINOR 1
+#define ORYQ_ABI_VERSION_MINOR 2
 
 typedef struct OryqDb       OryqDb;
 typedef struct OryqReadTxn  OryqReadTxn;
@@ -60,6 +60,7 @@ void        oryq_free_string(char *ptr);
 oryq_status oryq_db_open(const char *path_utf8, OryqDb **out_db);
 oryq_status oryq_db_close(OryqDb *db);
 oryq_status oryq_db_checkpoint(const OryqDb *db);
+oryq_status oryq_db_vacuum(const OryqDb *db);
 oryq_status oryq_db_backup_to(const OryqDb *db, const char *dest_path_utf8);
 oryq_status oryq_db_integrity_check(const OryqDb *db, bool *out_ok);
 

@@ -36,6 +36,17 @@ pub struct BackupReport {
     pub sealed: bool,
 }
 
+/// Summary report returned by [`Database::vacuum`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub bytes_reclaimed: u64,
+    pub collections_compacted: usize,
+    pub documents_compacted: usize,
+    pub sealed: bool,
+}
+
 /// Runs a full snapshot-consistent integrity check across every collection and index in `db`.
 pub fn run_integrity_check(db: &Database) -> Result<IntegrityReport> {
     let rtx = db.begin_read()?;
@@ -291,6 +302,57 @@ pub fn run_online_backup(
     }
 
     result
+}
+
+/// Compacts `db` in place (`VACUUM`), reclaiming freelist pages, shrinking the `.oryq` file on
+/// disk, and leaving a single sealed `.oryq` file with no `.oryq-wal` sidecar.
+///
+/// Fails with `ErrorCategory::Busy` if any active read transaction is currently open, or
+/// `ErrorCategory::UnsupportedFeature` if a collection contains a disabled pluggable index.
+pub fn run_vacuum(
+    db: &Database,
+    engine: &oryq_engine::StorageEngine,
+    source_path: &Path,
+    page_size: PageSize,
+) -> Result<VacuumReport> {
+    if engine.is_read_only() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "admin::run_vacuum",
+            "cannot VACUUM a read-only database",
+        ));
+    }
+    if engine.is_poisoned() {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::CommitOutcomeUnknown,
+            MODULE_ID,
+            "admin::run_vacuum",
+            "database engine is poisoned; close and reopen to recover before VACUUM",
+        ));
+    }
+
+    let tmp_path = source_path.with_extension(format!("oryq.vacuum.tmp.{}", std::process::id()));
+    let tmp_wal = wal_path_for(&tmp_path);
+    let _ = fs::remove_file(&tmp_path);
+    let _ = fs::remove_file(&tmp_wal);
+
+    let res = (|| -> Result<VacuumReport> {
+        let backup = run_online_backup(db, source_path, page_size, &tmp_path)?;
+        let (bytes_before, bytes_after) = engine.replace_from_sealed_file(&tmp_path)?;
+        Ok(VacuumReport {
+            bytes_before,
+            bytes_after,
+            bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
+            collections_compacted: backup.collections_copied,
+            documents_compacted: backup.documents_copied,
+            sealed: true,
+        })
+    })();
+
+    let _ = fs::remove_file(&tmp_path);
+    let _ = fs::remove_file(&tmp_wal);
+    res
 }
 
 fn paths_refer_to_same_target(a: &Path, b: &Path) -> bool {

@@ -66,6 +66,10 @@ pub struct EngineConfig {
     pub max_wal_hard_bytes: u64,
     /// Maximum concurrent active read snapshots in [`crate::coordinator::SingleProcessCoordinator`].
     pub max_readers: usize,
+    /// When `true` (and not `read_only`), dropping [`crate::StorageEngine`] automatically
+    /// checkpoints, seals, and removes the empty `.oryq-wal` sidecar so only the single `.oryq`
+    /// file remains on disk.
+    pub auto_checkpoint_on_close: bool,
 }
 
 impl Default for EngineConfig {
@@ -79,6 +83,7 @@ impl Default for EngineConfig {
             max_version_entries: 65_536,
             max_wal_hard_bytes: 256 * 1024 * 1024,
             max_readers: 64,
+            auto_checkpoint_on_close: false,
         }
     }
 }

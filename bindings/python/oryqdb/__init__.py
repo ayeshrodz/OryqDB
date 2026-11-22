@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple, Union
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = [
     "OryqStatus",
     "OryqError",
@@ -131,6 +131,8 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.oryq_db_close.restype = c_int
     lib.oryq_db_checkpoint.argtypes = [c_void_p]
     lib.oryq_db_checkpoint.restype = c_int
+    lib.oryq_db_vacuum.argtypes = [c_void_p]
+    lib.oryq_db_vacuum.restype = c_int
     lib.oryq_db_backup_to.argtypes = [c_void_p, c_char_p]
     lib.oryq_db_backup_to.restype = c_int
     lib.oryq_db_integrity_check.argtypes = [c_void_p, POINTER(c_bool)]
@@ -546,6 +548,10 @@ class Database:
 
     def checkpoint(self) -> None:
         _check(self._lib, self._lib.oryq_db_checkpoint(self._require_open()))
+
+    def vacuum(self) -> None:
+        """Compacts the database in place, reclaiming free space and shrinking the `.oryq` file."""
+        _check(self._lib, self._lib.oryq_db_vacuum(self._require_open()))
 
     def backup_to(self, dest_path: Union[str, os.PathLike[str]]) -> None:
         _check(self._lib, self._lib.oryq_db_backup_to(self._require_open(), str(dest_path).encode("utf-8")))

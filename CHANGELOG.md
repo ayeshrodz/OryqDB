@@ -7,7 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- Final `v1.0.0` production release evaluation (see `docs/PRE_1_0_READINESS_CHECKLIST.md`).
+- `0.12.1` (#29): In-memory ephemeral databases (`:memory:`).
+- `0.12.2` (#30): Hybrid FTS & Vector search in C ABI v1.2, CLI, and Python.
+- `0.12.3` (#31): Official Go (`cgo`), Node.js, and C# (.NET P/Invoke) bindings.
+- `0.12.4` (#32): Binary footprint optimization, SQLite comparison benchmark & final pre-1.0 soak audit.
+
+## [0.12.0] - 2026-11-22
+
+### Added (#28 — Single-File Auto-Seal on Close & `VACUUM` Compaction)
+- Added `auto_checkpoint_on_close: bool` (default `true` on `DatabaseConfig`, `false` on low-level `EngineConfig`): dropping the last `Database` handle cleanly checkpoints, seals, and removes the empty `.oryq-wal` sidecar so cleanly closed databases remain a **single `.oryq` file** on disk across Linux, macOS, and Windows.
+- Added in-place `VACUUM` compaction (`Database::vacuum` returning `VacuumReport`, `StorageEngine::replace_from_sealed_file`, `Pager::replace_from_sealed_bytes`, `oryq_db_vacuum` in C ABI v1.2 / `include/oryq.h`, `oryq vacuum <db>` in CLI, and `Database.vacuum()` in Python `oryqdb`) to reclaim fragmented pages, shrink `.oryq` file size on disk, and remove `.oryq-wal` while preserving monotonic `TxId` and `header_generation`.
+- Recorded `CC-0022` in `architecture/contract-changes.toml` and added `crates/oryq-core/tests/vacuum_and_autoseal.rs`.
 
 ## [0.11.0] - 2026-11-22
 

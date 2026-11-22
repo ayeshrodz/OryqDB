@@ -12,8 +12,8 @@ use crate::guard::ffi_guard;
 use crate::handles::{OryqCursor, OryqDb, OryqReadTxn, OryqWriteTxn};
 use crate::status::OryqStatus;
 
-/// ABI version packed as `(major << 16) | minor` (`1.1` -> `0x0001_0001`).
-pub const ORYQ_ABI_VERSION: u32 = (1 << 16) | 1;
+/// ABI version packed as `(major << 16) | minor` (`1.2` -> `0x0001_0002`).
+pub const ORYQ_ABI_VERSION: u32 = (1 << 16) | 2;
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -144,6 +144,33 @@ pub unsafe extern "C" fn oryq_db_checkpoint(db: *const OryqDb) -> OryqStatus {
         db_ref
             .db
             .checkpoint(true)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Compacts `db` in place (`VACUUM`), reclaiming free space, shrinking the `.oryq` file,
+/// and removing any companion `.oryq-wal` sidecar.
+///
+/// # Safety
+/// `db` must be a valid open handle from `oryq_db_open`.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_db_vacuum(db: *const OryqDb) -> OryqStatus {
+    ffi_guard(|| {
+        if db.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "db is null".to_owned()));
+        }
+        // SAFETY: `db` is valid for the duration of this call.
+        let db_ref = unsafe { &*db };
+        if db_ref.has_live_children() {
+            return Err((
+                OryqStatus::ErrBusy,
+                "cannot VACUUM while child read/write transactions are still open".to_owned(),
+            ));
+        }
+        db_ref
+            .db
+            .vacuum()
             .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
         Ok(OryqStatus::Ok)
     })

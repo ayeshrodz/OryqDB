@@ -411,6 +411,90 @@ impl StorageEngine {
         })
     }
 
+    /// Replaces the live `.oryq` file in place from a verified, sealed compacted file (`VACUUM`),
+    /// shrinking the file on disk and removing any companion `.oryq-wal` sidecar.
+    ///
+    /// Returns `ErrorCategory::Busy` if any active read snapshot is currently open.
+    pub fn replace_from_sealed_file(&self, compacted_path: &Path) -> Result<(u64, u64)> {
+        if self.config.read_only {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "StorageEngine::replace_from_sealed_file",
+                "cannot vacuum a read-only StorageEngine",
+            ));
+        }
+        if self.is_poisoned() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::CommitOutcomeUnknown,
+                MODULE_ID,
+                "StorageEngine::replace_from_sealed_file",
+                "engine is poisoned after an uncertain commit failure; close and reopen to recover",
+            ));
+        }
+
+        let _writer_permit = self.coordinator.acquire_writer()?;
+        if !self.coordinator.try_block_admission_when_idle()? {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Busy,
+                MODULE_ID,
+                "StorageEngine::replace_from_sealed_file",
+                "cannot VACUUM while active read transactions are open",
+            ));
+        }
+
+        let res = (|| -> Result<(u64, u64)> {
+            let compacted_bytes = std::fs::read(compacted_path).map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Io,
+                    MODULE_ID,
+                    "StorageEngine::replace_from_sealed_file",
+                    format!(
+                        "failed to read compacted image '{}': {err}",
+                        compacted_path.display()
+                    ),
+                )
+                .with_source(err)
+            })?;
+
+            let latest = self.coordinator.latest_committed()?;
+            let mut st = self.lock_state()?;
+            let (bytes_before, bytes_after) =
+                match st.pager.replace_from_sealed_bytes(&compacted_bytes, latest) {
+                    Ok(sizes) => sizes,
+                    Err(err) => {
+                        if err.category() == ErrorCategory::CommitOutcomeUnknown {
+                            self.coordinator.poison();
+                        }
+                        return Err(err);
+                    }
+                };
+
+            // Close WAL handle first (required on Windows before removing `.oryq-wal`).
+            st.wal.file = None;
+            if self.io.exists(&self.wal_path) {
+                let _ = self.io.remove_file(&self.wal_path);
+            }
+            st.wal.next_offset = WAL_HEADER_SIZE as u64;
+            st.wal.last_frame_seq = 0;
+            st.wal.last_checksum = 0;
+            st.versions = VersionIndex::new(self.config.max_version_entries);
+            st.wal_dirty_pages.clear();
+            self.cache.clear();
+
+            let new_meta = CommittedDbMeta::from_header(st.pager.header());
+            st.meta_history.clear();
+            st.meta_history.insert(new_meta.latest_tx_id, new_meta);
+            if new_meta.latest_tx_id > latest {
+                self.coordinator.publish_commit(new_meta.latest_tx_id)?;
+            }
+            Ok((bytes_before, bytes_after))
+        })();
+
+        self.coordinator.unblock_admission();
+        res
+    }
+
     pub(crate) fn read_page_at_snapshot(
         &self,
         page_id: PageId,
@@ -536,6 +620,25 @@ impl StorageEngine {
                 "engine state mutex poisoned",
             )
         })
+    }
+}
+
+impl Drop for StorageEngine {
+    fn drop(&mut self) {
+        if !self.config.auto_checkpoint_on_close || self.config.read_only || self.is_poisoned() {
+            return;
+        }
+        // Best-effort clean single-file seal on close: checkpoint + reset WAL + remove empty `.oryq-wal`.
+        let _ = self.checkpoint(true);
+        if let Ok(mut st) = self.state.lock() {
+            if !st.pager.header().wal_required {
+                // Drop WAL FileHandle before removing the file (mandatory on Windows).
+                st.wal.file = None;
+                if self.io.exists(&self.wal_path) {
+                    let _ = self.io.remove_file(&self.wal_path);
+                }
+            }
+        }
     }
 }
 
