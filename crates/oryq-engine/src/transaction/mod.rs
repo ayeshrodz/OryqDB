@@ -57,7 +57,9 @@ struct EngineState {
 #[derive(Debug)]
 pub struct StorageEngine {
     io: Arc<dyn StorageIo>,
+    db_path: PathBuf,
     wal_path: PathBuf,
+    vacuum_path: PathBuf,
     config: EngineConfig,
     page_size: PageSize,
     cache: PageCache,
@@ -72,6 +74,13 @@ pub fn wal_path_for(db_path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Derives the canonical `.oryq-vacuum` crash-recovery sidecar path for a database path.
+pub fn vacuum_path_for(db_path: &Path) -> PathBuf {
+    let mut os = db_path.as_os_str().to_os_string();
+    os.push("-vacuum");
+    PathBuf::from(os)
+}
+
 impl StorageEngine {
     /// Opens an existing database (running deterministic crash recovery if needed) or
     /// creates a new sealed database if `config.create_if_missing` is true.
@@ -82,6 +91,14 @@ impl StorageEngine {
         database_uuid: [u8; 16],
     ) -> Result<Self> {
         let wal_path = wal_path_for(db_path);
+        let vacuum_path = vacuum_path_for(db_path);
+
+        // Complete any interrupted VACUUM before opening Pager: if `<db>-vacuum` exists and
+        // contains a valid sealed image, replay it deterministically into `db_path`.
+        if !config.read_only && io.exists(&vacuum_path) {
+            replay_interrupted_vacuum(&io, db_path, &wal_path, &vacuum_path, config.sync_mode)?;
+        }
+
         let mut pager = Pager::open_or_create(io.clone(), db_path, &config, database_uuid)?;
         let page_size = pager.page_size();
         let mut versions = VersionIndex::new(config.max_version_entries);
@@ -229,7 +246,9 @@ impl StorageEngine {
 
         Ok(Self {
             io,
+            db_path: db_path.to_path_buf(),
             wal_path,
+            vacuum_path,
             config,
             page_size,
             cache,
@@ -411,16 +430,27 @@ impl StorageEngine {
         })
     }
 
-    /// Replaces the live `.oryq` file in place from a verified, sealed compacted file (`VACUUM`),
-    /// shrinking the file on disk and removing any companion `.oryq-wal` sidecar.
+    /// Executes an exclusive, crash-safe `VACUUM` compaction.
     ///
-    /// Returns `ErrorCategory::Busy` if any active read snapshot is currently open.
-    pub fn replace_from_sealed_file(&self, compacted_path: &Path) -> Result<(u64, u64)> {
+    /// Acquires exclusive writer ownership *before* invoking `build_compacted`, eliminating any
+    /// race with concurrent writers between snapshot copy and replacement. Stages the finalized
+    /// sealed image durably at `<db>-vacuum` before overwriting `.oryq` in place so any crash
+    /// mid-overwrite recovers deterministically on reopen.
+    ///
+    /// Returns `ErrorCategory::Busy` if any active read snapshot remains open when applying.
+    pub fn run_exclusive_vacuum<T, F>(
+        &self,
+        compacted_tmp_path: &Path,
+        build_compacted: F,
+    ) -> Result<(T, u64, u64)>
+    where
+        F: FnOnce(&Path) -> Result<T>,
+    {
         if self.config.read_only {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::InvalidArgument,
                 MODULE_ID,
-                "StorageEngine::replace_from_sealed_file",
+                "StorageEngine::run_exclusive_vacuum",
                 "cannot vacuum a read-only StorageEngine",
             ));
         }
@@ -428,53 +458,73 @@ impl StorageEngine {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::CommitOutcomeUnknown,
                 MODULE_ID,
-                "StorageEngine::replace_from_sealed_file",
+                "StorageEngine::run_exclusive_vacuum",
                 "engine is poisoned after an uncertain commit failure; close and reopen to recover",
             ));
         }
 
+        // Hold exclusive writer permit across BOTH snapshot copy AND replacement so no
+        // concurrent write can commit in between and be lost.
         let _writer_permit = self.coordinator.acquire_writer()?;
+        let build_result = build_compacted(compacted_tmp_path)?;
+
         if !self.coordinator.try_block_admission_when_idle()? {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Busy,
                 MODULE_ID,
-                "StorageEngine::replace_from_sealed_file",
+                "StorageEngine::run_exclusive_vacuum",
                 "cannot VACUUM while active read transactions are open",
             ));
         }
 
-        let res = (|| -> Result<(u64, u64)> {
-            let compacted_bytes = std::fs::read(compacted_path).map_err(|err| {
-                ErrorEnvelope::new(
-                    ErrorCategory::Io,
-                    MODULE_ID,
-                    "StorageEngine::replace_from_sealed_file",
-                    format!(
-                        "failed to read compacted image '{}': {err}",
-                        compacted_path.display()
-                    ),
-                )
-                .with_source(err)
-            })?;
+        let res = (|| -> Result<(T, u64, u64)> {
+            let compacted_bytes = read_file_via_io(
+                &self.io,
+                compacted_tmp_path,
+                "StorageEngine::run_exclusive_vacuum",
+            )?;
 
             let latest = self.coordinator.latest_committed()?;
             let mut st = self.lock_state()?;
-            let (bytes_before, bytes_after) =
-                match st.pager.replace_from_sealed_bytes(&compacted_bytes, latest) {
-                    Ok(sizes) => sizes,
-                    Err(err) => {
-                        if err.category() == ErrorCategory::CommitOutcomeUnknown {
-                            self.coordinator.poison();
-                        }
-                        return Err(err);
-                    }
-                };
+            let (finalized_bytes, new_hdr) = st
+                .pager
+                .finalize_sealed_vacuum_image(&compacted_bytes, latest)?;
 
-            // Close WAL handle first (required on Windows before removing `.oryq-wal`).
+            // Crash-safety stage: durably write & sync finalized image to `<db>-vacuum`
+            // BEFORE modifying the live `.oryq` file.
+            stage_vacuum_sidecar(
+                &self.io,
+                &self.vacuum_path,
+                &finalized_bytes,
+                self.config.sync_mode,
+            )?;
+
+            let (bytes_before, bytes_after) = match st
+                .pager
+                .apply_finalized_vacuum_image(&finalized_bytes, new_hdr)
+            {
+                Ok(sizes) => sizes,
+                Err(err) => {
+                    if err.category() == ErrorCategory::CommitOutcomeUnknown {
+                        self.coordinator.poison();
+                    }
+                    return Err(err);
+                }
+            };
+
+            // Close WAL handle first (mandatory on Windows before removing `.oryq-wal`).
             st.wal.file = None;
             if self.io.exists(&self.wal_path) {
                 let _ = self.io.remove_file(&self.wal_path);
             }
+            // Remove recovery sidecar now that live `.oryq` is durably synced.
+            if self.io.exists(&self.vacuum_path) {
+                let _ = self.io.remove_file(&self.vacuum_path);
+                if self.config.sync_mode != crate::config::SyncMode::Off {
+                    let _ = self.io.sync_parent_dir(&self.db_path);
+                }
+            }
+
             st.wal.next_offset = WAL_HEADER_SIZE as u64;
             st.wal.last_frame_seq = 0;
             st.wal.last_checksum = 0;
@@ -488,7 +538,7 @@ impl StorageEngine {
             if new_meta.latest_tx_id > latest {
                 self.coordinator.publish_commit(new_meta.latest_tx_id)?;
             }
-            Ok((bytes_before, bytes_after))
+            Ok((build_result, bytes_before, bytes_after))
         })();
 
         self.coordinator.unblock_admission();
@@ -651,4 +701,127 @@ fn meta_at_snapshot(
         .next_back()
         .map(|(_, &m)| m)
         .expect("meta_history always contains initial header baseline")
+}
+
+fn read_file_via_io(io: &Arc<dyn StorageIo>, path: &Path, op: &'static str) -> Result<Vec<u8>> {
+    let fh = io.open(path, OpenMode::READ_ONLY)?;
+    let len = fh.len()?;
+    let len_usize = usize::try_from(len).map_err(|_| {
+        ErrorEnvelope::new(
+            ErrorCategory::Overflow,
+            MODULE_ID,
+            op,
+            format!(
+                "file '{}' length {len} exceeds platform usize",
+                path.display()
+            ),
+        )
+    })?;
+    let mut buf = vec![0u8; len_usize];
+    if !buf.is_empty() {
+        fh.read_exact_at(&mut buf, 0)?;
+    }
+    Ok(buf)
+}
+
+fn stage_vacuum_sidecar(
+    io: &Arc<dyn StorageIo>,
+    vacuum_path: &Path,
+    finalized_bytes: &[u8],
+    sync_mode: crate::config::SyncMode,
+) -> Result<()> {
+    let mut stage_os = vacuum_path.as_os_str().to_os_string();
+    stage_os.push(".stage");
+    let stage_path = PathBuf::from(stage_os);
+    if io.exists(&stage_path) {
+        let _ = io.remove_file(&stage_path);
+    }
+    {
+        let fh = io.open(&stage_path, OpenMode::CREATE_OR_OPEN)?;
+        fh.write_all_at(finalized_bytes, 0)?;
+        fh.set_len(finalized_bytes.len() as u64)?;
+        if sync_mode != crate::config::SyncMode::Off {
+            fh.sync_all()?;
+        }
+    }
+    std::fs::rename(&stage_path, vacuum_path).map_err(|err| {
+        let _ = io.remove_file(&stage_path);
+        ErrorEnvelope::new(
+            ErrorCategory::Io,
+            MODULE_ID,
+            "stage_vacuum_sidecar",
+            format!(
+                "failed to atomically publish vacuum sidecar '{}': {err}",
+                vacuum_path.display()
+            ),
+        )
+        .with_source(err)
+    })?;
+    if sync_mode != crate::config::SyncMode::Off {
+        io.sync_parent_dir(vacuum_path)?;
+    }
+    Ok(())
+}
+
+fn replay_interrupted_vacuum(
+    io: &Arc<dyn StorageIo>,
+    db_path: &Path,
+    wal_path: &Path,
+    vacuum_path: &Path,
+    sync_mode: crate::config::SyncMode,
+) -> Result<()> {
+    let bytes = match read_file_via_io(io, vacuum_path, "replay_interrupted_vacuum") {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = io.remove_file(vacuum_path);
+            return Ok(());
+        }
+    };
+    let valid_sealed = if bytes.len() >= PageSize::Size4096.bytes() * 2 {
+        crate::format::select_active_header(&bytes[..PageSize::Size4096.bytes()])
+            .ok()
+            .and_then(|(_, hdr)| {
+                let pb = hdr.page_size.bytes();
+                if bytes.len() < pb * 2 || bytes.len() % pb != 0 || hdr.wal_required {
+                    return None;
+                }
+                let expected = hdr.total_page_count.checked_mul(pb as u64)?;
+                if bytes.len() as u64 != expected {
+                    return None;
+                }
+                crate::format::select_active_header(&bytes[..pb])
+                    .ok()
+                    .filter(|(_, full_hdr)| !full_hdr.wal_required)
+                    .map(|_| ())
+            })
+            .is_some()
+    } else {
+        false
+    };
+
+    if !valid_sealed {
+        // Incomplete/corrupt sidecar -> live `.oryq` was never overwritten; remove sidecar cleanly.
+        let _ = io.remove_file(vacuum_path);
+        return Ok(());
+    }
+
+    // Valid sealed `<db>-vacuum` -> deterministically complete interrupted VACUUM into `db_path`.
+    {
+        let fh = io.open(db_path, OpenMode::CREATE_OR_OPEN)?;
+        fh.try_lock_exclusive()?;
+        fh.write_all_at(&bytes, 0)?;
+        fh.set_len(bytes.len() as u64)?;
+        if sync_mode != crate::config::SyncMode::Off {
+            fh.sync_all()?;
+        }
+        let _ = fh.unlock();
+    }
+    if io.exists(wal_path) {
+        let _ = io.remove_file(wal_path);
+    }
+    let _ = io.remove_file(vacuum_path);
+    if sync_mode != crate::config::SyncMode::Off {
+        io.sync_parent_dir(db_path)?;
+    }
+    Ok(())
 }

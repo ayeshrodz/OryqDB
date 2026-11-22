@@ -217,22 +217,19 @@ impl Pager {
         self.file.len()
     }
 
-    /// Replaces the open `.oryq` file contents in place from a validated, sealed compacted image
-    /// and truncates trailing space (`VACUUM`), preserving `database_uuid` and advancing
+    /// Prepares a finalized, checksummed sealed `.oryq` image ready for crash-safe staging
+    /// (`<db>-vacuum`) and in-place replacement, preserving `database_uuid` and advancing
     /// `header_generation` and `checkpointed_tx_id` monotonically.
-    ///
-    /// Works identically across Linux, macOS, and Windows without closing or renaming over an
-    /// open file handle.
-    pub fn replace_from_sealed_bytes(
-        &mut self,
+    pub fn finalize_sealed_vacuum_image(
+        &self,
         compacted_bytes: &[u8],
         min_tx_id: TxId,
-    ) -> Result<(u64, u64)> {
+    ) -> Result<(Vec<u8>, StorageHeader)> {
         if self.read_only {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::InvalidArgument,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::finalize_sealed_vacuum_image",
                 "cannot vacuum a read-only pager",
             ));
         }
@@ -241,7 +238,7 @@ impl Pager {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::finalize_sealed_vacuum_image",
                 format!(
                     "invalid compacted image length {} for page_size {page_bytes}",
                     compacted_bytes.len()
@@ -253,7 +250,7 @@ impl Pager {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::InvalidArgument,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::finalize_sealed_vacuum_image",
                 "compacted image page_size does not match live database page_size",
             ));
         }
@@ -261,7 +258,7 @@ impl Pager {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::InvalidArgument,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::finalize_sealed_vacuum_image",
                 "compacted image must be sealed (wal_required == false)",
             ));
         }
@@ -272,7 +269,7 @@ impl Pager {
                 ErrorEnvelope::new(
                     ErrorCategory::Overflow,
                     MODULE_ID,
-                    "Pager::replace_from_sealed_bytes",
+                    "Pager::finalize_sealed_vacuum_image",
                     "compacted image size overflow",
                 )
             })?;
@@ -280,7 +277,7 @@ impl Pager {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::finalize_sealed_vacuum_image",
                 format!(
                     "compacted image len {} != expected {expected_len}",
                     compacted_bytes.len()
@@ -288,23 +285,53 @@ impl Pager {
             ));
         }
 
-        let bytes_before = self.file.len()?;
+        let next_gen = self
+            .header
+            .header_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Overflow,
+                    MODULE_ID,
+                    "Pager::finalize_sealed_vacuum_image",
+                    "header_generation overflow",
+                )
+            })?;
         new_hdr.database_uuid = self.header.database_uuid;
         new_hdr.checkpointed_tx_id = new_hdr.checkpointed_tx_id.max(min_tx_id);
-        new_hdr.header_generation = self.header.header_generation.saturating_add(1);
+        new_hdr.header_generation = next_gen;
         new_hdr.wal_required = false;
         new_hdr.reset_intent_seq = 0;
 
-        let mut page0 = vec![0u8; page_bytes];
-        write_page0_dual(&new_hdr, &mut page0)?;
+        let mut finalized = compacted_bytes.to_vec();
+        write_page0_dual(&new_hdr, &mut finalized[..page_bytes])?;
+        Ok((finalized, new_hdr))
+    }
 
-        // Write data pages 1..N first, sync, then write Page 0 dual headers, truncate, and sync.
+    /// Writes a finalized sealed image (already durably staged in `<db>-vacuum`) into the open
+    /// `.oryq` file in place, truncates trailing space, syncs, and updates the live header.
+    pub fn apply_finalized_vacuum_image(
+        &mut self,
+        finalized_bytes: &[u8],
+        new_hdr: StorageHeader,
+    ) -> Result<(u64, u64)> {
+        if self.read_only {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "Pager::apply_finalized_vacuum_image",
+                "cannot vacuum a read-only pager",
+            ));
+        }
+        let page_bytes = self.header.page_size.bytes();
+        let bytes_before = self.file.len()?;
+
         let write_res = (|| -> Result<()> {
             self.file
-                .write_all_at(&compacted_bytes[page_bytes..], page_bytes as u64)?;
+                .write_all_at(&finalized_bytes[page_bytes..], page_bytes as u64)?;
             self.sync_data()?;
-            self.file.write_all_at(&page0, 0)?;
-            self.file.set_len(compacted_bytes.len() as u64)?;
+            self.file.write_all_at(&finalized_bytes[..page_bytes], 0)?;
+            self.file.set_len(finalized_bytes.len() as u64)?;
             self.sync_data()?;
             Ok(())
         })();
@@ -312,14 +339,14 @@ impl Pager {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::CommitOutcomeUnknown,
                 MODULE_ID,
-                "Pager::replace_from_sealed_bytes",
+                "Pager::apply_finalized_vacuum_image",
                 format!("in-place VACUUM write/sync failed; outcome uncertain: {err}"),
             ));
         }
 
         self.header = new_hdr;
         self.active_slot = HeaderSlot::SlotA;
-        Ok((bytes_before, compacted_bytes.len() as u64))
+        Ok((bytes_before, finalized_bytes.len() as u64))
     }
 
     /// Reads and checksum-verifies a logical page (`PageId >= 1`).

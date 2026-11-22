@@ -1,4 +1,4 @@
-"""Official Python ctypes bindings for OryqDB (C ABI v1.1).
+"""Official Python ctypes bindings for OryqDB (C ABI v1.2).
 
 License: MIT
 """
@@ -26,7 +26,7 @@ __all__ = [
 
 
 class OryqStatus(enum.IntEnum):
-    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.1)."""
+    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.2)."""
 
     OK = 0
     CURSOR_DONE = 1
@@ -203,7 +203,7 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
 
 
 def load_library(lib_path: Optional[Union[str, os.PathLike[str]]] = None) -> ctypes.CDLL:
-    """Loads `liboryq` and configures all C ABI v1.1 prototypes."""
+    """Loads `liboryq` and configures all C ABI v1.2 prototypes."""
     global _DEFAULT_LIB
     if lib_path is not None:
         return _configure_prototypes(ctypes.CDLL(str(lib_path)))

@@ -324,10 +324,17 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         assert!(!oryq_last_error_message().is_null());
         assert_eq!(oryq_write_txn_commit(wtx2), OryqStatus::Ok);
 
-        // Integrity check & sealed online backup
+        // Integrity check, VACUUM (positive + ErrBusy), & sealed online backup
         let mut ok = false;
         assert_eq!(oryq_db_integrity_check(db, &mut ok), OryqStatus::Ok);
         assert!(ok);
+        {
+            let mut busy_rtx: *mut OryqReadTxn = ptr::null_mut();
+            assert_eq!(oryq_read_txn_begin(db, &mut busy_rtx), OryqStatus::Ok);
+            assert_eq!(oryq_db_vacuum(db), OryqStatus::ErrBusy);
+            assert_eq!(oryq_read_txn_close(busy_rtx), OryqStatus::Ok);
+        }
+        assert_eq!(oryq_db_vacuum(db), OryqStatus::Ok);
         assert_eq!(oryq_db_backup_to(db, backup_path.as_ptr()), OryqStatus::Ok);
         assert_eq!(oryq_db_close(db), OryqStatus::Ok);
 

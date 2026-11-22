@@ -162,10 +162,14 @@ fn reduced_build_without_fts_rejects_fts_provider_fail_closed() {
         );
     }
 
-    // Online backup also fails closed rather than silently dropping the FTS index
+    // Online backup and VACUUM also fail closed rather than silently dropping the FTS index
     let bk_path = dir.path().join("blocked_backup.oryq");
     assert_eq!(
         db.backup_to(&bk_path).unwrap_err().category(),
+        ErrorCategory::UnsupportedFeature
+    );
+    assert_eq!(
+        db.vacuum().unwrap_err().category(),
         ErrorCategory::UnsupportedFeature
     );
 

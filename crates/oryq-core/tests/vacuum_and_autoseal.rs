@@ -3,10 +3,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_core::{Database, DatabaseConfig, ErrorCategory, PageSize, SortOrder, SyncMode, Value};
-use oryq_engine::wal_path_for;
+use oryq_engine::{vacuum_path_for, wal_path_for};
 
 static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -195,4 +197,112 @@ fn vacuum_shrinks_file_preserves_indexes_and_rejects_busy_or_readonly() {
         ro_db.vacuum().unwrap_err().category(),
         ErrorCategory::InvalidArgument
     );
+}
+
+#[test]
+fn vacuum_serializes_concurrent_writer_without_losing_commits() {
+    let dir = TempDir::new("concurrent_write");
+    let db_path = dir.path().join("concurrent.oryq");
+    let cfg = DatabaseConfig {
+        page_size: PageSize::Size4096,
+        sync_mode: SyncMode::Normal,
+        ..DatabaseConfig::default()
+    };
+
+    let db = Arc::new(Database::open(&db_path, cfg).unwrap());
+    {
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("events").unwrap();
+        {
+            let mut col = wtx.collection("events").unwrap();
+            for i in 1..=40i64 {
+                col.insert_json(&format!(r#"{{"_id": {i}, "v": "seed"}}"#))
+                    .unwrap();
+            }
+        }
+        wtx.commit().unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+    let db_writer = Arc::clone(&db);
+    let b_writer = Arc::clone(&barrier);
+
+    let writer = thread::spawn(move || {
+        b_writer.wait();
+        for i in 101..=130i64 {
+            let mut wtx = db_writer.begin_write().unwrap();
+            {
+                let mut col = wtx.collection("events").unwrap();
+                col.insert_json(&format!(r#"{{"_id": {i}, "v": "concurrent"}}"#))
+                    .unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+    });
+
+    barrier.wait();
+    for _ in 0..3 {
+        let rep = db.vacuum().unwrap();
+        assert!(rep.sealed);
+    }
+    writer.join().unwrap();
+
+    // Every single seed doc (40) + every single concurrent commit (30) must survive!
+    assert!(db.integrity_check().unwrap().ok);
+    let rtx = db.begin_read().unwrap();
+    let col = rtx.collection("events").unwrap();
+    assert_eq!(col.count().unwrap(), 70);
+    for i in 101..=130i64 {
+        assert!(
+            col.find_by_id(&Value::Int64(i)).unwrap().is_some(),
+            "lost concurrent commit _id={i}"
+        );
+    }
+}
+
+#[test]
+fn interrupted_vacuum_sidecar_is_replayed_on_open() {
+    let dir = TempDir::new("crash_recovery");
+    let db_path = dir.path().join("recover.oryq");
+    let backup_path = dir.path().join("compacted.oryq");
+    let vac_sidecar = vacuum_path_for(&db_path);
+    let cfg = DatabaseConfig {
+        page_size: PageSize::Size4096,
+        sync_mode: SyncMode::Normal,
+        ..DatabaseConfig::default()
+    };
+
+    // Build a valid sealed database image and export it as our simulated `<db>-vacuum` sidecar.
+    {
+        let db = Database::open(&db_path, cfg.clone()).unwrap();
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("items").unwrap();
+        {
+            let mut col = wtx.collection("items").unwrap();
+            col.insert_json(r#"{"_id": 1, "name": "survived-crash"}"#)
+                .unwrap();
+        }
+        wtx.commit().unwrap();
+        db.backup_to(&backup_path).unwrap();
+    }
+
+    // Simulate power loss mid-overwrite: `<db>-vacuum` holds the durable finalized image,
+    // while the live `.oryq` file was truncated/torn in the middle of overwriting.
+    std::fs::copy(&backup_path, &vac_sidecar).unwrap();
+    std::fs::write(&db_path, b"TORN_MID_OVERWRITE").unwrap();
+
+    // Reopening must deterministically replay `<db>-vacuum` into `db_path` and remove sidecar.
+    {
+        let db = Database::open(&db_path, cfg).unwrap();
+        assert!(!vac_sidecar.exists());
+        assert!(db.is_sealed().unwrap());
+        assert!(db.integrity_check().unwrap().ok);
+        let rtx = db.begin_read().unwrap();
+        let col = rtx.collection("items").unwrap();
+        let doc = col.find_by_id(&Value::Int64(1)).unwrap().unwrap();
+        assert_eq!(
+            doc.view().get_field("name").unwrap().to_owned_value(),
+            Value::String("survived-crash".into())
+        );
+    }
 }

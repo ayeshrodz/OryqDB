@@ -268,6 +268,7 @@ impl PageCache {
     }
 
     /// Returns a point-in-time snapshot of cache counters and budget usage.
+    /// Clears all cached page entries and releases their budget reservations.
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.entries.clear();
@@ -275,6 +276,7 @@ impl PageCache {
         }
     }
 
+    /// Returns a point-in-time snapshot of cache utilization and hit/miss counters.
     pub fn stats(&self) -> CacheStats {
         let entries = self.inner.lock().map(|g| g.entries.len()).unwrap_or(0);
         CacheStats {

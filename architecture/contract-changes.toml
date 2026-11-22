@@ -352,6 +352,7 @@ evidence = [
 id = "CC-0022"
 modules = ["engine", "core", "ffi", "cli"]
 files = [
+    "crates/oryq-engine/src/lib.rs",
     "crates/oryq-engine/src/transaction/mod.rs",
     "crates/oryq-core/src/config.rs",
     "crates/oryq-core/src/lib.rs",
