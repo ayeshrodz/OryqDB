@@ -46,6 +46,15 @@ write_bits = []
 retired = false
 
 [[capabilities]]
+id = "oryq.coordinator.shared_process.v1"
+owner = "engine"
+interface_version = 1
+persistent = false
+read_bits = []
+write_bits = []
+retired = false
+
+[[capabilities]]
 id = "oryq.index.fts.v1"
 owner = "fts"
 interface_version = 1

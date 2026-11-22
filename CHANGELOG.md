@@ -7,9 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.10.2` (#17 / `X02`): Multi-process shared-memory coordination (`.oryq-shm`).
 - `0.10.3` (#18 / `X03`): Queued write batching & group commit (`commit_batch`).
 - `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.10.2] - 2026-11-22
+
+### Added (#17 / `X02` — Multi-Process Shared-Memory Coordination `.oryq-shm`)
+- Added `oryq-engine::coordinator::shared_process` (`#![forbid(unsafe_code)]`, capability `oryq.coordinator.shared_process.v1`) providing multi-process coordination via a checksummed companion `.oryq-shm` state file plus OS-kernel-backed `.oryq-shm.wlock` and `.oryq-shm.rlock` lock files:
+  - Fixed-size reader slot table (`1..=256` slots) with MVCC snapshot pinning, `retention_horizon()` tracking, and heartbeat lease refresh (`SharedSnapshotGuard::refresh_lease`).
+  - Exclusive multi-process writer lock (`SharedWriterPermit`) with serialized `publish_commit` monotonicity validation.
+  - Exclusive WAL-reset exclusion (`try_acquire_wal_reset` / `WalResetGuard`) blocking new readers during WAL truncation and automatically reclaiming stale crashed-reader slots.
+  - Deterministic peer crash / owner-death recovery (`reclaim_stale_peers`) backed by OS kernel lock release on abrupt process termination (`SIGKILL` / `TerminateProcess`) plus ephemeral corrupt-`.oryq-shm` recovery when idle.
+- Added real multi-process integration test suite (`crates/oryq-engine/tests/multiprocess_shm.rs`) spawning real OS child processes across Linux, macOS, and Windows for concurrent readers/writers, WAL-reset exclusion, abrupt writer/reader crash recovery, and cross-process `.oryq` durability handoff.
+- Registered `oryq.coordinator.shared_process.v1` in `architecture/capabilities.toml` and recorded `CC-0020` in `architecture/contract-changes.toml`.
 
 ## [0.10.1] - 2026-11-22
 

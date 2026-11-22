@@ -25,7 +25,11 @@ pub use cache::{
     CacheStats, PageCache, PageVersionEntry, PageVersionLocation, PinnedPage, VersionIndex,
 };
 pub use config::{EngineConfig, PageSize, SyncMode};
-pub use coordinator::{SingleProcessCoordinator, SnapshotGuard, WriterPermit};
+pub use coordinator::{
+    shm_path_for, SharedProcessConfig, SharedProcessCoordinator, SharedSnapshotGuard,
+    SharedWriterPermit, ShmInspectionReport, SingleProcessCoordinator, SnapshotGuard,
+    StaleReclaimReport, WalResetGuard, WriterPermit, MAX_SHM_READERS,
+};
 pub use format::{
     CommitPayload, FreelistEntry, FreelistTrunkHeader, HeaderSlot, OverflowHeader, OverflowRef,
     PageFlags, PageHeader, PageType, SlotEntry, SlotFlags, SlottedPageMut, SlottedPageView,
