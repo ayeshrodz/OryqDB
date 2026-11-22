@@ -7,7 +7,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.11.0` (#19): Official language bindings & production developer guides.
+- Final `v1.0.0` production release evaluation (see `docs/PRE_1_0_READINESS_CHECKLIST.md`).
+
+## [0.11.0] - 2026-11-22
+
+### Added (#19 — Official Language Bindings & Production Developer Guides)
+- Added official zero-dependency Python `ctypes` package (`bindings/python/oryqdb`, `pyproject.toml`, `README.md`) over C ABI v1.1 (`liboryq`) with typed `OryqStatus`/`OryqError`, context-managed `Database`/`WriteTxn`/`ReadTxn`/`Cursor`, auto-rollback on exception, `oryq_free_string` memory safety, and zero-copy `step()` + `get_i64`/`get_f64`/`get_bool`/`get_utf8` accessors, verified by `bindings/python/tests/test_oryqdb.py` across Linux, macOS, and Windows in CI.
+- Added native C99 (`bindings/c/quickstart.c`) and C++17 RAII (`bindings/cpp/quickstart.cpp`) examples compiled with `-Wall -Wextra -Werror` and executed in CI.
+- Added end-to-end production developer guides:
+  - `docs/guides/quickstart.md`
+  - `docs/guides/query-and-aggregation.md`
+  - `docs/guides/c-abi-guide.md`
+  - `docs/guides/operations-and-recovery.md`
+  - `docs/PRE_1_0_READINESS_CHECKLIST.md`
+- Registered `bindings/` ownership under `ffi` in `architecture/modules.toml`.
 
 ## [0.10.3] - 2026-11-22
 

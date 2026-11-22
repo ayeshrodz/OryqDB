@@ -126,7 +126,7 @@ test_commands = [["cargo", "test", "-p", "oryq-core"]]
 id = "ffi"
 crate = "oryq-ffi"
 state = "active"
-owned = ["crates/oryq-ffi/", "include/"]
+owned = ["crates/oryq-ffi/", "include/", "bindings/"]
 production_dependencies = ["oryq-core"]
 contract_files = [
     "crates/oryq-ffi/src/lib.rs",
