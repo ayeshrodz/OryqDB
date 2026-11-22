@@ -257,3 +257,18 @@ evidence = [
     "cargo run -p xtask -- modules cli",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+[[changes]]
+id = "CC-0017"
+modules = ["ffi"]
+files = [
+    "crates/oryq-ffi/src/api.rs",
+    "include/oryq.h",
+]
+reason = "Implement Issue #14 (v0.9.2) full C ABI parity: zero-copy oryq_cursor_next / get_utf8 / get_f64 / get_bool, oryq_aggregate_json, oryq_create_index / drop_index, oryq_db_backup_to, and oryq_db_integrity_check (ABI v1.1)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-ffi",
+    "cargo run -p xtask -- modules ffi",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

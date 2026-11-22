@@ -99,3 +99,13 @@ jobs:
 
       - name: Run module check for cli (oryq-cli)
         run: cargo run -p xtask -- modules cli
+
+      - name: Compile and run native C99/C++11 FFI integration test
+        if: runner.os != 'Windows'
+        run: |
+          cargo build -p oryq-ffi
+          TMPDIR_FFI=$(mktemp -d)
+          cc -std=c99 -Wall -Wextra -Werror -Iinclude crates/oryq-ffi/tests/c99_integration.c -Ltarget/debug -loryq -Wl,-rpath,target/debug -lm -o "$TMPDIR_FFI/c99_test"
+          "$TMPDIR_FFI/c99_test" "$TMPDIR_FFI/test.oryq" "$TMPDIR_FFI/backup.oryq"
+          c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++ -Iinclude - <<< '#include "oryq.h"'
+          rm -rf "$TMPDIR_FFI"

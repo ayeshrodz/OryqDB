@@ -1,4 +1,4 @@
-/* OryqDB C Application Binary Interface (v1.0)
+/* OryqDB C Application Binary Interface (v1.1)
  * License: MIT
  */
 #ifndef ORYQ_H
@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define ORYQ_ABI_VERSION_MAJOR 1
-#define ORYQ_ABI_VERSION_MINOR 0
+#define ORYQ_ABI_VERSION_MINOR 1
 
 typedef struct OryqDb       OryqDb;
 typedef struct OryqReadTxn  OryqReadTxn;
@@ -56,10 +56,12 @@ uint32_t    oryq_abi_version(void);
 const char *oryq_last_error_message(void);
 void        oryq_free_string(char *ptr);
 
-/* Database Lifecycle */
+/* Database Lifecycle & Administration */
 oryq_status oryq_db_open(const char *path_utf8, OryqDb **out_db);
 oryq_status oryq_db_close(OryqDb *db);
 oryq_status oryq_db_checkpoint(const OryqDb *db);
+oryq_status oryq_db_backup_to(const OryqDb *db, const char *dest_path_utf8);
+oryq_status oryq_db_integrity_check(const OryqDb *db, bool *out_ok);
 
 /* Transactions */
 oryq_status oryq_read_txn_begin(const OryqDb *db, OryqReadTxn **out_txn);
@@ -68,17 +70,26 @@ oryq_status oryq_write_txn_begin(const OryqDb *db, OryqWriteTxn **out_txn);
 oryq_status oryq_write_txn_commit(OryqWriteTxn *txn);
 oryq_status oryq_write_txn_rollback(OryqWriteTxn *txn);
 
-/* Collections & CRUD */
+/* Collections, Indexes & CRUD */
 oryq_status oryq_create_collection(OryqWriteTxn *txn, const char *name);
 oryq_status oryq_drop_collection(OryqWriteTxn *txn, const char *name);
+oryq_status oryq_create_index(OryqWriteTxn *txn, const char *collection, const char *field_path, int32_t sort_order, bool unique, bool sparse, const char *name_or_null);
+oryq_status oryq_drop_index(OryqWriteTxn *txn, const char *collection, const char *index_name);
 oryq_status oryq_insert_json(OryqWriteTxn *txn, const char *collection, const char *doc_json);
 oryq_status oryq_update_by_id_json(OryqWriteTxn *txn, const char *collection, const char *id_json, const char *update_json);
 oryq_status oryq_delete_by_id_json(OryqWriteTxn *txn, const char *collection, const char *id_json);
 
-/* Query & Cursor */
+/* Query, Aggregation & Zero-Copy Cursor Accessors */
 oryq_status oryq_find_json(const OryqReadTxn *txn, const char *collection, const char *filter_json, OryqCursor **out_cursor);
+oryq_status oryq_aggregate_json(const OryqReadTxn *txn, const char *collection, const char *pipeline_json, OryqCursor **out_cursor);
+oryq_status oryq_cursor_next(OryqCursor *cursor);
 oryq_status oryq_cursor_next_json(OryqCursor *cursor, char **out_json);
+/* Top-level field getters on the cursor's current document. */
 oryq_status oryq_cursor_get_i64(const OryqCursor *cursor, const char *field, int64_t *out_val);
+oryq_status oryq_cursor_get_f64(const OryqCursor *cursor, const char *field, double *out_val);
+oryq_status oryq_cursor_get_bool(const OryqCursor *cursor, const char *field, bool *out_val);
+/* Borrowed UTF-8 byte slice for a top-level field (NOT NUL-terminated); valid until next cursor advance or close. */
+oryq_status oryq_cursor_get_utf8(const OryqCursor *cursor, const char *field, const char **out_ptr, size_t *out_len);
 oryq_status oryq_cursor_close(OryqCursor *cursor);
 
 #ifdef __cplusplus

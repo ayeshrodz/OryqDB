@@ -7,9 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.9.2` (#14): Full C ABI parity (`oryq_aggregate_json` + zero-copy `utf8`/`f64`/`bool` cursor getters).
 - `0.10.x` (#15–#18 / `X01–X03`): Optional `oryq-fts` / `oryq-vec` search crates, `.oryq-shm` multi-process mode, and queued write batching (`commit_batch`).
 - `0.11.0` (#19): Official language bindings & production developer guides.
+
+## [0.9.2] - 2026-11-22
+
+### Added (#14 — Full C ABI Parity, ABI v1.1)
+- Added zero-copy cursor advance and typed field getters in `oryq-ffi` and `include/oryq.h`:
+  - `oryq_cursor_next`, `oryq_cursor_get_utf8` (borrowed `(ptr, len)` slice), `oryq_cursor_get_f64`, and `oryq_cursor_get_bool`.
+- Added aggregation, index DDL, online backup, and integrity check symbols to `oryq-ffi` and `include/oryq.h`:
+  - `oryq_aggregate_json`, `oryq_create_index`, `oryq_drop_index`, `oryq_db_backup_to`, and `oryq_db_integrity_check`.
+- Bumped `ORYQ_ABI_VERSION_MINOR` to `1` (`ABI 1.1`, backwards-compatible additive release) and recorded `CC-0017` in `architecture/contract-changes.toml`.
+- Expanded `crates/oryq-ffi/tests/c_api.rs` and verified native C99 (`-std=c99`) and C++11 (`-std=c++11`) compilation under `-Wall -Wextra -Werror` plus Miri null/panic boundary checks.
 
 ## [0.9.1] - 2026-11-22
 
