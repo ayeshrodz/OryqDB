@@ -1,7 +1,7 @@
 //! Exclusive ACID [`WriteTransaction`] and [`WriteCollection`] handles.
 
 use oryq_document::{from_json_str, DocumentBuf, UpdateSpec, Value};
-use oryq_engine::{CommitReceipt, WriteTxn};
+use oryq_engine::{CommitReceipt, SavepointId, WriteTxn};
 use oryq_index::{IndexDescriptor, SortOrder};
 use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result, TxId};
 
@@ -72,6 +72,21 @@ impl<'db> WriteTransaction<'db> {
             name: name.to_owned(),
             max_document_bytes: self.max_document_bytes,
         })
+    }
+
+    /// Creates a nested statement savepoint inside this write transaction.
+    pub fn savepoint(&mut self) -> SavepointId {
+        self.tx.savepoint()
+    }
+
+    /// Rolls back mutations performed since `savepoint`.
+    pub fn rollback_to(&mut self, savepoint: SavepointId) -> Result<()> {
+        self.tx.rollback_to(savepoint)
+    }
+
+    /// Releases `savepoint`, keeping its mutations in the enclosing transaction.
+    pub fn release_savepoint(&mut self, savepoint: SavepointId) -> Result<()> {
+        self.tx.release_savepoint(savepoint)
     }
 
     /// Durably commits all mutations in this transaction to `.oryq-wal`.

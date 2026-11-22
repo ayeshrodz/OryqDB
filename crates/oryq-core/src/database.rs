@@ -1,14 +1,16 @@
 //! Shareable [`Database`] handle coordinating `oryq-engine` and immutable `CoreRegistries`.
 
+use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_engine::{
-    CheckpointOutcome, LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine,
+    clone_error_envelope, BatchCommitReport, BatchItem, BatchTx, CheckpointOutcome, CommitReceipt,
+    GroupCommitQueue, LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine,
     StorageIo, WalInspectionReport,
 };
-use oryq_types::{Result, TxId};
+use oryq_types::{ErrorCategory, ErrorEnvelope, Result, TxId};
 
 use crate::admin::{
     inspect_locks, inspect_page, inspect_wal, run_integrity_check, run_online_backup, BackupReport,
@@ -18,6 +20,15 @@ use crate::api::{ReadTransaction, WriteTransaction};
 use crate::composition::CoreRegistries;
 use crate::config::DatabaseConfig;
 
+const MODULE_ID: &str = "core";
+
+#[derive(Debug, Default, Clone, Copy)]
+struct CoreWriteBatchTx;
+
+impl BatchTx for CoreWriteBatchTx {
+    type Tx<'a> = WriteTransaction<'a>;
+}
+
 #[derive(Debug)]
 struct DatabaseInner {
     path: PathBuf,
@@ -25,6 +36,7 @@ struct DatabaseInner {
     engine: StorageEngine,
     registries: CoreRegistries,
     max_document_bytes: usize,
+    batch_queue: GroupCommitQueue<CoreWriteBatchTx>,
 }
 
 /// Shareable (`Clone + Send + Sync`) embedded OryqDB database handle.
@@ -49,6 +61,7 @@ impl Database {
         let uuid = generate_database_uuid();
         let engine = StorageEngine::open(io, path.as_ref(), config.to_engine_config(), uuid)?;
         let registries = CoreRegistries::default_v1();
+        let batch_queue = GroupCommitQueue::new(config.group_commit);
         Ok(Self {
             inner: Arc::new(DatabaseInner {
                 path: path.as_ref().to_path_buf(),
@@ -56,6 +69,7 @@ impl Database {
                 engine,
                 registries,
                 max_document_bytes: config.max_document_bytes,
+                batch_queue,
             }),
         })
     }
@@ -81,6 +95,170 @@ impl Database {
             &self.inner.registries,
             self.inner.max_document_bytes,
         ))
+    }
+
+    /// Executes an ordered batch of write closures inside a single [`WriteTransaction`] and a
+    /// single durable WAL fsync (`X03`).
+    ///
+    /// - Each item executes inside its own statement savepoint so validation failures roll back
+    ///   only that item while all valid items commit together in one fsync.
+    /// - If zero items succeed, the transaction is rolled back with zero WAL writes/fsyncs.
+    /// - If the single WAL write/sync fails (including [`ErrorCategory::CommitOutcomeUnknown`]),
+    ///   `Err(commit_err)` is returned and no item is reported as durably committed.
+    pub fn commit_batch<T, F>(&self, items: Vec<F>) -> Result<BatchCommitReport<T>>
+    where
+        F: FnOnce(&mut WriteTransaction<'_>) -> Result<T>,
+    {
+        if self.inner.engine.is_read_only() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "Database::commit_batch",
+                "cannot execute commit_batch on a read-only Database",
+            ));
+        }
+        if self.inner.engine.is_poisoned() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::CommitOutcomeUnknown,
+                MODULE_ID,
+                "Database::commit_batch",
+                "database engine is poisoned after an uncertain commit write/sync failure; close and reopen to recover",
+            ));
+        }
+        if items.is_empty() {
+            return Ok(BatchCommitReport {
+                receipt: None,
+                results: Vec::new(),
+                committed_count: 0,
+                failed_count: 0,
+            });
+        }
+
+        let mut wtx = self.begin_write()?;
+        let mut results = Vec::with_capacity(items.len());
+        let mut committed_count = 0usize;
+        let mut failed_count = 0usize;
+
+        for item in items {
+            let sp = wtx.savepoint();
+            match item(&mut wtx) {
+                Ok(val) => {
+                    if let Err(err) = wtx.release_savepoint(sp) {
+                        let _ = wtx.rollback_to(sp);
+                        return Err(err);
+                    }
+                    results.push(Ok(val));
+                    committed_count += 1;
+                }
+                Err(err) => {
+                    wtx.rollback_to(sp)?;
+                    results.push(Err(err));
+                    failed_count += 1;
+                }
+            }
+        }
+
+        if committed_count == 0 {
+            wtx.rollback();
+            return Ok(BatchCommitReport {
+                receipt: None,
+                results,
+                committed_count: 0,
+                failed_count,
+            });
+        }
+
+        let receipt = wtx.commit()?;
+        Ok(BatchCommitReport {
+            receipt: Some(receipt),
+            results,
+            committed_count,
+            failed_count,
+        })
+    }
+
+    /// Submits a write operation to the database's leader-follower group-commit queue (`X03`).
+    ///
+    /// Concurrent callers are coalesced into ordered single-fsync batches (bounded by
+    /// `DatabaseConfig::group_commit`) while preserving per-operation savepoint rollback and
+    /// `CommitOutcomeUnknown` propagation on sync failure.
+    pub fn submit_batched<T, F>(&self, op: F) -> Result<(T, CommitReceipt)>
+    where
+        T: Send + 'static,
+        F: for<'db> FnOnce(&mut WriteTransaction<'db>) -> Result<T> + Send + 'static,
+    {
+        if self.inner.engine.is_read_only() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "Database::submit_batched",
+                "cannot submit batched write on a read-only Database",
+            ));
+        }
+        if self.inner.engine.is_poisoned() {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::CommitOutcomeUnknown,
+                MODULE_ID,
+                "Database::submit_batched",
+                "database engine is poisoned after an uncertain commit write/sync failure; close and reopen to recover",
+            ));
+        }
+
+        self.inner
+            .batch_queue
+            .submit(op, |drained| self.execute_drained_batch(drained))
+    }
+
+    fn execute_drained_batch(&self, drained: Vec<BatchItem<CoreWriteBatchTx>>) {
+        if drained.is_empty() {
+            return;
+        }
+        let mut wtx = match self.begin_write() {
+            Ok(tx) => tx,
+            Err(err) => {
+                for item in drained {
+                    item.deliver_err(clone_error_envelope(&err));
+                }
+                return;
+            }
+        };
+
+        let mut succeeded: Vec<(BatchItem<CoreWriteBatchTx>, Box<dyn Any + Send>)> =
+            Vec::with_capacity(drained.len());
+        for mut item in drained {
+            let sp = wtx.savepoint();
+            match item.execute(&mut wtx) {
+                Ok(val) => match wtx.release_savepoint(sp) {
+                    Ok(()) => succeeded.push((item, val)),
+                    Err(err) => {
+                        let _ = wtx.rollback_to(sp);
+                        item.deliver_err(err);
+                    }
+                },
+                Err(err) => {
+                    let _ = wtx.rollback_to(sp);
+                    item.deliver_err(err);
+                }
+            }
+        }
+
+        if succeeded.is_empty() {
+            wtx.rollback();
+            return;
+        }
+
+        match wtx.commit() {
+            Ok(receipt) => {
+                for (item, val) in succeeded {
+                    item.deliver_ok(val, receipt);
+                }
+            }
+            Err(commit_err) => {
+                for (item, _) in succeeded {
+                    item.deliver_err(clone_error_envelope(&commit_err));
+                }
+            }
+        }
     }
 
     pub fn checkpoint(&self, allow_reset: bool) -> Result<CheckpointOutcome> {

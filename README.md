@@ -2,7 +2,7 @@
 
 An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
-> **Current Version:** `0.10.2` (`X02` Multi-Process `.oryq-shm` Coordination Complete — `SharedProcessCoordinator` with reader slot table, horizon tracking, WAL-reset exclusion & peer crash recovery, plus optional `oryq-fts` & `oryq-vec`, C ABI v1.1; see [CONTRIBUTING_WORKFLOW.md](docs/CONTRIBUTING_WORKFLOW.md).)
+> **Current Version:** `0.10.3` (`X03` Queued Write Batching & Group Commit Complete — `commit_batch` & `Database::submit_batched`, multi-process `.oryq-shm`, optional `oryq-fts` & `oryq-vec`, C ABI v1.1; see [CONTRIBUTING_WORKFLOW.md](docs/CONTRIBUTING_WORKFLOW.md).)
 
 ## Design Overview
 

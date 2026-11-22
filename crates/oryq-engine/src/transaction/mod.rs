@@ -1,6 +1,7 @@
 //! Transactional MVCC [`StorageEngine`] coordinating `.oryq`, `.oryq-wal`,
 //! `PageCache`, `VersionIndex`, `SingleProcessCoordinator`, recovery, and checkpointing.
 
+pub mod batch;
 pub mod publish;
 pub mod read;
 pub mod savepoint;
@@ -28,6 +29,10 @@ use crate::transaction::publish::{
     append_and_sync_wal_commit, install_committed_versions, WalAppendState,
 };
 
+pub use batch::{
+    clone_error_envelope, commit_batch, BatchCommitReport, BatchItem, BatchTx, EngineWriteBatchTx,
+    GroupCommitConfig, GroupCommitQueue,
+};
 pub use read::ReadTxn;
 pub use savepoint::SavepointId;
 pub use write::WriteTxn;
@@ -251,6 +256,19 @@ impl StorageEngine {
 
     pub fn is_poisoned(&self) -> bool {
         self.coordinator.is_poisoned()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
+    /// Executes an ordered batch of write closures inside a single [`WriteTxn`] and a single
+    /// WAL fsync, rolling back only failing items via statement savepoints (`X03`).
+    pub fn commit_batch<T, F>(&self, items: Vec<F>) -> Result<BatchCommitReport<T>>
+    where
+        F: FnOnce(&mut WriteTxn<'_>) -> Result<T>,
+    {
+        commit_batch(self, items)
     }
 
     pub fn is_sealed(&self) -> Result<bool> {
