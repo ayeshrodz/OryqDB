@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_document::{from_json_str, FieldPath};
-use oryq_engine::{EngineConfig, OsVfs, PageSize, StorageEngine};
-use oryq_index::IndexProvider;
-use oryq_types::{ErrorCategory, IndexId, PageId, RecordId};
+use oryq_engine::{BTree, EngineConfig, OsVfs, PageSize, StorageEngine, TreeKind};
+use oryq_index::{IndexProvider, IndexReadContext};
+use oryq_types::{ErrorCategory, IndexId, NamespaceId, PageId, RecordId};
+use oryq_vec::codec::{decode_vector_payload, encode_vector_payload, VecIndexMeta, KEY_META};
 use oryq_vec::{
     search_vec, vec_index_descriptor, DistanceMetric, VectorIndexOptions, VectorIndexProvider,
-    VectorQuantization, VEC_FEATURE_BIT, VEC_PROVIDER_ID,
+    VectorQuantization, MAX_VECTOR_DIMENSIONS, VEC_FEATURE_BIT, VEC_PROVIDER_ID,
 };
 
 static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -338,4 +339,182 @@ fn int8_quantization_update_transitions_and_drop() {
     let mut wtx = engine.begin_write().unwrap();
     provider.drop_index(&mut wtx, &desc).unwrap();
     wtx.commit().unwrap();
+}
+
+#[test]
+fn page_size_fit_validation_extreme_int8_and_meta_vector_count() {
+    let dir = TempDir::new("page_fit_and_meta");
+    let provider = VectorIndexProvider;
+
+    // 1. 1024-dim F32 on 4 KiB page rejected at create_empty; 1024-dim Int8 on 4 KiB succeeds
+    let engine_4k = open_test_engine(&dir, "p4k.oryq");
+    let opts_f32_1024 = VectorIndexOptions::new(MAX_VECTOR_DIMENSIONS, DistanceMetric::L2).unwrap();
+    let desc_f32_1024 = vec_index_descriptor(
+        IndexId::new(30).unwrap(),
+        "f32_1024".into(),
+        FieldPath::parse("v").unwrap(),
+        opts_f32_1024,
+        PageId::new(1),
+    )
+    .unwrap();
+    let opts_i8_1024 = VectorIndexOptions::with_quantization(
+        MAX_VECTOR_DIMENSIONS,
+        DistanceMetric::Cosine,
+        VectorQuantization::Int8,
+    )
+    .unwrap();
+    let mut desc_i8_1024 = vec_index_descriptor(
+        IndexId::new(31).unwrap(),
+        "i8_1024".into(),
+        FieldPath::parse("v").unwrap(),
+        opts_i8_1024,
+        PageId::new(1),
+    )
+    .unwrap();
+
+    let mut wtx = engine_4k.begin_write().unwrap();
+    assert_eq!(
+        provider
+            .create_empty(&mut wtx, &desc_f32_1024)
+            .unwrap_err()
+            .category(),
+        ErrorCategory::InvalidArgument
+    );
+    desc_i8_1024.root_page_id = provider.create_empty(&mut wtx, &desc_i8_1024).unwrap();
+    wtx.commit().unwrap();
+
+    // 2. 1024-dim F32 on 8 KiB page succeeds
+    let vfs = Arc::new(OsVfs::new());
+    let engine_8k = StorageEngine::open(
+        vfs,
+        &dir.path().join("p8k.oryq"),
+        EngineConfig {
+            page_size: PageSize::Size8192,
+            ..EngineConfig::default()
+        },
+        [0x5B; 16],
+    )
+    .unwrap();
+    let mut wtx8 = engine_8k.begin_write().unwrap();
+    let root8 = provider.create_empty(&mut wtx8, &desc_f32_1024).unwrap();
+    assert!(root8.raw() > 0);
+    wtx8.commit().unwrap();
+
+    // 3. Int8 constant vector, negative values, and extreme finite range [-3e38, 3e38]
+    for sample in [
+        vec![5.0f32, 5.0, 5.0, 5.0],
+        vec![-1.0f32, -0.5, 0.25, 0.75],
+        vec![-3.0e38f32, 0.0, 1.5e38, 3.0e38],
+    ] {
+        let min_v = sample
+            .iter()
+            .copied()
+            .map(f64::from)
+            .fold(f64::INFINITY, f64::min);
+        let max_v = sample
+            .iter()
+            .copied()
+            .map(f64::from)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_err = ((max_v - min_v) / 510.0).max(1e-5);
+        let encoded = encode_vector_payload(&sample, VectorQuantization::Int8);
+        let decoded = decode_vector_payload(&encoded, sample.len()).unwrap();
+        assert!(decoded.norm.is_finite());
+        assert_eq!(decoded.values.len(), sample.len());
+        for (&orig, &deq) in sample.iter().zip(decoded.values.iter()) {
+            assert!(deq.is_finite());
+            let err = (f64::from(orig) - f64::from(deq)).abs();
+            assert!(
+                err <= max_err * 1.01,
+                "orig={orig}, deq={deq}, err={err}, max_err={max_err}"
+            );
+        }
+    }
+
+    // 4. VecIndexMeta.vector_count accuracy + f32::INFINITY / f64->f32 overflow (1e300) rejection
+    let opts = VectorIndexOptions::new(2, DistanceMetric::L2).unwrap();
+    let mut desc = vec_index_descriptor(
+        IndexId::new(32).unwrap(),
+        "meta_check".into(),
+        FieldPath::parse("v").unwrap(),
+        opts,
+        PageId::new(1),
+    )
+    .unwrap();
+    let (d1, _) = from_json_str(r#"{"_id": 1, "v": [1.0, 2.0]}"#, None).unwrap();
+    let (d1_updated, _) = from_json_str(r#"{"_id": 1, "v": [3.0, 4.0]}"#, None).unwrap();
+    let (d1_null, _) = from_json_str(r#"{"_id": 1, "v": null}"#, None).unwrap();
+    let (d_overflow, _) = from_json_str(r#"{"_id": 2, "v": [1e300, 0.0]}"#, None).unwrap();
+
+    let read_count = |engine: &StorageEngine, d: &oryq_index::IndexDescriptor| -> u64 {
+        let rtx = engine.begin_read().unwrap();
+        let ns = NamespaceId::new(d.index_id.raw()).unwrap();
+        let ctx = IndexReadContext::new(ns, &rtx);
+        let tree = BTree::open(d.root_page_id, TreeKind::Index);
+        let raw = tree.get(&ctx, KEY_META).unwrap().unwrap();
+        VecIndexMeta::decode(&raw).unwrap().vector_count
+    };
+
+    let mut wtx = engine_4k.begin_write().unwrap();
+    desc.root_page_id = provider.create_empty(&mut wtx, &desc).unwrap();
+    // f64 -> f32 overflow (1e300 -> f32::INFINITY) rejected cleanly
+    assert_eq!(
+        provider
+            .on_insert(
+                &mut wtx,
+                &desc,
+                RecordId::new(2).unwrap(),
+                &d_overflow.view()
+            )
+            .unwrap_err()
+            .category(),
+        ErrorCategory::InvalidArgument
+    );
+    desc.root_page_id = provider
+        .on_insert(&mut wtx, &desc, RecordId::new(1).unwrap(), &d1.view())
+        .unwrap()
+        .new_root_page_id;
+    wtx.commit().unwrap();
+    assert_eq!(read_count(&engine_4k, &desc), 1);
+
+    // f32::INFINITY in query rejected cleanly
+    {
+        let rtx = engine_4k.begin_read().unwrap();
+        assert_eq!(
+            search_vec(&rtx, &desc, &[f32::INFINITY, 0.0], 5)
+                .unwrap_err()
+                .category(),
+            ErrorCategory::InvalidArgument
+        );
+    }
+
+    // Update non-empty -> non-empty keeps vector_count == 1
+    let mut wtx = engine_4k.begin_write().unwrap();
+    desc.root_page_id = provider
+        .on_update(
+            &mut wtx,
+            &desc,
+            RecordId::new(1).unwrap(),
+            &d1.view(),
+            &d1_updated.view(),
+        )
+        .unwrap()
+        .new_root_page_id;
+    wtx.commit().unwrap();
+    assert_eq!(read_count(&engine_4k, &desc), 1);
+
+    // Update non-empty -> null decrements vector_count to 0
+    let mut wtx = engine_4k.begin_write().unwrap();
+    desc.root_page_id = provider
+        .on_update(
+            &mut wtx,
+            &desc,
+            RecordId::new(1).unwrap(),
+            &d1_updated.view(),
+            &d1_null.view(),
+        )
+        .unwrap()
+        .new_root_page_id;
+    wtx.commit().unwrap();
+    assert_eq!(read_count(&engine_4k, &desc), 0);
 }

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oryq_document::{DocumentView, FieldPath, ValueView};
-use oryq_engine::btree::read_internal_node;
+use oryq_engine::btree::{build_leaf_page, read_internal_node, LeafEntry};
 use oryq_engine::{BTree, PageStore, PageStoreMut, SlottedPageView, TreeKind, WriteTxn};
 use oryq_index::{
     IndexDescriptor, IndexFieldSpec, IndexKind, IndexProvider, IndexReadCapabilities,
@@ -15,7 +15,9 @@ use oryq_types::{
     VersionRange,
 };
 
-use crate::codec::{encode_vec_key, encode_vector_payload, VecIndexMeta, KEY_META};
+use crate::codec::{
+    encode_vec_key, encode_vector_payload, encoded_vector_payload_len, VecIndexMeta, KEY_META,
+};
 use crate::distance::{validate_vector, VectorIndexOptions};
 
 const MODULE_ID: &str = "vec";
@@ -210,6 +212,36 @@ impl IndexProvider for VectorIndexProvider {
         let options = parse_descriptor_options(desc)?;
         let ns = NamespaceId::new(desc.index_id.raw())?;
         let mut ctx = IndexWriteContext::new(ns, tx);
+
+        // Fail fast if a single serialized vector entry cannot fit on one B+ tree leaf page.
+        let payload_len = encoded_vector_payload_len(options.dimensions, options.quantization);
+        let probe = [LeafEntry {
+            key: vec![0u8; 9],
+            value: vec![0u8; payload_len],
+        }];
+        if build_leaf_page(
+            ctx.page_size(),
+            PageId::new(1),
+            TreeKind::Index,
+            true,
+            ctx.writer_tx_id(),
+            &probe,
+        )?
+        .is_none()
+        {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "VectorIndexProvider::create_empty",
+                format!(
+                    "vector entry ({payload_len}-byte payload for {} dims / {:?}) exceeds {:?} leaf page capacity; reduce dimensions, use Int8 quantization, or increase page_size",
+                    options.dimensions,
+                    options.quantization,
+                    ctx.page_size()
+                ),
+            ));
+        }
+
         let mut tree = BTree::create_empty(&mut ctx, TreeKind::Index)?;
         let meta = VecIndexMeta {
             vector_count: 0,
@@ -240,13 +272,12 @@ impl IndexProvider for VectorIndexProvider {
         let ns = NamespaceId::new(desc.index_id.raw())?;
         let mut ctx = IndexWriteContext::new(ns, tx);
         let mut tree = BTree::open(desc.root_page_id, TreeKind::Index);
-        let mut meta = load_meta(&tree, &ctx, &options)?;
 
         let key = encode_vec_key(record_id);
         let payload = encode_vector_payload(&vec, options.quantization);
-        let existed = tree.get(&ctx, &key)?.is_some();
-        tree.insert(&mut ctx, &key, &payload)?;
+        let existed = tree.insert(&mut ctx, &key, &payload)?.is_some();
         if !existed {
+            let mut meta = load_meta(&tree, &ctx, &options)?;
             meta.vector_count = meta.vector_count.saturating_add(1);
             tree.insert(&mut ctx, KEY_META, &meta.encode())?;
         }
@@ -281,15 +312,14 @@ impl IndexProvider for VectorIndexProvider {
         let ns = NamespaceId::new(desc.index_id.raw())?;
         let mut ctx = IndexWriteContext::new(ns, tx);
         let mut tree = BTree::open(desc.root_page_id, TreeKind::Index);
-        let mut meta = load_meta(&tree, &ctx, &options)?;
         let key = encode_vec_key(record_id);
 
         match new_vec {
             Some(vec) => {
-                let existed = tree.get(&ctx, &key)?.is_some();
                 let payload = encode_vector_payload(&vec, options.quantization);
-                tree.insert(&mut ctx, &key, &payload)?;
+                let existed = tree.insert(&mut ctx, &key, &payload)?.is_some();
                 if !existed {
+                    let mut meta = load_meta(&tree, &ctx, &options)?;
                     meta.vector_count = meta.vector_count.saturating_add(1);
                     tree.insert(&mut ctx, KEY_META, &meta.encode())?;
                 }
@@ -302,6 +332,7 @@ impl IndexProvider for VectorIndexProvider {
             None => {
                 let removed = tree.delete(&mut ctx, &key)?.is_some();
                 if removed {
+                    let mut meta = load_meta(&tree, &ctx, &options)?;
                     meta.vector_count = meta.vector_count.saturating_sub(1);
                     tree.insert(&mut ctx, KEY_META, &meta.encode())?;
                 }

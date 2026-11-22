@@ -14,6 +14,20 @@ pub const KEY_PREFIX_VEC: &[u8] = b"\x01";
 const TAG_F32: u8 = 1;
 const TAG_INT8: u8 = 2;
 
+/// Returns the exact serialized payload byte length for a vector of `dimensions` under `quantization`.
+#[inline]
+pub const fn encoded_vector_payload_len(
+    dimensions: usize,
+    quantization: VectorQuantization,
+) -> usize {
+    match quantization {
+        // [tag: 1][norm_f64: 8][f32 * dim]
+        VectorQuantization::F32 => 9 + dimensions * 4,
+        // [tag: 1][norm_f64: 8][min_f64: 8][scale_f64: 8][u8 * dim]
+        VectorQuantization::Int8 => 25 + dimensions,
+    }
+}
+
 /// Persisted vector index metadata stored under [`KEY_META`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VecIndexMeta {
@@ -82,7 +96,10 @@ pub fn encode_vector_payload(vec: &[f32], quantization: VectorQuantization) -> V
     let norm = l2_norm(vec);
     match quantization {
         VectorQuantization::F32 => {
-            let mut out = Vec::with_capacity(1 + 4 + vec.len() * 4);
+            let mut out = Vec::with_capacity(encoded_vector_payload_len(
+                vec.len(),
+                VectorQuantization::F32,
+            ));
             out.push(TAG_F32);
             out.extend_from_slice(&norm.to_le_bytes());
             for &v in vec {
@@ -91,24 +108,28 @@ pub fn encode_vector_payload(vec: &[f32], quantization: VectorQuantization) -> V
             out
         }
         VectorQuantization::Int8 => {
-            let mut min_v = f32::INFINITY;
-            let mut max_v = f32::NEG_INFINITY;
+            let mut min_v = f64::INFINITY;
+            let mut max_v = f64::NEG_INFINITY;
             for &v in vec {
-                if v < min_v {
-                    min_v = v;
+                let vf = f64::from(v);
+                if vf < min_v {
+                    min_v = vf;
                 }
-                if v > max_v {
-                    max_v = v;
+                if vf > max_v {
+                    max_v = vf;
                 }
             }
             let span = max_v - min_v;
             let scale = if span == 0.0 || !span.is_finite() {
-                0.0f32
+                0.0f64
             } else {
                 span / 255.0
             };
 
-            let mut out = Vec::with_capacity(1 + 4 + 4 + 4 + vec.len());
+            let mut out = Vec::with_capacity(encoded_vector_payload_len(
+                vec.len(),
+                VectorQuantization::Int8,
+            ));
             out.push(TAG_INT8);
             out.extend_from_slice(&norm.to_le_bytes());
             out.extend_from_slice(&min_v.to_le_bytes());
@@ -117,7 +138,7 @@ pub fn encode_vector_payload(vec: &[f32], quantization: VectorQuantization) -> V
                 let q = if scale == 0.0 {
                     0u8
                 } else {
-                    ((v - min_v) / scale).round().clamp(0.0, 255.0) as u8
+                    ((f64::from(v) - min_v) / scale).round().clamp(0.0, 255.0) as u8
                 };
                 out.push(q);
             }
@@ -135,7 +156,7 @@ pub struct DecodedVector {
 
 /// Decodes a vector payload produced by [`encode_vector_payload`], validating length against `expected_dim`.
 pub fn decode_vector_payload(bytes: &[u8], expected_dim: usize) -> Result<DecodedVector> {
-    if bytes.len() < 5 {
+    if bytes.len() < 9 {
         return Err(ErrorEnvelope::new(
             ErrorCategory::Corruption,
             MODULE_ID,
@@ -144,10 +165,10 @@ pub fn decode_vector_payload(bytes: &[u8], expected_dim: usize) -> Result<Decode
         ));
     }
     let tag = bytes[0];
-    let norm = f64::from(f32::from_le_bytes(bytes[1..5].try_into().unwrap()));
+    let norm = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
     match tag {
         TAG_F32 => {
-            let expected_len = 5 + expected_dim * 4;
+            let expected_len = encoded_vector_payload_len(expected_dim, VectorQuantization::F32);
             if bytes.len() != expected_len {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
@@ -160,13 +181,13 @@ pub fn decode_vector_payload(bytes: &[u8], expected_dim: usize) -> Result<Decode
                 ));
             }
             let mut values = Vec::with_capacity(expected_dim);
-            for chunk in bytes[5..].chunks_exact(4) {
+            for chunk in bytes[9..].chunks_exact(4) {
                 values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
             Ok(DecodedVector { norm, values })
         }
         TAG_INT8 => {
-            let expected_len = 13 + expected_dim;
+            let expected_len = encoded_vector_payload_len(expected_dim, VectorQuantization::Int8);
             if bytes.len() != expected_len {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
@@ -178,11 +199,11 @@ pub fn decode_vector_payload(bytes: &[u8], expected_dim: usize) -> Result<Decode
                     ),
                 ));
             }
-            let min_v = f32::from_le_bytes(bytes[5..9].try_into().unwrap());
-            let scale = f32::from_le_bytes(bytes[9..13].try_into().unwrap());
+            let min_v = f64::from_le_bytes(bytes[9..17].try_into().unwrap());
+            let scale = f64::from_le_bytes(bytes[17..25].try_into().unwrap());
             let mut values = Vec::with_capacity(expected_dim);
-            for &q in &bytes[13..] {
-                values.push(min_v + f32::from(q) * scale);
+            for &q in &bytes[25..] {
+                values.push((min_v + f64::from(q) * scale) as f32);
             }
             Ok(DecodedVector { norm, values })
         }

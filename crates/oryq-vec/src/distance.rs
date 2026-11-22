@@ -7,8 +7,9 @@ const MODULE_ID: &str = "vec";
 
 /// Maximum supported vector dimensionality per index entry.
 ///
-/// Bounded so that quantized or float32 vectors remain within single-page B+ tree entry limits
-/// across standard OryqDB page sizes (4 KiB–16 KiB).
+/// Exact single-entry leaf fit is also validated against the database's configured [`PageSize`]
+/// in `VectorIndexProvider::create_empty` (for example, 4 KiB pages fit up to ~1000 `F32`
+/// dimensions or the full 1024 `Int8` dimensions; 8 KiB+ pages fit the full 1024 `F32` dimensions).
 pub const MAX_VECTOR_DIMENSIONS: usize = 1024;
 
 /// Supported vector similarity / distance metrics.
@@ -261,10 +262,11 @@ pub fn validate_vector(vec: &[f32], expected_dim: usize, op: &'static str) -> Re
     Ok(())
 }
 
-/// Computes the Euclidean L2 norm of `vec` in `f64` precision and returns it as `f32`.
-pub fn l2_norm(vec: &[f32]) -> f32 {
+/// Computes the Euclidean L2 norm of `vec` in `f64` precision so large finite `f32` vectors
+/// cannot overflow `f32::MAX`.
+pub fn l2_norm(vec: &[f32]) -> f64 {
     let sum_sq: f64 = vec.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
-    sum_sq.sqrt() as f32
+    sum_sq.sqrt()
 }
 
 /// Computes the distance between `query` (with precomputed `query_norm`) and `candidate`

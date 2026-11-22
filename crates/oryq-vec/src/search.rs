@@ -36,7 +36,7 @@ pub fn search_vec(
     let ctx = IndexReadContext::new(ns, tx);
     let tree = BTree::open(desc.root_page_id, TreeKind::Index);
 
-    let query_norm = f64::from(l2_norm(query));
+    let query_norm = l2_norm(query);
     let mut hits: Vec<VectorHit> = Vec::new();
 
     let mut cur = tree.cursor(&ctx);

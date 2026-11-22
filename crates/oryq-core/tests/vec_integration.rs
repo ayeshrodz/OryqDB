@@ -251,4 +251,105 @@ fn combined_fts_and_vector_indexes_coexist_in_same_collection() {
             .to_owned_value(),
         Value::Int64(1)
     );
+    drop(rtx);
+
+    // Dropping vector index clears write bit 1 while preserving FTS write bit 0
+    let mut wtx = db.begin_write().unwrap();
+    {
+        let mut col = wtx.collection("docs").unwrap();
+        assert!(col.drop_index("vec_l2_int8").unwrap());
+    }
+    wtx.commit().unwrap();
+    let rtx = db.begin_read().unwrap();
+    let col = rtx.collection("docs").unwrap();
+    assert_eq!(col.search_fts("title_fts", "embedded", 5).unwrap().len(), 1);
+    assert_eq!(
+        col.search_vector("vec_l2_int8", &[1.0, 0.0, 0.0, 0.0], 1)
+            .unwrap_err()
+            .category(),
+        ErrorCategory::NotFound
+    );
+    drop(rtx);
+    db.checkpoint(true).unwrap();
+    drop(db);
+
+    // Inspect persisted catalog entry to confirm bit 1 is cleared while bit 0 (FTS) remains set
+    let vfs = std::sync::Arc::new(oryq_engine::OsVfs::new());
+    let eng = oryq_engine::StorageEngine::open(
+        vfs,
+        &db_path,
+        oryq_engine::EngineConfig {
+            page_size: PageSize::Size4096,
+            ..oryq_engine::EngineConfig::default()
+        },
+        [0x33; 16],
+    )
+    .unwrap();
+    let er = eng.begin_read().unwrap();
+    let cat_entry =
+        oryq_core::catalog::load_collection_entry(&er, er.catalog_root_page_id(), "docs")
+            .unwrap()
+            .unwrap();
+    assert_eq!(cat_entry.required_write_features.raw(), 1u64 << 0);
+}
+
+#[test]
+fn multi_page_btree_split_drop_and_integrity_check() {
+    let dir = TempDir::new("multipage_split");
+    let db_path = dir.path().join("split.oryq");
+    let cfg = DatabaseConfig {
+        page_size: PageSize::Size4096,
+        ..DatabaseConfig::default()
+    };
+
+    let db = Database::open(&db_path, cfg).unwrap();
+    let mut wtx = db.begin_write().unwrap();
+    wtx.create_collection("chunks").unwrap();
+    {
+        let mut col = wtx.collection("chunks").unwrap();
+        // 64-dim F32 (~265 bytes/entry): 120 entries force multiple leaf splits & internal nodes on 4 KiB pages
+        let opts = VectorIndexOptions::new(64, DistanceMetric::L2).unwrap();
+        col.create_vector_index("emb", opts, Some("emb_64"))
+            .unwrap();
+        for i in 1..=120u32 {
+            let mut vals = vec![0.0f32; 64];
+            vals[(i as usize) % 64] = i as f32;
+            let json_arr = vals
+                .iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let doc = format!(r#"{{"_id": {i}, "emb": [{json_arr}]}}"#);
+            col.insert_json(&doc).unwrap();
+        }
+    }
+    wtx.commit().unwrap();
+
+    // Verify search finds exact match across multi-page tree
+    {
+        let rtx = db.begin_read().unwrap();
+        let col = rtx.collection("chunks").unwrap();
+        let mut query = vec![0.0f32; 64];
+        query[42] = 42.0;
+        let hits = col.search_vector("emb_64", &query, 1).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].0.view().get_field("_id").unwrap().to_owned_value(),
+            Value::Int64(42)
+        );
+        assert!(hits[0].1.abs() < 1e-6);
+    }
+
+    // Drop multi-page vector index (exercises internal-node traversal & freeing) and verify integrity
+    let mut wtx = db.begin_write().unwrap();
+    {
+        let mut col = wtx.collection("chunks").unwrap();
+        assert!(col.drop_index("emb_64").unwrap());
+    }
+    wtx.commit().unwrap();
+
+    db.checkpoint(true).unwrap();
+    let report = db.integrity_check().unwrap();
+    assert!(report.ok, "integrity issues: {:?}", report.issues);
+    assert_eq!(report.documents_checked, 120);
 }
