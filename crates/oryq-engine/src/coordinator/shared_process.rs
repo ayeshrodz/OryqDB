@@ -279,6 +279,12 @@ impl ShmState {
         })
     }
 
+    fn next_generation(&mut self) -> u64 {
+        let next = self.generation.wrapping_add(1);
+        self.generation = if next == 0 { 1 } else { next };
+        self.generation
+    }
+
     fn retention_horizon(&self) -> SnapshotId {
         let latest = TxId::new(self.latest_committed_tx_id);
         let min_reader = self
@@ -376,27 +382,33 @@ impl SharedProcessCoordinator {
                 Ok(mut st) => {
                     if initial_committed_tx_id.raw() > st.latest_committed_tx_id {
                         st.latest_committed_tx_id = initial_committed_tx_id.raw();
-                        st.generation = st.generation.wrapping_add(1);
+                        st.next_generation();
                         write_shm_state(&mut shm_file, &st)?;
                     }
                     Ok(())
                 }
                 Err(decode_err) => {
-                    // Only reinitialize corrupt/truncated ephemeral `.oryq-shm` if zero peers hold
-                    // writer or reader locks (respecting non-blocking probe).
-                    let wl = open_rw_create(&coord.wlock_path, "SharedProcessCoordinator::open")?;
-                    let rl = open_rw_create(&coord.rlock_path, "SharedProcessCoordinator::open")?;
-                    if wl.try_lock_exclusive().is_ok() {
-                        let r_ok = rl.try_lock_exclusive().is_ok();
-                        if r_ok {
-                            let st =
-                                ShmState::new(initial_committed_tx_id, coord.config.max_readers);
-                            write_shm_state(&mut shm_file, &st)?;
-                            let _ = FileExt::unlock(&rl);
+                    // Only reinitialize corrupt/truncated ephemeral `.oryq-shm` when zero peers
+                    // hold locks; future schema versions (`UnsupportedFeature`) always fail closed.
+                    if decode_err.category() == ErrorCategory::Corruption {
+                        let wl =
+                            open_rw_create(&coord.wlock_path, "SharedProcessCoordinator::open")?;
+                        let rl =
+                            open_rw_create(&coord.rlock_path, "SharedProcessCoordinator::open")?;
+                        if FileExt::try_lock_exclusive(&wl).is_ok() {
+                            let r_ok = FileExt::try_lock_exclusive(&rl).is_ok();
+                            if r_ok {
+                                let st = ShmState::new(
+                                    initial_committed_tx_id,
+                                    coord.config.max_readers,
+                                );
+                                write_shm_state(&mut shm_file, &st)?;
+                                let _ = FileExt::unlock(&rl);
+                                let _ = FileExt::unlock(&wl);
+                                return Ok(());
+                            }
                             let _ = FileExt::unlock(&wl);
-                            return Ok(());
                         }
-                        let _ = FileExt::unlock(&wl);
                     }
                     Err(decode_err)
                 }
@@ -430,7 +442,7 @@ impl SharedProcessCoordinator {
 
         let pid = std::process::id();
         let now = now_epoch_ms();
-        let lease_ms = self.config.peer_lease_timeout.as_millis() as u64;
+        let lease_ms = lease_timeout_ms(self.config.peer_lease_timeout);
 
         let reg = self.with_shm_mut("SharedProcessCoordinator::acquire_read_snapshot", |st| {
             // Reclaim any provably dead or lease-expired slots first so crashed readers
@@ -449,8 +461,7 @@ impl SharedProcessCoordinator {
                 ));
             };
 
-            st.generation = st.generation.wrapping_add(1);
-            let token_id = st.generation;
+            let token_id = st.next_generation();
             let snapshot_id = TxId::new(st.latest_committed_tx_id);
             st.slots[slot_idx] = ReaderSlot {
                 state: SLOT_ACTIVE,
@@ -496,13 +507,23 @@ impl SharedProcessCoordinator {
             &self.wlock_path,
             "SharedProcessCoordinator::try_acquire_writer",
         )?;
-        if wlock_file.try_lock_exclusive().is_err() {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Busy,
-                MODULE_ID,
-                "SharedProcessCoordinator::try_acquire_writer",
-                "another process holds the exclusive writer lock",
-            ));
+        match FileExt::try_lock_exclusive(&wlock_file) {
+            Ok(()) => {}
+            Err(err) if is_lock_contended(&err) => {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Busy,
+                    MODULE_ID,
+                    "SharedProcessCoordinator::try_acquire_writer",
+                    "another process holds the exclusive writer lock",
+                ));
+            }
+            Err(err) => {
+                return Err(io_err(
+                    "SharedProcessCoordinator::try_acquire_writer",
+                    "try_lock_exclusive wlock",
+                    err,
+                ));
+            }
         }
         self.register_writer_permit(wlock_file, "SharedProcessCoordinator::try_acquire_writer")
     }
@@ -514,8 +535,7 @@ impl SharedProcessCoordinator {
     ) -> Result<SharedWriterPermit> {
         let pid = std::process::id();
         let reg = self.with_shm_mut(op, |st| {
-            st.generation = st.generation.wrapping_add(1);
-            let token = st.generation;
+            let token = st.next_generation();
             st.writer_pid = pid;
             st.writer_token = token;
             // Holding exclusive wlock guarantees no peer is mid-WAL-reset either.
@@ -539,6 +559,14 @@ impl SharedProcessCoordinator {
 
     /// Publishes a newly committed transaction ID to `.oryq-shm` while holding `permit`.
     pub fn publish_commit(&self, permit: &SharedWriterPermit, new_tx_id: TxId) -> Result<()> {
+        if permit.coord.shm_path != self.shm_path {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "SharedProcessCoordinator::publish_commit",
+                "writer permit belongs to a different database .oryq-shm coordinator",
+            ));
+        }
         self.with_shm_mut("SharedProcessCoordinator::publish_commit", |st| {
             if st.writer_token != permit.writer_token {
                 return Err(ErrorEnvelope::new(
@@ -561,26 +589,45 @@ impl SharedProcessCoordinator {
                 ));
             }
             st.latest_committed_tx_id = new_tx_id.raw();
-            st.generation = st.generation.wrapping_add(1);
+            st.next_generation();
             Ok(())
         })
     }
 
     /// Attempts to acquire exclusive WAL-reset exclusion while holding `permit`.
     ///
+    /// The returned [`WalResetGuard`] borrows `permit`, guaranteeing at compile time that
+    /// exclusive writer ownership cannot be released while a WAL reset is in progress.
+    ///
     /// Returns `Ok(None)` if any live reader in any process currently holds a snapshot.
     /// Returns `Ok(Some(WalResetGuard))` when zero live readers exist (reclaiming any stale
     /// crashed-reader slots deterministically and blocking new readers until dropped).
-    pub fn try_acquire_wal_reset(
+    pub fn try_acquire_wal_reset<'a>(
         &self,
-        permit: &SharedWriterPermit,
-    ) -> Result<Option<WalResetGuard>> {
+        permit: &'a SharedWriterPermit,
+    ) -> Result<Option<WalResetGuard<'a>>> {
+        if permit.coord.shm_path != self.shm_path {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "SharedProcessCoordinator::try_acquire_wal_reset",
+                "writer permit belongs to a different database .oryq-shm coordinator",
+            ));
+        }
         let rlock_file = open_rw_create(
             &self.rlock_path,
             "SharedProcessCoordinator::try_acquire_wal_reset",
         )?;
-        if rlock_file.try_lock_exclusive().is_err() {
-            return Ok(None);
+        match FileExt::try_lock_exclusive(&rlock_file) {
+            Ok(()) => {}
+            Err(err) if is_lock_contended(&err) => return Ok(None),
+            Err(err) => {
+                return Err(io_err(
+                    "SharedProcessCoordinator::try_acquire_wal_reset",
+                    "try_lock_exclusive rlock",
+                    err,
+                ));
+            }
         }
 
         let pid = std::process::id();
@@ -598,13 +645,14 @@ impl SharedProcessCoordinator {
             st.slots.fill(ReaderSlot::EMPTY);
             st.wal_reset_pid = pid;
             st.wal_reset_epoch = st.wal_reset_epoch.wrapping_add(1);
-            st.generation = st.generation.wrapping_add(1);
+            st.next_generation();
             Ok(st.wal_reset_epoch)
         });
 
         match res {
             Ok(epoch) => Ok(Some(WalResetGuard {
                 coord: self.clone(),
+                _permit: permit,
                 _rlock_file: rlock_file,
                 wal_reset_epoch: epoch,
             })),
@@ -628,11 +676,34 @@ impl SharedProcessCoordinator {
         )?;
 
         // Follow strict lock order: wlock -> rlock -> shm_file.
-        let got_wlock = wlock.try_lock_exclusive().is_ok();
-        let got_rlock = rlock.try_lock_exclusive().is_ok();
+        let got_wlock = match FileExt::try_lock_exclusive(&wlock) {
+            Ok(()) => true,
+            Err(err) if is_lock_contended(&err) => false,
+            Err(err) => {
+                return Err(io_err(
+                    "SharedProcessCoordinator::reclaim_stale_peers",
+                    "try_lock_exclusive wlock",
+                    err,
+                ));
+            }
+        };
+        let got_rlock = match FileExt::try_lock_exclusive(&rlock) {
+            Ok(()) => true,
+            Err(err) if is_lock_contended(&err) => false,
+            Err(err) => {
+                if got_wlock {
+                    let _ = FileExt::unlock(&wlock);
+                }
+                return Err(io_err(
+                    "SharedProcessCoordinator::reclaim_stale_peers",
+                    "try_lock_exclusive rlock",
+                    err,
+                ));
+            }
+        };
 
         let now = now_epoch_ms();
-        let lease_ms = self.config.peer_lease_timeout.as_millis() as u64;
+        let lease_ms = lease_timeout_ms(self.config.peer_lease_timeout);
 
         let res = self.with_shm_mut("SharedProcessCoordinator::reclaim_stale_peers", |st| {
             let mut report = StaleReclaimReport::default();
@@ -642,7 +713,10 @@ impl SharedProcessCoordinator {
                     st.writer_token = 0;
                     report.reclaimed_writer = true;
                 }
-                if st.wal_reset_pid != 0 && got_rlock {
+                // Because `WalResetGuard` requires holding `SharedWriterPermit` (`wlock`),
+                // acquiring `wlock` proves any recorded `wal_reset_pid` is dead even if new
+                // readers have since acquired shared `rlock`.
+                if st.wal_reset_pid != 0 {
                     st.wal_reset_pid = 0;
                     report.reclaimed_wal_reset = true;
                 }
@@ -661,7 +735,7 @@ impl SharedProcessCoordinator {
             }
             if report.reclaimed_writer || report.reclaimed_wal_reset || report.reclaimed_readers > 0
             {
-                st.generation = st.generation.wrapping_add(1);
+                st.next_generation();
             }
             Ok(report)
         });
@@ -709,7 +783,7 @@ impl SharedProcessCoordinator {
 
     fn read_shm(&self, op: &'static str) -> Result<ShmState> {
         let mut shm_file = open_rw_create(&self.shm_path, op)?;
-        lock_exclusive_with_timeout(
+        lock_shared_with_timeout(
             &shm_file,
             self.config.lock_timeout,
             self.config.lock_retry_interval,
@@ -766,17 +840,26 @@ impl SharedSnapshotGuard {
     }
 
     /// Refreshes this reader slot's heartbeat lease timestamp for long-running read snapshots.
+    ///
+    /// Returns [`ErrorCategory::SnapshotTooOld`] if the slot was already evicted due to lease
+    /// expiration or peer reclamation.
     pub fn refresh_lease(&self) -> Result<()> {
         let now = now_epoch_ms();
         self.coord
             .with_shm_mut("SharedSnapshotGuard::refresh_lease", |st| {
-                if let Some(slot) = st.slots.get_mut(self.slot_idx) {
-                    if slot.is_active() && slot.token_id == self.token_id {
+                match st.slots.get_mut(self.slot_idx) {
+                    Some(slot) if slot.is_active() && slot.token_id == self.token_id => {
                         slot.lease_updated_ms = now;
-                        st.generation = st.generation.wrapping_add(1);
+                        st.next_generation();
+                        Ok(())
                     }
+                    _ => Err(ErrorEnvelope::new(
+                        ErrorCategory::SnapshotTooOld,
+                        MODULE_ID,
+                        "SharedSnapshotGuard::refresh_lease",
+                        "reader snapshot slot was evicted from .oryq-shm",
+                    )),
                 }
-                Ok(())
             })
     }
 }
@@ -787,7 +870,7 @@ impl Drop for SharedSnapshotGuard {
             if let Some(slot) = st.slots.get_mut(self.slot_idx) {
                 if slot.is_active() && slot.token_id == self.token_id {
                     *slot = ReaderSlot::EMPTY;
-                    st.generation = st.generation.wrapping_add(1);
+                    st.next_generation();
                 }
             }
             Ok(())
@@ -823,7 +906,7 @@ impl Drop for SharedWriterPermit {
             if st.writer_token == self.writer_token {
                 st.writer_pid = 0;
                 st.writer_token = 0;
-                st.generation = st.generation.wrapping_add(1);
+                st.next_generation();
             }
             Ok(())
         });
@@ -831,28 +914,30 @@ impl Drop for SharedWriterPermit {
     }
 }
 
-/// RAII WAL-reset exclusion guard holding exclusive `.oryq-shm.rlock` so no reader
-/// in any process can enter while the WAL is being truncated/reset.
+/// RAII WAL-reset exclusion guard holding exclusive `.oryq-shm.rlock` and borrowing
+/// [`SharedWriterPermit`] so no reader or concurrent writer in any process can enter
+/// while the WAL is being truncated/reset.
 #[derive(Debug)]
-pub struct WalResetGuard {
+pub struct WalResetGuard<'a> {
     coord: SharedProcessCoordinator,
+    _permit: &'a SharedWriterPermit,
     _rlock_file: File,
     wal_reset_epoch: u64,
 }
 
-impl WalResetGuard {
+impl WalResetGuard<'_> {
     #[inline]
     pub fn wal_reset_epoch(&self) -> u64 {
         self.wal_reset_epoch
     }
 }
 
-impl Drop for WalResetGuard {
+impl Drop for WalResetGuard<'_> {
     fn drop(&mut self) {
         let _ = self.coord.with_shm_mut("WalResetGuard::drop", |st| {
             if st.wal_reset_epoch == self.wal_reset_epoch {
                 st.wal_reset_pid = 0;
-                st.generation = st.generation.wrapping_add(1);
+                st.next_generation();
             }
             Ok(())
         });
@@ -882,13 +967,29 @@ fn is_pid_definitely_dead(pid: u32) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        !Path::new(&format!("/proc/{pid}")).exists()
+        if Path::new("/proc/self").exists() {
+            !Path::new(&format!("/proc/{pid}")).exists()
+        } else {
+            false
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
         false
     }
+}
+
+fn lease_timeout_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn is_lock_contended(err: &std::io::Error) -> bool {
+    let contended = fs4::lock_contended_error();
+    err.kind() == std::io::ErrorKind::WouldBlock
+        || err.kind() == contended.kind()
+        || (contended.raw_os_error().is_some() && err.raw_os_error() == contended.raw_os_error())
+        || err.raw_os_error() == Some(33) // Windows ERROR_LOCK_VIOLATION
 }
 
 fn now_epoch_ms() -> u64 {
@@ -938,18 +1039,21 @@ fn lock_exclusive_with_timeout(
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        if FileExt::try_lock_exclusive(file).is_ok() {
-            return Ok(());
+        match FileExt::try_lock_exclusive(file) {
+            Ok(()) => return Ok(()),
+            Err(err) if is_lock_contended(&err) => {
+                if Instant::now() >= deadline {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Busy,
+                        MODULE_ID,
+                        op,
+                        "timed out waiting for exclusive .oryq-shm coordination lock",
+                    ));
+                }
+                std::thread::sleep(retry_interval);
+            }
+            Err(err) => return Err(io_err(op, "try_lock_exclusive", err)),
         }
-        if Instant::now() >= deadline {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Busy,
-                MODULE_ID,
-                op,
-                "timed out waiting for exclusive .oryq-shm coordination lock",
-            ));
-        }
-        std::thread::sleep(retry_interval);
     }
 }
 
@@ -961,18 +1065,21 @@ fn lock_shared_with_timeout(
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        if FileExt::try_lock_shared(file).is_ok() {
-            return Ok(());
+        match FileExt::try_lock_shared(file) {
+            Ok(()) => return Ok(()),
+            Err(err) if is_lock_contended(&err) => {
+                if Instant::now() >= deadline {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Busy,
+                        MODULE_ID,
+                        op,
+                        "timed out waiting for shared .oryq-shm reader lock (WAL reset in progress)",
+                    ));
+                }
+                std::thread::sleep(retry_interval);
+            }
+            Err(err) => return Err(io_err(op, "try_lock_shared", err)),
         }
-        if Instant::now() >= deadline {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Busy,
-                MODULE_ID,
-                op,
-                "timed out waiting for shared .oryq-shm reader lock (WAL reset in progress)",
-            ));
-        }
-        std::thread::sleep(retry_interval);
     }
 }
 

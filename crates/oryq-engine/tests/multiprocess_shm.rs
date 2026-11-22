@@ -123,6 +123,17 @@ fn multiprocess_worker_entrypoint() {
             std::mem::forget(guard);
             std::process::exit(99);
         }
+        "crash_wal_reset" => {
+            let permit = coord.acquire_writer().unwrap();
+            let reset = coord
+                .try_acquire_wal_reset(&permit)
+                .unwrap()
+                .expect("child should acquire WAL reset");
+            // Intentionally leak both guards & exit abruptly (simulates crash mid-WAL-reset)
+            std::mem::forget(reset);
+            std::mem::forget(permit);
+            std::process::exit(99);
+        }
         "db_writer" => {
             let permit = coord.acquire_writer().unwrap();
             let vfs = Arc::new(OsVfs::new());
@@ -218,11 +229,73 @@ fn shm_reader_slots_horizon_wal_reset_exclusion_and_corrupt_recovery() {
     assert_eq!(r3.snapshot_id(), TxId::new(2));
     drop(r3);
 
-    // 3. Corrupt `.oryq-shm` file is deterministically reinitialized when zero peers hold locks
-    std::fs::write(shm_path_for(&db_path), b"CORRUPT_TRUNCATED").unwrap();
-    let recovered = SharedProcessCoordinator::open(&db_path, TxId::new(2), cfg).unwrap();
+    // 3. Corrupt `.oryq-shm` file is deterministically reinitialized when zero peers hold locks,
+    //    and fails closed with Corruption when a live peer holds a lock.
+    {
+        let live_reader = coord.acquire_read_snapshot().unwrap();
+        std::fs::write(shm_path_for(&db_path), b"CORRUPT_WHILE_ACTIVE").unwrap();
+        assert_eq!(
+            SharedProcessCoordinator::open(&db_path, TxId::new(2), cfg.clone())
+                .unwrap_err()
+                .category(),
+            ErrorCategory::Corruption
+        );
+        drop(live_reader);
+    }
+    let recovered = SharedProcessCoordinator::open(&db_path, TxId::new(2), cfg.clone()).unwrap();
     assert_eq!(recovered.latest_committed().unwrap(), TxId::new(2));
     assert_eq!(recovered.active_reader_count().unwrap(), 0);
+
+    // 4. `publish_commit` rejects tx_id regression and cross-database writer permits
+    let other_path = dir.path().join("other.oryq");
+    let other_coord =
+        SharedProcessCoordinator::open(&other_path, TxId::new(1), cfg.clone()).unwrap();
+    let other_permit = other_coord.acquire_writer().unwrap();
+    assert_eq!(
+        recovered
+            .publish_commit(&other_permit, TxId::new(3))
+            .unwrap_err()
+            .category(),
+        ErrorCategory::InvalidArgument
+    );
+    assert_eq!(
+        recovered
+            .try_acquire_wal_reset(&other_permit)
+            .unwrap_err()
+            .category(),
+        ErrorCategory::InvalidArgument
+    );
+    drop(other_permit);
+
+    let p = recovered.acquire_writer().unwrap();
+    assert_eq!(
+        recovered
+            .publish_commit(&p, TxId::new(1))
+            .unwrap_err()
+            .category(),
+        ErrorCategory::InvalidArgument
+    );
+    drop(p);
+
+    // 5. Evicted reader `refresh_lease()` fails closed with `SnapshotTooOld`
+    let short_lease_path = dir.path().join("short_lease.oryq");
+    let short_cfg = SharedProcessConfig {
+        max_readers: 4,
+        peer_lease_timeout: Duration::from_millis(25),
+        lock_retry_interval: Duration::from_millis(2),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let short_coord =
+        SharedProcessCoordinator::open(&short_lease_path, TxId::new(1), short_cfg).unwrap();
+    let stale_guard = short_coord.acquire_read_snapshot().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let report = short_coord.reclaim_stale_peers().unwrap();
+    assert_eq!(report.reclaimed_readers, 1);
+    assert_eq!(
+        stale_guard.refresh_lease().unwrap_err().category(),
+        ErrorCategory::SnapshotTooOld
+    );
+    drop(stale_guard);
 }
 
 #[test]
@@ -322,6 +395,36 @@ fn multiprocess_crash_recovery_reclaims_dead_writer_and_reader() {
     let permit = coord.acquire_writer().unwrap();
     assert!(coord.try_acquire_wal_reset(&permit).unwrap().is_some());
     drop(permit);
+
+    // 2b. Spawn a child that crashes mid-WAL-reset (leaking both wlock & rlock metadata)
+    let mut crashed_reset = spawn_worker("crash_wal_reset", &db_path, "");
+    assert_eq!(crashed_reset.wait().unwrap().code(), Some(99));
+    let before_reset = coord.inspect().unwrap();
+    assert!(before_reset.writer_pid.is_some());
+    assert!(before_reset.wal_reset_pid.is_some());
+    let reset_report = coord.reclaim_stale_peers().unwrap();
+    assert!(reset_report.reclaimed_writer);
+    assert!(reset_report.reclaimed_wal_reset);
+    assert_eq!(coord.inspect().unwrap().wal_reset_pid, None);
+
+    // 2c. Crashed reader alongside a LIVE reader: live reader survives while crashed reader is reclaimed
+    let live_cfg = SharedProcessConfig {
+        max_readers: 32,
+        peer_lease_timeout: Duration::from_millis(40),
+        lock_retry_interval: Duration::from_millis(2),
+        lock_timeout: Duration::from_secs(5),
+    };
+    let live_coord = SharedProcessCoordinator::open(&db_path, TxId::INITIAL, live_cfg).unwrap();
+    let live_reader = live_coord.acquire_read_snapshot().unwrap();
+    let mut dead_reader = spawn_worker("crash_reader", &db_path, "");
+    assert_eq!(dead_reader.wait().unwrap().code(), Some(99));
+    std::thread::sleep(Duration::from_millis(60));
+    live_reader.refresh_lease().unwrap();
+    let partial_report = live_coord.reclaim_stale_peers().unwrap();
+    assert_eq!(partial_report.reclaimed_readers, 1);
+    assert_eq!(live_coord.active_reader_count().unwrap(), 1);
+    drop(live_reader);
+    assert_eq!(live_coord.active_reader_count().unwrap(), 0);
 
     // 3. Real `.oryq` DB handoff across processes under SharedWriterPermit
     let handoff_path = dir.path().join("handoff.oryq");
