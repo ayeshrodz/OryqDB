@@ -91,7 +91,17 @@ oryq_status oryq_cursor_get_f64(const OryqCursor *cursor, const char *field, dou
 oryq_status oryq_cursor_get_bool(const OryqCursor *cursor, const char *field, bool *out_val);
 /* Borrowed UTF-8 byte slice for a top-level field (NOT NUL-terminated); valid until next cursor advance or close. */
 oryq_status oryq_cursor_get_utf8(const OryqCursor *cursor, const char *field, const char **out_ptr, size_t *out_len);
+/* BM25 relevance score (FTS) or distance (Vector) for the current scored cursor row; returns ORYQ_ERR_NOT_FOUND on unscored cursors. */
+oryq_status oryq_cursor_get_score(const OryqCursor *cursor, double *out_score);
 oryq_status oryq_cursor_close(OryqCursor *cursor);
+
+/* Optional Hybrid FTS (BM25) & Vector Search (C ABI v1.2; returns ORYQ_ERR_UNSUPPORTED_FEATURE when feature disabled) */
+/* `fields_csv`: comma-separated field paths (e.g. "title,body"). */
+oryq_status oryq_create_fts_index(OryqWriteTxn *txn, const char *collection, const char *fields_csv, const char *name_or_null);
+oryq_status oryq_search_fts(const OryqReadTxn *txn, const char *collection, const char *index_name, const char *query_text, size_t limit, OryqCursor **out_cursor);
+/* `metric`: 0 = Cosine, 1 = L2, 2 = DotProduct. `quantization`: 0 = F32, 1 = Int8. */
+oryq_status oryq_create_vector_index(OryqWriteTxn *txn, const char *collection, const char *field_path, uint32_t dimensions, int32_t metric, int32_t quantization, const char *name_or_null);
+oryq_status oryq_search_vector(const OryqReadTxn *txn, const char *collection, const char *index_name, const float *query_vec, size_t query_len, size_t top_k, OryqCursor **out_cursor);
 
 #ifdef __cplusplus
 }

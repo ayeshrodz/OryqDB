@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -12,7 +13,13 @@ PYTHON_BINDING_ROOT = Path(__file__).resolve().parents[1]
 if str(PYTHON_BINDING_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_BINDING_ROOT))
 
-from oryqdb import Database, OryqError, OryqStatus  # noqa: E402
+from oryqdb import (  # noqa: E402
+    Database,
+    OryqError,
+    OryqStatus,
+    VectorMetric,
+    VectorQuantization,
+)
 
 
 class TestOryqDbPythonBindings(unittest.TestCase):
@@ -205,6 +212,66 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                     with rtx.find("kv", {"_id": 1}) as cur:
                         self.assertTrue(cur.step())
                         self.assertEqual(cur.get_utf8("value"), "ephemeral")
+
+    def test_hybrid_fts_and_vector_search(self) -> None:
+        expect_hybrid = os.environ.get("ORYQ_EXPECT_HYBRID") == "1"
+        with Database.open_in_memory() as db:
+            with db.write_txn() as wtx:
+                wtx.create_collection("docs")
+                wtx.insert(
+                    "docs",
+                    {
+                        "_id": 1,
+                        "title": "Rust Embedded Database",
+                        "body": "OryqDB single file NoSQL engine",
+                        "emb": [1.0, 0.0, 0.0],
+                    },
+                )
+                wtx.insert(
+                    "docs",
+                    {
+                        "_id": 2,
+                        "title": "Garden Guide",
+                        "body": "Growing tomatoes in spring",
+                        "emb": [0.0, 1.0, 0.0],
+                    },
+                )
+                wtx.commit()
+
+            try:
+                with db.write_txn() as wtx:
+                    wtx.create_fts_index("docs", ["title", "body"], name="text_idx")
+                    wtx.create_vector_index(
+                        "docs",
+                        "emb",
+                        3,
+                        metric=VectorMetric.COSINE,
+                        quantization=VectorQuantization.F32,
+                        name="emb_idx",
+                    )
+                    wtx.commit()
+            except OryqError as exc:
+                if expect_hybrid:
+                    self.fail(f"expected hybrid FTS+Vec build, got {exc}")
+                self.assertEqual(exc.status, OryqStatus.ERR_UNSUPPORTED_FEATURE)
+                return
+
+            with db.read_txn() as rtx:
+                with rtx.search_fts("docs", "text_idx", "rust database", limit=5) as cur:
+                    self.assertTrue(cur.step())
+                    self.assertEqual(cur.get_i64("_id"), 1)
+                    self.assertGreater(cur.get_score(), 0.0)
+                    self.assertFalse(cur.step())
+
+                with rtx.search_vector("docs", "emb_idx", [0.95, 0.05, 0.0], top_k=2) as cur:
+                    self.assertTrue(cur.step())
+                    self.assertEqual(cur.get_i64("_id"), 1)
+                    d1 = cur.get_score()
+                    self.assertTrue(cur.step())
+                    self.assertEqual(cur.get_i64("_id"), 2)
+                    d2 = cur.get_score()
+                    self.assertLess(d1, d2)
+                    self.assertFalse(cur.step())
 
 
 if __name__ == "__main__":

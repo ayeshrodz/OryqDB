@@ -502,16 +502,17 @@ pub unsafe extern "C" fn oryq_cursor_next_json(
         }
         // SAFETY: `cursor` is exclusively borrowed for this call.
         let cur = unsafe { &mut *cursor };
-        match cur.backing.next_doc() {
+        match cur.backing.next_row() {
             None => {
                 cur.current = None;
+                cur.current_score = None;
                 // SAFETY: `out_json` is non-null.
                 unsafe {
                     *out_json = std::ptr::null_mut();
                 }
                 Ok(OryqStatus::CursorDone)
             }
-            Some(doc) => {
+            Some((doc, score)) => {
                 let json = to_json_string(&doc.view())
                     .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
                 let cstr = CString::new(json).map_err(|_| {
@@ -521,6 +522,7 @@ pub unsafe extern "C" fn oryq_cursor_next_json(
                     )
                 })?;
                 cur.current = Some(doc);
+                cur.current_score = score;
                 // SAFETY: `out_json` is non-null.
                 unsafe {
                     *out_json = cstr.into_raw();
@@ -609,13 +611,15 @@ pub unsafe extern "C" fn oryq_cursor_next(cursor: *mut OryqCursor) -> OryqStatus
         }
         // SAFETY: `cursor` is exclusively borrowed for this call.
         let cur = unsafe { &mut *cursor };
-        match cur.backing.next_doc() {
+        match cur.backing.next_row() {
             None => {
                 cur.current = None;
+                cur.current_score = None;
                 Ok(OryqStatus::CursorDone)
             }
-            Some(doc) => {
+            Some((doc, score)) => {
                 cur.current = Some(doc);
+                cur.current_score = score;
                 Ok(OryqStatus::Ok)
             }
         }
@@ -973,6 +977,322 @@ pub unsafe extern "C" fn oryq_db_integrity_check(
             Err((
                 OryqStatus::ErrCorruption,
                 format!("integrity check failed: {}", report.issues.join("; ")),
+            ))
+        }
+    })
+}
+
+/// Returns the BM25 relevance score (FTS) or distance (Vector) for the current row of a scored
+/// cursor. Returns `ORYQ_ERR_NOT_FOUND` if the cursor is unscored or not positioned on a row.
+///
+/// # Safety
+/// `cursor` and `out_score` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_cursor_get_score(
+    cursor: *const OryqCursor,
+    out_score: *mut f64,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if cursor.is_null() || out_score.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "cursor and out_score must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_score` is non-null; zero-initialize before fallible lookup.
+        unsafe {
+            *out_score = 0.0;
+        }
+        // SAFETY: `cursor` is valid for this call.
+        let cur = unsafe { &*cursor };
+        match cur.current_score {
+            Some(score) => {
+                // SAFETY: `out_score` is non-null.
+                unsafe {
+                    *out_score = score;
+                }
+                Ok(OryqStatus::Ok)
+            }
+            None => Err((
+                OryqStatus::ErrNotFound,
+                "cursor has no active score for the current row".to_owned(),
+            )),
+        }
+    })
+}
+
+/// Creates an Okapi BM25 full-text search index over comma-separated `fields_csv` inside an open
+/// write transaction (`--features fts`). Returns `ORYQ_ERR_UNSUPPORTED_FEATURE` when compiled
+/// without the `fts` feature.
+///
+/// # Safety
+/// `txn`, `collection`, and `fields_csv` must be valid; `name_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_create_fts_index(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    fields_csv: *const c_char,
+    name_or_null: *const c_char,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let csv = read_cstr(fields_csv, "fields_csv")?;
+        let fields: Vec<&str> = csv
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if fields.is_empty() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "fields_csv must specify at least one field path".to_owned(),
+            ));
+        }
+        let name_opt = if name_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(name_or_null, "name_or_null")?)
+        };
+        #[cfg(feature = "fts")]
+        {
+            // SAFETY: `txn` is valid for this call.
+            let wtx = unsafe { &mut *txn }
+                .tx
+                .as_mut()
+                .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+            let mut col = wtx
+                .collection(col_name)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            col.create_fts_index(&fields, name_opt)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            Ok(OryqStatus::Ok)
+        }
+        #[cfg(not(feature = "fts"))]
+        {
+            let _ = (col_name, fields, name_opt);
+            Err((
+                OryqStatus::ErrUnsupportedFeature,
+                "oryq-ffi compiled without 'fts' feature".to_owned(),
+            ))
+        }
+    })
+}
+
+/// Executes an Okapi BM25 full-text search against a named FTS index (`--features fts`), returning
+/// a scored [`OryqCursor`] ordered by descending BM25 score (`oryq_cursor_get_score`).
+///
+/// # Safety
+/// `txn`, `collection`, `index_name`, `query_text`, and `out_cursor` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_search_fts(
+    txn: *const OryqReadTxn,
+    collection: *const c_char,
+    index_name: *const c_char,
+    query_text: *const c_char,
+    limit: usize,
+    out_cursor: *mut *mut OryqCursor,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() || out_cursor.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "txn and out_cursor must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_cursor` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_cursor = std::ptr::null_mut();
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let idx_name = read_cstr(index_name, "index_name")?;
+        let query = read_cstr(query_text, "query_text")?;
+        #[cfg(feature = "fts")]
+        {
+            // SAFETY: `txn` is valid for this call.
+            let rtx = unsafe { &*txn }
+                .tx
+                .as_ref()
+                .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn closed".to_owned()))?;
+            let col = rtx
+                .collection(col_name)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            let hits = col
+                .search_fts(idx_name, query, limit)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            // SAFETY: `out_cursor` is non-null and writable.
+            unsafe {
+                *out_cursor = Box::into_raw(Box::new(OryqCursor::from_scored_docs(hits)));
+            }
+            Ok(OryqStatus::Ok)
+        }
+        #[cfg(not(feature = "fts"))]
+        {
+            let _ = (col_name, idx_name, query, limit);
+            Err((
+                OryqStatus::ErrUnsupportedFeature,
+                "oryq-ffi compiled without 'fts' feature".to_owned(),
+            ))
+        }
+    })
+}
+
+/// Creates a dense vector similarity index on `field_path` inside an open write transaction
+/// (`--features vec`). `metric`: `0 = Cosine`, `1 = L2`, `2 = DotProduct`.
+/// `quantization`: `0 = F32`, `1 = Int8`.
+///
+/// # Safety
+/// `txn`, `collection`, and `field_path` must be valid; `name_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_create_vector_index(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    field_path: *const c_char,
+    dimensions: u32,
+    metric: i32,
+    quantization: i32,
+    name_or_null: *const c_char,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let path = read_cstr(field_path, "field_path")?;
+        if dimensions == 0 {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "dimensions must be > 0".to_owned(),
+            ));
+        }
+        if !(0..=2).contains(&metric) {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                format!("metric must be 0 (Cosine), 1 (L2), or 2 (DotProduct), got {metric}"),
+            ));
+        }
+        if !(0..=1).contains(&quantization) {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                format!("quantization must be 0 (F32) or 1 (Int8), got {quantization}"),
+            ));
+        }
+        let name_opt = if name_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(name_or_null, "name_or_null")?)
+        };
+        #[cfg(feature = "vec")]
+        {
+            let dist_metric = match metric {
+                0 => oryq_core::DistanceMetric::Cosine,
+                1 => oryq_core::DistanceMetric::L2,
+                2 => oryq_core::DistanceMetric::DotProduct,
+                _ => unreachable!(),
+            };
+            let quant = match quantization {
+                0 => oryq_core::VectorQuantization::F32,
+                1 => oryq_core::VectorQuantization::Int8,
+                _ => unreachable!(),
+            };
+            let dims_usize = usize::try_from(dimensions).map_err(|_| {
+                (
+                    OryqStatus::ErrInvalidArgument,
+                    format!("dimensions {dimensions} exceeds platform usize"),
+                )
+            })?;
+            let opts = oryq_core::VectorIndexOptions {
+                dimensions: dims_usize,
+                metric: dist_metric,
+                quantization: quant,
+            };
+            // SAFETY: `txn` is valid for this call.
+            let wtx = unsafe { &mut *txn }
+                .tx
+                .as_mut()
+                .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+            let mut col = wtx
+                .collection(col_name)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            col.create_vector_index(path, opts, name_opt)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            Ok(OryqStatus::Ok)
+        }
+        #[cfg(not(feature = "vec"))]
+        {
+            let _ = (col_name, path, name_opt);
+            Err((
+                OryqStatus::ErrUnsupportedFeature,
+                "oryq-ffi compiled without 'vec' feature".to_owned(),
+            ))
+        }
+    })
+}
+
+/// Executes a top-`top_k` nearest-neighbor vector similarity search (`--features vec`), returning
+/// a scored [`OryqCursor`] ordered by ascending distance (`oryq_cursor_get_score`).
+///
+/// # Safety
+/// `txn`, `collection`, `index_name`, `query_vec` (length `query_len`), and `out_cursor` must be
+/// valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_search_vector(
+    txn: *const OryqReadTxn,
+    collection: *const c_char,
+    index_name: *const c_char,
+    query_vec: *const f32,
+    query_len: usize,
+    top_k: usize,
+    out_cursor: *mut *mut OryqCursor,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() || out_cursor.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "txn and out_cursor must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_cursor` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_cursor = std::ptr::null_mut();
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let idx_name = read_cstr(index_name, "index_name")?;
+        if query_vec.is_null() || query_len == 0 {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "query_vec must be non-null with query_len > 0".to_owned(),
+            ));
+        }
+        #[cfg(feature = "vec")]
+        {
+            // SAFETY: Caller guarantees `query_vec` points to `query_len` readable `f32` values.
+            let query_slice = unsafe { std::slice::from_raw_parts(query_vec, query_len) };
+            // SAFETY: `txn` is valid for this call.
+            let rtx = unsafe { &*txn }
+                .tx
+                .as_ref()
+                .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn closed".to_owned()))?;
+            let col = rtx
+                .collection(col_name)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            let hits = col
+                .search_vector(idx_name, query_slice, top_k)
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+            // SAFETY: `out_cursor` is non-null and writable.
+            unsafe {
+                *out_cursor = Box::into_raw(Box::new(OryqCursor::from_scored_docs(hits)));
+            }
+            Ok(OryqStatus::Ok)
+        }
+        #[cfg(not(feature = "vec"))]
+        {
+            let _ = (col_name, idx_name, top_k);
+            Err((
+                OryqStatus::ErrUnsupportedFeature,
+                "oryq-ffi compiled without 'vec' feature".to_owned(),
             ))
         }
     })

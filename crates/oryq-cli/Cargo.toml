@@ -12,6 +12,11 @@ repository.workspace = true
 name = "oryq"
 path = "src/main.rs"
 
+[features]
+default = []
+fts = ["oryq-core/fts"]
+vec = ["oryq-core/vec"]
+
 [dependencies]
 oryq-core.workspace = true
 

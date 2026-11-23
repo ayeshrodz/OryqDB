@@ -12,6 +12,11 @@ repository.workspace = true
 name = "oryq"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+default = []
+fts = ["oryq-core/fts"]
+vec = ["oryq-core/vec"]
+
 [dependencies]
 oryq-core.workspace = true
 

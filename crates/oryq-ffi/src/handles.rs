@@ -97,22 +97,27 @@ impl Drop for OryqWriteTxn {
 pub(crate) enum CursorBacking {
     Query(QueryCursor),
     Docs(std::vec::IntoIter<DocumentBuf>),
+    #[cfg(any(feature = "fts", feature = "vec"))]
+    ScoredDocs(std::vec::IntoIter<(DocumentBuf, f64)>),
 }
 
 impl CursorBacking {
-    pub(crate) fn next_doc(&mut self) -> Option<DocumentBuf> {
+    pub(crate) fn next_row(&mut self) -> Option<(DocumentBuf, Option<f64>)> {
         match self {
-            Self::Query(q) => q.next_doc(),
-            Self::Docs(it) => it.next(),
+            Self::Query(q) => q.next_doc().map(|d| (d, None)),
+            Self::Docs(it) => it.next().map(|d| (d, None)),
+            #[cfg(any(feature = "fts", feature = "vec"))]
+            Self::ScoredDocs(it) => it.next().map(|(d, s)| (d, Some(s))),
         }
     }
 }
 
-/// Opaque C handle representing a query or aggregation result cursor.
+/// Opaque C handle representing a query, aggregation, FTS, or vector search result cursor.
 #[derive(Debug)]
 pub struct OryqCursor {
     pub(crate) backing: CursorBacking,
     pub(crate) current: Option<DocumentBuf>,
+    pub(crate) current_score: Option<f64>,
 }
 
 impl OryqCursor {
@@ -120,6 +125,7 @@ impl OryqCursor {
         Self {
             backing: CursorBacking::Query(cursor),
             current: None,
+            current_score: None,
         }
     }
 
@@ -127,6 +133,16 @@ impl OryqCursor {
         Self {
             backing: CursorBacking::Docs(docs.into_iter()),
             current: None,
+            current_score: None,
+        }
+    }
+
+    #[cfg(any(feature = "fts", feature = "vec"))]
+    pub(crate) fn from_scored_docs(docs: Vec<(DocumentBuf, f64)>) -> Self {
+        Self {
+            backing: CursorBacking::ScoredDocs(docs.into_iter()),
+            current: None,
+            current_score: None,
         }
     }
 }

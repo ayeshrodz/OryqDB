@@ -315,6 +315,249 @@ fn run(args: &[String]) -> Result<(), String> {
                 )),
             }
         }
+        "fts-index" => {
+            let db_path = req_arg(
+                args,
+                1,
+                "fts-index <db> <collection> <fields-csv> [--name <name>]",
+            )?;
+            let col_name = req_arg(
+                args,
+                2,
+                "fts-index <db> <collection> <fields-csv> [--name <name>]",
+            )?;
+            let fields_csv = req_arg(
+                args,
+                3,
+                "fts-index <db> <collection> <fields-csv> [--name <name>]",
+            )?;
+            let mut name_opt: Option<&str> = None;
+            let mut i = 4;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--name" => {
+                        name_opt = Some(req_arg(args, i + 1, "--name <name>")?);
+                        i += 2;
+                    }
+                    other => return Err(format!("unknown fts-index option '{other}'")),
+                }
+            }
+            let fields: Vec<&str> = fields_csv
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if fields.is_empty() {
+                return Err("fields-csv must specify at least one field".to_owned());
+            }
+            #[cfg(feature = "fts")]
+            {
+                let db = open_db(db_path)?;
+                let mut wtx = db.begin_write().map_err(fmt_err)?;
+                let idx_desc = {
+                    let mut col = wtx.collection(col_name).map_err(fmt_err)?;
+                    col.create_fts_index(&fields, name_opt).map_err(fmt_err)?
+                };
+                wtx.commit().map_err(fmt_err)?;
+                println!("created fts index '{}' on '{col_name}'", idx_desc.name);
+                Ok(())
+            }
+            #[cfg(not(feature = "fts"))]
+            {
+                let _ = (db_path, col_name, fields, name_opt);
+                Err("oryq compiled without 'fts' feature; rebuild with `--features fts`".to_owned())
+            }
+        }
+        "fts-search" => {
+            let db_path = req_arg(
+                args,
+                1,
+                "fts-search <db> <collection> <index> <query> [--limit <n>]",
+            )?;
+            let col_name = req_arg(
+                args,
+                2,
+                "fts-search <db> <collection> <index> <query> [--limit <n>]",
+            )?;
+            let idx_name = req_arg(
+                args,
+                3,
+                "fts-search <db> <collection> <index> <query> [--limit <n>]",
+            )?;
+            let query = req_arg(
+                args,
+                4,
+                "fts-search <db> <collection> <index> <query> [--limit <n>]",
+            )?;
+            let mut limit: usize = 10;
+            let mut i = 5;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--limit" => {
+                        let s = req_arg(args, i + 1, "--limit <n>")?;
+                        limit = s
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid --limit '{s}'"))?;
+                        i += 2;
+                    }
+                    other => return Err(format!("unknown fts-search option '{other}'")),
+                }
+            }
+            #[cfg(feature = "fts")]
+            {
+                let db = open_db(db_path)?;
+                let rtx = db.begin_read().map_err(fmt_err)?;
+                let col = rtx.collection(col_name).map_err(fmt_err)?;
+                let hits = col.search_fts(idx_name, query, limit).map_err(fmt_err)?;
+                for (doc, score) in hits {
+                    println!(
+                        "score={score:.6} {}",
+                        to_json_string(&doc.view()).map_err(fmt_err)?
+                    );
+                }
+                Ok(())
+            }
+            #[cfg(not(feature = "fts"))]
+            {
+                let _ = (db_path, col_name, idx_name, query, limit);
+                Err("oryq compiled without 'fts' feature; rebuild with `--features fts`".to_owned())
+            }
+        }
+        "vec-index" => {
+            let db_path = req_arg(args, 1, "vec-index <db> <collection> <field> <dimensions> [--metric cosine|l2|dot] [--quant f32|int8] [--name <name>]")?;
+            let col_name = req_arg(args, 2, "vec-index <db> <collection> <field> <dimensions>")?;
+            let field = req_arg(args, 3, "vec-index <db> <collection> <field> <dimensions>")?;
+            let dims_str = req_arg(args, 4, "vec-index <db> <collection> <field> <dimensions>")?;
+            let dimensions = dims_str
+                .parse::<u32>()
+                .map_err(|_| format!("invalid dimensions '{dims_str}'"))?;
+            let mut metric_str = "cosine";
+            let mut quant_str = "f32";
+            let mut name_opt: Option<&str> = None;
+            let mut i = 5;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--metric" => {
+                        metric_str = req_arg(args, i + 1, "--metric cosine|l2|dot")?;
+                        i += 2;
+                    }
+                    "--quant" => {
+                        quant_str = req_arg(args, i + 1, "--quant f32|int8")?;
+                        i += 2;
+                    }
+                    "--name" => {
+                        name_opt = Some(req_arg(args, i + 1, "--name <name>")?);
+                        i += 2;
+                    }
+                    other => return Err(format!("unknown vec-index option '{other}'")),
+                }
+            }
+            #[cfg(feature = "vec")]
+            {
+                let metric = match metric_str {
+                    "cosine" => oryq_core::DistanceMetric::Cosine,
+                    "l2" => oryq_core::DistanceMetric::L2,
+                    "dot" => oryq_core::DistanceMetric::DotProduct,
+                    other => {
+                        return Err(format!(
+                            "unknown --metric '{other}' (expected: cosine, l2, dot)"
+                        ))
+                    }
+                };
+                let quantization = match quant_str {
+                    "f32" => oryq_core::VectorQuantization::F32,
+                    "int8" => oryq_core::VectorQuantization::Int8,
+                    other => {
+                        return Err(format!("unknown --quant '{other}' (expected: f32, int8)"))
+                    }
+                };
+                let dims_usize = usize::try_from(dimensions)
+                    .map_err(|_| format!("dimensions {dimensions} exceeds platform usize"))?;
+                let opts = oryq_core::VectorIndexOptions {
+                    dimensions: dims_usize,
+                    metric,
+                    quantization,
+                };
+                let db = open_db(db_path)?;
+                let mut wtx = db.begin_write().map_err(fmt_err)?;
+                let idx_desc = {
+                    let mut col = wtx.collection(col_name).map_err(fmt_err)?;
+                    col.create_vector_index(field, opts, name_opt)
+                        .map_err(fmt_err)?
+                };
+                wtx.commit().map_err(fmt_err)?;
+                println!(
+                    "created vector index '{}' on '{col_name}.{field}'",
+                    idx_desc.name
+                );
+                Ok(())
+            }
+            #[cfg(not(feature = "vec"))]
+            {
+                let _ = (
+                    db_path, col_name, field, dimensions, metric_str, quant_str, name_opt,
+                );
+                Err("oryq compiled without 'vec' feature; rebuild with `--features vec`".to_owned())
+            }
+        }
+        "vec-search" => {
+            let db_path = req_arg(
+                args,
+                1,
+                "vec-search <db> <collection> <index> <vec-json> [--top-k <n>]",
+            )?;
+            let col_name = req_arg(
+                args,
+                2,
+                "vec-search <db> <collection> <index> <vec-json> [--top-k <n>]",
+            )?;
+            let idx_name = req_arg(
+                args,
+                3,
+                "vec-search <db> <collection> <index> <vec-json> [--top-k <n>]",
+            )?;
+            let vec_json = req_arg(
+                args,
+                4,
+                "vec-search <db> <collection> <index> <vec-json> [--top-k <n>]",
+            )?;
+            let mut top_k: usize = 10;
+            let mut i = 5;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--top-k" => {
+                        let s = req_arg(args, i + 1, "--top-k <n>")?;
+                        top_k = s
+                            .parse::<usize>()
+                            .map_err(|_| format!("invalid --top-k '{s}'"))?;
+                        i += 2;
+                    }
+                    other => return Err(format!("unknown vec-search option '{other}'")),
+                }
+            }
+            #[cfg(feature = "vec")]
+            {
+                let query = parse_vec_json(vec_json)?;
+                let db = open_db(db_path)?;
+                let rtx = db.begin_read().map_err(fmt_err)?;
+                let col = rtx.collection(col_name).map_err(fmt_err)?;
+                let hits = col
+                    .search_vector(idx_name, &query, top_k)
+                    .map_err(fmt_err)?;
+                for (doc, dist) in hits {
+                    println!(
+                        "distance={dist:.6} {}",
+                        to_json_string(&doc.view()).map_err(fmt_err)?
+                    );
+                }
+                Ok(())
+            }
+            #[cfg(not(feature = "vec"))]
+            {
+                let _ = (db_path, col_name, idx_name, vec_json, top_k);
+                Err("oryq compiled without 'vec' feature; rebuild with `--features vec`".to_owned())
+            }
+        }
         other => Err(format!("unknown command '{other}' (run `oryq --help`)")),
     }
 }
@@ -338,6 +581,30 @@ fn parse_id_json(id_json: &str) -> Result<Value, String> {
         .get_field("_id")
         .map(|v| v.to_owned_value())
         .ok_or_else(|| "invalid id JSON literal".to_owned())
+}
+
+#[cfg(feature = "vec")]
+fn parse_vec_json(vec_json: &str) -> Result<Vec<f32>, String> {
+    let wrapped = format!(r#"{{"v":{vec_json}}}"#);
+    let (doc, _) = from_json_str(&wrapped, None).map_err(fmt_err)?;
+    let Some(val) = doc.view().get_field("v").map(|v| v.to_owned_value()) else {
+        return Err("invalid vector JSON array".to_owned());
+    };
+    let Value::Array(items) = val else {
+        return Err("vector query must be a JSON array of numbers".to_owned());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::Float64(f) => out.push(f as f32),
+            Value::Int64(n) => out.push(n as f32),
+            other => return Err(format!("vector elements must be numeric, found {other:?}")),
+        }
+    }
+    if out.is_empty() {
+        return Err("vector query must not be empty".to_owned());
+    }
+    Ok(out)
 }
 
 fn req_arg<'a>(args: &'a [String], idx: usize, usage: &str) -> Result<&'a str, String> {
@@ -365,6 +632,10 @@ fn print_usage() {
            update <db> <collection> <id-json> <update-json>\n  \
            delete <db> <collection> <id-json>\n  \
            aggregate <db> <collection> <pipeline-json>\n  \
+           fts-index <db> <collection> <fields-csv> [--name <name>]\n  \
+           fts-search <db> <collection> <index> <query> [--limit <n>]\n  \
+           vec-index <db> <collection> <field> <dimensions> [--metric cosine|l2|dot] [--quant f32|int8] [--name <name>]\n  \
+           vec-search <db> <collection> <index> <vec-json> [--top-k <n>]\n  \
            checkpoint <db>\n  \
            vacuum <db>\n  \
            backup <db> <dest>\n  \

@@ -133,3 +133,91 @@ fn cli_end_to_end_crud_aggregate_backup_integrity_and_inspect() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cli_hybrid_fts_and_vector_commands_or_feature_gating() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("oryqdb_cli_hybrid_{}_{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("hybrid.oryq");
+    let db_s = db.to_str().unwrap();
+
+    let out = oryq_bin()
+        .args([
+            "insert",
+            db_s,
+            "docs",
+            r#"{"_id": 1, "title": "Rust Engine", "emb": [1.0, 0.0]}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let fts_idx = oryq_bin()
+        .args(["fts-index", db_s, "docs", "title", "--name", "t_idx"])
+        .output()
+        .unwrap();
+    #[cfg(feature = "fts")]
+    {
+        assert!(fts_idx.status.success());
+        let fts_q = oryq_bin()
+            .args(["fts-search", db_s, "docs", "t_idx", "rust", "--limit", "5"])
+            .output()
+            .unwrap();
+        assert!(fts_q.status.success());
+        let s = String::from_utf8_lossy(&fts_q.stdout);
+        assert!(s.contains("score=") && s.contains("Rust Engine"));
+    }
+    #[cfg(not(feature = "fts"))]
+    {
+        assert!(!fts_idx.status.success());
+        assert!(String::from_utf8_lossy(&fts_idx.stderr).contains("fts"));
+    }
+
+    let vec_idx = oryq_bin()
+        .args([
+            "vec-index",
+            db_s,
+            "docs",
+            "emb",
+            "2",
+            "--metric",
+            "cosine",
+            "--quant",
+            "f32",
+            "--name",
+            "e_idx",
+        ])
+        .output()
+        .unwrap();
+    #[cfg(feature = "vec")]
+    {
+        assert!(vec_idx.status.success());
+        let vec_q = oryq_bin()
+            .args([
+                "vec-search",
+                db_s,
+                "docs",
+                "e_idx",
+                "[0.9, 0.1]",
+                "--top-k",
+                "3",
+            ])
+            .output()
+            .unwrap();
+        assert!(vec_q.status.success());
+        let s = String::from_utf8_lossy(&vec_q.stdout);
+        assert!(s.contains("distance=") && s.contains("Rust Engine"));
+    }
+    #[cfg(not(feature = "vec"))]
+    {
+        assert!(!vec_idx.status.success());
+        assert!(String::from_utf8_lossy(&vec_idx.stderr).contains("vec"));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

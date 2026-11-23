@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq::{
-    oryq_abi_version, oryq_aggregate_json, oryq_create_collection, oryq_create_index,
-    oryq_cursor_close, oryq_cursor_get_bool, oryq_cursor_get_f64, oryq_cursor_get_i64,
-    oryq_cursor_get_utf8, oryq_cursor_next, oryq_cursor_next_json, oryq_db_backup_to,
-    oryq_db_checkpoint, oryq_db_close, oryq_db_integrity_check, oryq_db_open, oryq_db_vacuum,
-    oryq_delete_by_id_json, oryq_drop_index, oryq_find_json, oryq_free_string, oryq_insert_json,
-    oryq_last_error_message, oryq_read_txn_begin, oryq_read_txn_close, oryq_update_by_id_json,
-    oryq_version, oryq_write_txn_begin, oryq_write_txn_commit, oryq_write_txn_rollback, OryqCursor,
-    OryqDb, OryqReadTxn, OryqStatus, OryqWriteTxn,
+    oryq_abi_version, oryq_aggregate_json, oryq_create_collection, oryq_create_fts_index,
+    oryq_create_index, oryq_create_vector_index, oryq_cursor_close, oryq_cursor_get_bool,
+    oryq_cursor_get_f64, oryq_cursor_get_i64, oryq_cursor_get_score, oryq_cursor_get_utf8,
+    oryq_cursor_next, oryq_cursor_next_json, oryq_db_backup_to, oryq_db_checkpoint, oryq_db_close,
+    oryq_db_integrity_check, oryq_db_open, oryq_db_vacuum, oryq_delete_by_id_json, oryq_drop_index,
+    oryq_find_json, oryq_free_string, oryq_insert_json, oryq_last_error_message,
+    oryq_read_txn_begin, oryq_read_txn_close, oryq_search_fts, oryq_search_vector,
+    oryq_update_by_id_json, oryq_version, oryq_write_txn_begin, oryq_write_txn_commit,
+    oryq_write_txn_rollback, OryqCursor, OryqDb, OryqReadTxn, OryqStatus, OryqWriteTxn,
 };
 
 static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -126,6 +127,21 @@ fn ffi_crud_find_lifecycle_and_child_busy_guard() {
             OryqStatus::CursorDone
         );
         assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
+        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
+        let mut find_cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
+        let mut unscored = 99.0;
+        assert_eq!(
+            oryq_cursor_get_score(find_cur, &mut unscored),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(unscored, 0.0);
+        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
+
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
 
         let mut wtx2: *mut OryqWriteTxn = ptr::null_mut();
@@ -308,6 +324,21 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         );
         assert_eq!(total_qty, 15);
         assert_eq!(oryq_cursor_close(agg_cur), OryqStatus::Ok);
+        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
+        let mut find_cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
+        let mut unscored = 99.0;
+        assert_eq!(
+            oryq_cursor_get_score(find_cur, &mut unscored),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(unscored, 0.0);
+        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
+
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
 
         // Drop index + missing index check
@@ -398,8 +429,182 @@ fn ffi_in_memory_database_crud_vacuum_and_backup_to_disk() {
         );
         assert_eq!(v, 42);
         assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
+        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
+        let mut find_cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
+        let mut unscored = 99.0;
+        assert_eq!(
+            oryq_cursor_get_score(find_cur, &mut unscored),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(unscored, 0.0);
+        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
+
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
         assert_eq!(oryq_db_close(bdb), OryqStatus::Ok);
+    }
+}
+
+#[test]
+fn ffi_v1_2_hybrid_fts_and_vector_search_and_feature_gating() {
+    let mem = CString::new(":memory:").unwrap();
+    let col = CString::new("articles").unwrap();
+    let fts_fields = CString::new("title,body").unwrap();
+    let fts_name = CString::new("text_idx").unwrap();
+    let fts_query = CString::new("rust database").unwrap();
+    let vec_field = CString::new("emb").unwrap();
+    let vec_name = CString::new("emb_idx").unwrap();
+    let d1 = CString::new(
+        r#"{"_id": 1, "title": "Rust DB", "body": "Embedded document database", "emb": [1.0, 0.0, 0.0]}"#,
+    )
+    .unwrap();
+    let d2 = CString::new(
+        r#"{"_id": 2, "title": "Cooking", "body": "Pasta recipe", "emb": [0.0, 1.0, 0.0]}"#,
+    )
+    .unwrap();
+    let qvec: [f32; 3] = [0.9, 0.1, 0.0];
+
+    // SAFETY: All C pointers are valid NUL-terminated strings or writable stack slots.
+    unsafe {
+        let mut db: *mut OryqDb = ptr::null_mut();
+        assert_eq!(oryq_db_open(mem.as_ptr(), &mut db), OryqStatus::Ok);
+
+        let mut wtx: *mut OryqWriteTxn = ptr::null_mut();
+        assert_eq!(oryq_write_txn_begin(db, &mut wtx), OryqStatus::Ok);
+        assert_eq!(oryq_create_collection(wtx, col.as_ptr()), OryqStatus::Ok);
+        assert_eq!(
+            oryq_insert_json(wtx, col.as_ptr(), d1.as_ptr()),
+            OryqStatus::Ok
+        );
+        assert_eq!(
+            oryq_insert_json(wtx, col.as_ptr(), d2.as_ptr()),
+            OryqStatus::Ok
+        );
+
+        let fts_status =
+            oryq_create_fts_index(wtx, col.as_ptr(), fts_fields.as_ptr(), fts_name.as_ptr());
+        #[cfg(feature = "fts")]
+        assert_eq!(fts_status, OryqStatus::Ok);
+        #[cfg(not(feature = "fts"))]
+        assert_eq!(fts_status, OryqStatus::ErrUnsupportedFeature);
+
+        let vec_status = oryq_create_vector_index(
+            wtx,
+            col.as_ptr(),
+            vec_field.as_ptr(),
+            3,
+            0, // Cosine
+            0, // F32
+            vec_name.as_ptr(),
+        );
+        #[cfg(feature = "vec")]
+        assert_eq!(vec_status, OryqStatus::Ok);
+        #[cfg(not(feature = "vec"))]
+        assert_eq!(vec_status, OryqStatus::ErrUnsupportedFeature);
+
+        assert_eq!(oryq_write_txn_commit(wtx), OryqStatus::Ok);
+
+        let mut rtx: *mut OryqReadTxn = ptr::null_mut();
+        assert_eq!(oryq_read_txn_begin(db, &mut rtx), OryqStatus::Ok);
+
+        let mut fts_cur: *mut OryqCursor = ptr::null_mut();
+        let fts_search_status = oryq_search_fts(
+            rtx,
+            col.as_ptr(),
+            fts_name.as_ptr(),
+            fts_query.as_ptr(),
+            5,
+            &mut fts_cur,
+        );
+        #[cfg(feature = "fts")]
+        {
+            assert_eq!(fts_search_status, OryqStatus::Ok);
+            assert_eq!(oryq_cursor_next(fts_cur), OryqStatus::Ok);
+            let f_id = CString::new("_id").unwrap();
+            let mut id: i64 = 0;
+            let mut score: f64 = 0.0;
+            assert_eq!(
+                oryq_cursor_get_i64(fts_cur, f_id.as_ptr(), &mut id),
+                OryqStatus::Ok
+            );
+            assert_eq!(id, 1);
+            assert_eq!(oryq_cursor_get_score(fts_cur, &mut score), OryqStatus::Ok);
+            assert!(score > 0.0);
+            assert_eq!(oryq_cursor_next(fts_cur), OryqStatus::CursorDone);
+            assert_eq!(
+                oryq_cursor_get_score(fts_cur, &mut score),
+                OryqStatus::ErrNotFound
+            );
+            assert_eq!(oryq_cursor_close(fts_cur), OryqStatus::Ok);
+        }
+        #[cfg(not(feature = "fts"))]
+        {
+            assert_eq!(fts_search_status, OryqStatus::ErrUnsupportedFeature);
+            assert!(fts_cur.is_null());
+        }
+
+        let mut vec_cur: *mut OryqCursor = ptr::null_mut();
+        let vec_search_status = oryq_search_vector(
+            rtx,
+            col.as_ptr(),
+            vec_name.as_ptr(),
+            qvec.as_ptr(),
+            qvec.len(),
+            2,
+            &mut vec_cur,
+        );
+        #[cfg(feature = "vec")]
+        {
+            assert_eq!(vec_search_status, OryqStatus::Ok);
+            assert_eq!(oryq_cursor_next(vec_cur), OryqStatus::Ok);
+            let f_id = CString::new("_id").unwrap();
+            let mut id: i64 = 0;
+            let mut d1_score: f64 = 0.0;
+            assert_eq!(
+                oryq_cursor_get_i64(vec_cur, f_id.as_ptr(), &mut id),
+                OryqStatus::Ok
+            );
+            assert_eq!(id, 1);
+            assert_eq!(
+                oryq_cursor_get_score(vec_cur, &mut d1_score),
+                OryqStatus::Ok
+            );
+            assert_eq!(oryq_cursor_next(vec_cur), OryqStatus::Ok);
+            let mut d2_score: f64 = 0.0;
+            assert_eq!(
+                oryq_cursor_get_score(vec_cur, &mut d2_score),
+                OryqStatus::Ok
+            );
+            assert!(d1_score < d2_score);
+            assert_eq!(oryq_cursor_close(vec_cur), OryqStatus::Ok);
+        }
+        #[cfg(not(feature = "vec"))]
+        {
+            assert_eq!(vec_search_status, OryqStatus::ErrUnsupportedFeature);
+            assert!(vec_cur.is_null());
+        }
+
+        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
+        let mut find_cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
+        let mut unscored = 99.0;
+        assert_eq!(
+            oryq_cursor_get_score(find_cur, &mut unscored),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(unscored, 0.0);
+        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
+
+        assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
+        assert_eq!(oryq_db_close(db), OryqStatus::Ok);
     }
 }
 
