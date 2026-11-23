@@ -7,8 +7,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.12.3` (#31): Official Go (`cgo`), Node.js, and C# (.NET P/Invoke) bindings.
 - `0.12.4` (#32): Binary footprint optimization, SQLite comparison benchmark & final pre-1.0 soak audit.
+
+## [0.12.3] - 2026-11-24
+
+### Added (#31 — Official Go, Node.js, and C#/.NET Language Bindings)
+- Added official zero-dependency **Go (`cgo`)** bindings (`bindings/go/oryqdb.go`, `oryqdb_test.go`, `go.mod`, `README.md`) over C ABI v1.2 (`include/oryq.h`).
+- Added official zero-npm-dependency **Node.js (Node-API v8)** native addon (`bindings/node/src/oryq_napi.c`, `scripts/build.mjs`, `index.mjs`, `index.d.ts`, `test/oryqdb.test.mjs`, `package.json`, `README.md`).
+- Added official zero-NuGet **C# (.NET 8 P/Invoke + `SafeHandle`)** bindings (`bindings/dotnet/OryqDb/`, `bindings/dotnet/OryqDb.Tests/`, `README.md`).
+- Updated `bindings/README.md` and `.github/workflows/ci.yml` to build and test Python, Go, Node.js, C#/.NET, C99, and C++17 bindings in CI.
 
 ## [0.12.2] - 2026-11-24
 

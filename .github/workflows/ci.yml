@@ -145,3 +145,42 @@ jobs:
           cargo build -p oryq-ffi --features fts,vec
           $env:ORYQ_EXPECT_HYBRID = "1"
           python -m unittest discover -s bindings/python/tests -v
+
+      - name: Setup Go (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run Go cgo binding tests (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd bindings/go
+          ORYQ_EXPECT_HYBRID=1 go test -v ./...
+
+      - name: Setup Node.js (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run Node.js Node-API binding tests (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd bindings/node
+          ORYQ_EXPECT_HYBRID=1 npm test
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run C# (.NET P/Invoke) binding tests (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: ORYQ_EXPECT_HYBRID=1 dotnet run --project bindings/dotnet/OryqDb.Tests
+
+      - name: Run C# (.NET P/Invoke) binding tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:ORYQ_EXPECT_HYBRID = "1"
+          dotnet run --project bindings/dotnet/OryqDb.Tests

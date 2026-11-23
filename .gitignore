@@ -26,3 +26,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Language binding build artifacts
+bindings/node/build/
+bindings/dotnet/*/bin/
+bindings/dotnet/*/obj/
