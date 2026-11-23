@@ -1,0 +1,22 @@
+{
+  "name": "oryqdb",
+  "version": "0.12.3",
+  "description": "Official zero-dependency Node.js (Node-API) bindings for OryqDB (C ABI v1.2)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test test/oryqdb.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

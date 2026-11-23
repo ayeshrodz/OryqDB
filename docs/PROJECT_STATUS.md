@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.12.2 — Hybrid FTS & Vector Search in C ABI v1.2, CLI & Python (Issue #30)
-STATUS: Active `v0.12.x` SQLite-Parity Polish — optional `oryq-fts` (BM25) and `oryq-vec` (Cosine/L2/DotProduct, F32/Int8) exposed across C ABI v1.2, `oryq` CLI, and Python `oryqdb` while keeping default builds minimal.
+MILESTONE: v0.12.3 — Official Go (`cgo`), Node.js (N-API), and C# (.NET P/Invoke) Bindings (Issue #31)
+STATUS: Active `v0.12.x` SQLite-Parity Polish — official zero-dependency bindings for Python, Go, Node.js, C#/.NET, C99, and C++17 over C ABI v1.2 (`liboryq`).
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
