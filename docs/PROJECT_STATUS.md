@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.12.3 — Official Go (`cgo`), Node.js (N-API), and C# (.NET P/Invoke) Bindings (Issue #31)
-STATUS: Active `v0.12.x` SQLite-Parity Polish — official zero-dependency bindings for Python, Go, Node.js, C#/.NET, C99, and C++17 over C ABI v1.2 (`liboryq`).
+MILESTONE: v0.12.4 — Binary Footprint Optimization, SQLite Comparison Benchmark & Final Pre-1.0 Audit (Issue #32)
+STATUS: Pre-1.0 Readiness Complete — all `v0.9.x`–`v0.12.4` milestones verified (`1.2 MiB` `liboryq.so`, `954 KiB` `oryq` CLI, Miri 24/24 clean, `cargo audit` 0 vulnerabilities, multi-OS CI green across 6 languages).
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.
