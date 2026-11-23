@@ -31,7 +31,6 @@ internal static class OryqNative
                 ? new[] { "liboryq.dylib" }
                 : new[] { "liboryq.so" };
 
-        // Walk up from assembly directory to find workspace target/{release,debug}
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (int depth = 0; depth < 10 && dir != null; depth++, dir = dir.Parent)
         {
@@ -84,25 +83,25 @@ internal static class OryqNative
     internal static extern int oryq_db_close(IntPtr db);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_db_checkpoint(IntPtr db);
+    internal static extern int oryq_db_checkpoint(OryqDbHandle db);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_db_vacuum(IntPtr db);
+    internal static extern int oryq_db_vacuum(OryqDbHandle db);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_db_backup_to(IntPtr db, [MarshalAs(UnmanagedType.LPUTF8Str)] string destPathUtf8);
+    internal static extern int oryq_db_backup_to(OryqDbHandle db, [MarshalAs(UnmanagedType.LPUTF8Str)] string destPathUtf8);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_db_integrity_check(IntPtr db, [MarshalAs(UnmanagedType.I1)] out bool outOk);
+    internal static extern int oryq_db_integrity_check(OryqDbHandle db, [MarshalAs(UnmanagedType.I1)] out bool outOk);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_read_txn_begin(IntPtr db, out IntPtr outTxn);
+    internal static extern int oryq_read_txn_begin(OryqDbHandle db, out IntPtr outTxn);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_read_txn_close(IntPtr txn);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_write_txn_begin(IntPtr db, out IntPtr outTxn);
+    internal static extern int oryq_write_txn_begin(OryqDbHandle db, out IntPtr outTxn);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_write_txn_commit(IntPtr txn);
@@ -111,14 +110,14 @@ internal static class OryqNative
     internal static extern int oryq_write_txn_rollback(IntPtr txn);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_create_collection(IntPtr txn, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    internal static extern int oryq_create_collection(OryqWriteTxnHandle txn, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_drop_collection(IntPtr txn, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    internal static extern int oryq_drop_collection(OryqWriteTxnHandle txn, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_create_index(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldPath,
         int sortOrder,
@@ -128,20 +127,20 @@ internal static class OryqNative
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_drop_index(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string indexName);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_create_fts_index(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldsCsv,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? nameOrNull);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_create_vector_index(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldPath,
         uint dimensions,
@@ -151,40 +150,40 @@ internal static class OryqNative
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_insert_json(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string docJson);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_update_by_id_json(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string idJson,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string updateJson);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_delete_by_id_json(
-        IntPtr txn,
+        OryqWriteTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string idJson);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_find_json(
-        IntPtr txn,
+        OryqReadTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? filterJson,
         out IntPtr outCursor);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_aggregate_json(
-        IntPtr txn,
+        OryqReadTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string pipelineJson,
         out IntPtr outCursor);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_search_fts(
-        IntPtr txn,
+        OryqReadTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string indexName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string queryText,
@@ -193,7 +192,7 @@ internal static class OryqNative
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_search_vector(
-        IntPtr txn,
+        OryqReadTxnHandle txn,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string collection,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string indexName,
         [In] float[] queryVec,
@@ -202,26 +201,26 @@ internal static class OryqNative
         out IntPtr outCursor);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_cursor_next(IntPtr cursor);
+    internal static extern int oryq_cursor_next(OryqCursorHandle cursor);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_cursor_next_json(IntPtr cursor, out IntPtr outJson);
+    internal static extern int oryq_cursor_next_json(OryqCursorHandle cursor, out IntPtr outJson);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_cursor_get_i64(
-        IntPtr cursor,
+        OryqCursorHandle cursor,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string field,
         out long outVal);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_cursor_get_f64(
-        IntPtr cursor,
+        OryqCursorHandle cursor,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string field,
         out double outVal);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_cursor_get_bool(
-        IntPtr cursor,
+        OryqCursorHandle cursor,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string field,
         [MarshalAs(UnmanagedType.I1)] out bool outVal);
 
@@ -233,7 +232,7 @@ internal static class OryqNative
         out nuint outLen);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int oryq_cursor_get_score(IntPtr cursor, out double outScore);
+    internal static extern int oryq_cursor_get_score(OryqCursorHandle cursor, out double outScore);
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int oryq_cursor_close(IntPtr cursor);

@@ -5,9 +5,9 @@ package oryqdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../include
-#cgo linux LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release -loryq -Wl,-rpath,${SRCDIR}/../../target/debug -Wl,-rpath,${SRCDIR}/../../target/release -lm
-#cgo darwin LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release -loryq -Wl,-rpath,${SRCDIR}/../../target/debug -Wl,-rpath,${SRCDIR}/../../target/release -lm
-#cgo windows LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release -loryq
+#cgo linux LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -loryq -Wl,-rpath,${SRCDIR}/../../target/release -Wl,-rpath,${SRCDIR}/../../target/debug -lm
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -loryq -Wl,-rpath,${SRCDIR}/../../target/release -Wl,-rpath,${SRCDIR}/../../target/debug -lm
+#cgo windows LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -loryq
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -18,6 +18,8 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
+	"runtime"
 	"strings"
 	"unsafe"
 )
@@ -82,8 +84,13 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("oryqdb error (status=%d): %s", e.Status, e.Message)
 }
 
-func checkStatus(st C.oryq_status) error {
-	s := Status(st)
+// callStatus pins the goroutine to the current OS thread across the FFI call and
+// `oryq_last_error_message()` lookup so thread-local error diagnostics are never racing.
+func callStatus(fn func() C.oryq_status) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	s := Status(fn())
 	if s == StatusOK {
 		return nil
 	}
@@ -92,6 +99,25 @@ func checkStatus(st C.oryq_status) error {
 		msg = C.GoString(raw)
 	}
 	return &Error{Status: s, Message: msg}
+}
+
+// callCursorStatus pins the OS thread for cursor-advancing calls where StatusCursorDone is normal.
+func callCursorStatus(fn func() C.oryq_status) (bool, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	s := Status(fn())
+	if s == StatusOK {
+		return true, nil
+	}
+	if s == StatusCursorDone {
+		return false, nil
+	}
+	msg := "unknown OryqDB error"
+	if raw := C.oryq_last_error_message(); raw != nil {
+		msg = C.GoString(raw)
+	}
+	return false, &Error{Status: s, Message: msg}
 }
 
 // Version returns the native liboryq version string.
@@ -118,7 +144,7 @@ func Open(path string) (*Database, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 	var out *C.OryqDb
-	if err := checkStatus(C.oryq_db_open(cPath, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_db_open(cPath, &out) }); err != nil {
 		return nil, err
 	}
 	return &Database{ptr: out}, nil
@@ -141,7 +167,8 @@ func (db *Database) Close() error {
 	if db == nil || db.ptr == nil {
 		return nil
 	}
-	if err := checkStatus(C.oryq_db_close(db.ptr)); err != nil {
+	ptr := db.ptr
+	if err := callStatus(func() C.oryq_status { return C.oryq_db_close(ptr) }); err != nil {
 		return err
 	}
 	db.ptr = nil
@@ -154,7 +181,7 @@ func (db *Database) Checkpoint() error {
 	if err != nil {
 		return err
 	}
-	return checkStatus(C.oryq_db_checkpoint(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_db_checkpoint(ptr) })
 }
 
 // Vacuum compacts the database in place, reclaiming free pages and shrinking the .oryq file.
@@ -163,7 +190,7 @@ func (db *Database) Vacuum() error {
 	if err != nil {
 		return err
 	}
-	return checkStatus(C.oryq_db_vacuum(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_db_vacuum(ptr) })
 }
 
 // BackupTo creates a standalone sealed online backup at destPath.
@@ -174,7 +201,7 @@ func (db *Database) BackupTo(destPath string) error {
 	}
 	cDest := C.CString(destPath)
 	defer C.free(unsafe.Pointer(cDest))
-	return checkStatus(C.oryq_db_backup_to(ptr, cDest))
+	return callStatus(func() C.oryq_status { return C.oryq_db_backup_to(ptr, cDest) })
 }
 
 // IntegrityCheck verifies snapshot-consistent collection and index integrity.
@@ -184,7 +211,7 @@ func (db *Database) IntegrityCheck() (bool, error) {
 		return false, err
 	}
 	var ok C.bool
-	if err := checkStatus(C.oryq_db_integrity_check(ptr, &ok)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_db_integrity_check(ptr, &ok) }); err != nil {
 		return false, err
 	}
 	return bool(ok), nil
@@ -197,7 +224,7 @@ func (db *Database) BeginRead() (*ReadTxn, error) {
 		return nil, err
 	}
 	var out *C.OryqReadTxn
-	if err := checkStatus(C.oryq_read_txn_begin(ptr, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_read_txn_begin(ptr, &out) }); err != nil {
 		return nil, err
 	}
 	return &ReadTxn{ptr: out}, nil
@@ -210,7 +237,7 @@ func (db *Database) BeginWrite() (*WriteTxn, error) {
 		return nil, err
 	}
 	var out *C.OryqWriteTxn
-	if err := checkStatus(C.oryq_write_txn_begin(ptr, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_write_txn_begin(ptr, &out) }); err != nil {
 		return nil, err
 	}
 	return &WriteTxn{ptr: out}, nil
@@ -236,7 +263,7 @@ func (tx *WriteTxn) CreateCollection(name string) error {
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
-	return checkStatus(C.oryq_create_collection(ptr, cName))
+	return callStatus(func() C.oryq_status { return C.oryq_create_collection(ptr, cName) })
 }
 
 // DropCollection drops an existing collection.
@@ -247,7 +274,7 @@ func (tx *WriteTxn) DropCollection(name string) error {
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
-	return checkStatus(C.oryq_drop_collection(ptr, cName))
+	return callStatus(func() C.oryq_status { return C.oryq_drop_collection(ptr, cName) })
 }
 
 // CreateIndex creates a secondary index on fieldPath (sortOrder: 1 for asc, -1 for desc).
@@ -265,7 +292,9 @@ func (tx *WriteTxn) CreateIndex(collection, fieldPath string, sortOrder int32, u
 		cName = C.CString(name)
 		defer C.free(unsafe.Pointer(cName))
 	}
-	return checkStatus(C.oryq_create_index(ptr, cCol, cField, C.int32_t(sortOrder), C.bool(unique), C.bool(sparse), cName))
+	return callStatus(func() C.oryq_status {
+		return C.oryq_create_index(ptr, cCol, cField, C.int32_t(sortOrder), C.bool(unique), C.bool(sparse), cName)
+	})
 }
 
 // DropIndex drops a non-primary index by name.
@@ -278,7 +307,7 @@ func (tx *WriteTxn) DropIndex(collection, indexName string) error {
 	defer C.free(unsafe.Pointer(cCol))
 	cIdx := C.CString(indexName)
 	defer C.free(unsafe.Pointer(cIdx))
-	return checkStatus(C.oryq_drop_index(ptr, cCol, cIdx))
+	return callStatus(func() C.oryq_status { return C.oryq_drop_index(ptr, cCol, cIdx) })
 }
 
 // CreateFtsIndex creates a BM25 full-text index (requires liboryq built with --features fts).
@@ -296,7 +325,7 @@ func (tx *WriteTxn) CreateFtsIndex(collection string, fields []string, name stri
 		cName = C.CString(name)
 		defer C.free(unsafe.Pointer(cName))
 	}
-	return checkStatus(C.oryq_create_fts_index(ptr, cCol, cFields, cName))
+	return callStatus(func() C.oryq_status { return C.oryq_create_fts_index(ptr, cCol, cFields, cName) })
 }
 
 // CreateVectorIndex creates a vector similarity index (requires liboryq built with --features vec).
@@ -314,7 +343,9 @@ func (tx *WriteTxn) CreateVectorIndex(collection, fieldPath string, dimensions u
 		cName = C.CString(name)
 		defer C.free(unsafe.Pointer(cName))
 	}
-	return checkStatus(C.oryq_create_vector_index(ptr, cCol, cField, C.uint32_t(dimensions), C.int32_t(metric), C.int32_t(quant), cName))
+	return callStatus(func() C.oryq_status {
+		return C.oryq_create_vector_index(ptr, cCol, cField, C.uint32_t(dimensions), C.int32_t(metric), C.int32_t(quant), cName)
+	})
 }
 
 // InsertJSON inserts a JSON document into collection.
@@ -327,7 +358,7 @@ func (tx *WriteTxn) InsertJSON(collection, docJSON string) error {
 	defer C.free(unsafe.Pointer(cCol))
 	cDoc := C.CString(docJSON)
 	defer C.free(unsafe.Pointer(cDoc))
-	return checkStatus(C.oryq_insert_json(ptr, cCol, cDoc))
+	return callStatus(func() C.oryq_status { return C.oryq_insert_json(ptr, cCol, cDoc) })
 }
 
 // UpdateByIDJSON applies a MongoDB-style update operator JSON to the document with _id=idJSON.
@@ -342,7 +373,7 @@ func (tx *WriteTxn) UpdateByIDJSON(collection, idJSON, updateJSON string) error 
 	defer C.free(unsafe.Pointer(cID))
 	cUpd := C.CString(updateJSON)
 	defer C.free(unsafe.Pointer(cUpd))
-	return checkStatus(C.oryq_update_by_id_json(ptr, cCol, cID, cUpd))
+	return callStatus(func() C.oryq_status { return C.oryq_update_by_id_json(ptr, cCol, cID, cUpd) })
 }
 
 // DeleteByIDJSON deletes the document with _id=idJSON.
@@ -355,7 +386,7 @@ func (tx *WriteTxn) DeleteByIDJSON(collection, idJSON string) error {
 	defer C.free(unsafe.Pointer(cCol))
 	cID := C.CString(idJSON)
 	defer C.free(unsafe.Pointer(cID))
-	return checkStatus(C.oryq_delete_by_id_json(ptr, cCol, cID))
+	return callStatus(func() C.oryq_status { return C.oryq_delete_by_id_json(ptr, cCol, cID) })
 }
 
 // Commit commits the write transaction and consumes the handle.
@@ -365,7 +396,7 @@ func (tx *WriteTxn) Commit() error {
 		return err
 	}
 	tx.ptr = nil
-	return checkStatus(C.oryq_write_txn_commit(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_write_txn_commit(ptr) })
 }
 
 // Rollback aborts the write transaction and consumes the handle (idempotent if already finalized).
@@ -375,7 +406,7 @@ func (tx *WriteTxn) Rollback() error {
 	}
 	ptr := tx.ptr
 	tx.ptr = nil
-	return checkStatus(C.oryq_write_txn_rollback(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_write_txn_rollback(ptr) })
 }
 
 // ReadTxn wraps a snapshot-isolated OryqReadTxn* handle.
@@ -397,7 +428,7 @@ func (tx *ReadTxn) Close() error {
 	}
 	ptr := tx.ptr
 	tx.ptr = nil
-	return checkStatus(C.oryq_read_txn_close(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_read_txn_close(ptr) })
 }
 
 // FindJSON queries collection with an optional JSON filter (empty string matches all documents).
@@ -414,7 +445,7 @@ func (tx *ReadTxn) FindJSON(collection, filterJSON string) (*Cursor, error) {
 		defer C.free(unsafe.Pointer(cFilter))
 	}
 	var out *C.OryqCursor
-	if err := checkStatus(C.oryq_find_json(ptr, cCol, cFilter, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_find_json(ptr, cCol, cFilter, &out) }); err != nil {
 		return nil, err
 	}
 	return &Cursor{ptr: out}, nil
@@ -431,7 +462,7 @@ func (tx *ReadTxn) AggregateJSON(collection, pipelineJSON string) (*Cursor, erro
 	cPipe := C.CString(pipelineJSON)
 	defer C.free(unsafe.Pointer(cPipe))
 	var out *C.OryqCursor
-	if err := checkStatus(C.oryq_aggregate_json(ptr, cCol, cPipe, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_aggregate_json(ptr, cCol, cPipe, &out) }); err != nil {
 		return nil, err
 	}
 	return &Cursor{ptr: out}, nil
@@ -453,7 +484,9 @@ func (tx *ReadTxn) SearchFts(collection, indexName, queryText string, limit int)
 	cQuery := C.CString(queryText)
 	defer C.free(unsafe.Pointer(cQuery))
 	var out *C.OryqCursor
-	if err := checkStatus(C.oryq_search_fts(ptr, cCol, cIdx, cQuery, C.size_t(limit), &out)); err != nil {
+	if err := callStatus(func() C.oryq_status {
+		return C.oryq_search_fts(ptr, cCol, cIdx, cQuery, C.size_t(limit), &out)
+	}); err != nil {
 		return nil, err
 	}
 	return &Cursor{ptr: out}, nil
@@ -476,15 +509,17 @@ func (tx *ReadTxn) SearchVector(collection, indexName string, queryVec []float32
 	cIdx := C.CString(indexName)
 	defer C.free(unsafe.Pointer(cIdx))
 	var out *C.OryqCursor
-	if err := checkStatus(C.oryq_search_vector(
-		ptr,
-		cCol,
-		cIdx,
-		(*C.float)(unsafe.Pointer(&queryVec[0])),
-		C.size_t(len(queryVec)),
-		C.size_t(topK),
-		&out,
-	)); err != nil {
+	if err := callStatus(func() C.oryq_status {
+		return C.oryq_search_vector(
+			ptr,
+			cCol,
+			cIdx,
+			(*C.float)(unsafe.Pointer(&queryVec[0])),
+			C.size_t(len(queryVec)),
+			C.size_t(topK),
+			&out,
+		)
+	}); err != nil {
 		return nil, err
 	}
 	return &Cursor{ptr: out}, nil
@@ -509,7 +544,7 @@ func (c *Cursor) Close() error {
 	}
 	ptr := c.ptr
 	c.ptr = nil
-	return checkStatus(C.oryq_cursor_close(ptr))
+	return callStatus(func() C.oryq_status { return C.oryq_cursor_close(ptr) })
 }
 
 // Next advances the cursor without JSON serialization (use with Get* accessors).
@@ -519,14 +554,7 @@ func (c *Cursor) Next() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	st := C.oryq_cursor_next(ptr)
-	if Status(st) == StatusCursorDone {
-		return false, nil
-	}
-	if err := checkStatus(st); err != nil {
-		return false, err
-	}
-	return true, nil
+	return callCursorStatus(func() C.oryq_status { return C.oryq_cursor_next(ptr) })
 }
 
 // NextJSON advances the cursor and returns the next document as a JSON string.
@@ -537,15 +565,9 @@ func (c *Cursor) NextJSON() (string, bool, error) {
 		return "", false, err
 	}
 	var raw *C.char
-	st := C.oryq_cursor_next_json(ptr, &raw)
-	if Status(st) == StatusCursorDone {
-		return "", false, nil
-	}
-	if err := checkStatus(st); err != nil {
+	hasRow, err := callCursorStatus(func() C.oryq_status { return C.oryq_cursor_next_json(ptr, &raw) })
+	if err != nil || !hasRow || raw == nil {
 		return "", false, err
-	}
-	if raw == nil {
-		return "", false, nil
 	}
 	defer C.oryq_free_string(raw)
 	return C.GoString(raw), true, nil
@@ -560,7 +582,7 @@ func (c *Cursor) GetI64(field string) (int64, error) {
 	cField := C.CString(field)
 	defer C.free(unsafe.Pointer(cField))
 	var out C.int64_t
-	if err := checkStatus(C.oryq_cursor_get_i64(ptr, cField, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_i64(ptr, cField, &out) }); err != nil {
 		return 0, err
 	}
 	return int64(out), nil
@@ -575,7 +597,7 @@ func (c *Cursor) GetF64(field string) (float64, error) {
 	cField := C.CString(field)
 	defer C.free(unsafe.Pointer(cField))
 	var out C.double
-	if err := checkStatus(C.oryq_cursor_get_f64(ptr, cField, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_f64(ptr, cField, &out) }); err != nil {
 		return 0, err
 	}
 	return float64(out), nil
@@ -590,7 +612,7 @@ func (c *Cursor) GetBool(field string) (bool, error) {
 	cField := C.CString(field)
 	defer C.free(unsafe.Pointer(cField))
 	var out C.bool
-	if err := checkStatus(C.oryq_cursor_get_bool(ptr, cField, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_bool(ptr, cField, &out) }); err != nil {
 		return false, err
 	}
 	return bool(out), nil
@@ -606,11 +628,14 @@ func (c *Cursor) GetUTF8(field string) (string, error) {
 	defer C.free(unsafe.Pointer(cField))
 	var raw *C.char
 	var length C.size_t
-	if err := checkStatus(C.oryq_cursor_get_utf8(ptr, cField, &raw, &length)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_utf8(ptr, cField, &raw, &length) }); err != nil {
 		return "", err
 	}
 	if length == 0 {
 		return "", nil
+	}
+	if raw == nil || uint64(length) > math.MaxInt32 {
+		return "", &Error{Status: StatusErrNumericOverflow, Message: "UTF-8 field length exceeds C.int range"}
 	}
 	return C.GoStringN(raw, C.int(length)), nil
 }
@@ -622,7 +647,7 @@ func (c *Cursor) GetScore() (float64, error) {
 		return 0, err
 	}
 	var out C.double
-	if err := checkStatus(C.oryq_cursor_get_score(ptr, &out)); err != nil {
+	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_score(ptr, &out) }); err != nil {
 		return 0, err
 	}
 	return float64(out), nil

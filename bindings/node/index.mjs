@@ -86,6 +86,10 @@ export class Cursor {
     return native.cursorGetI64(this._req(), field);
   }
 
+  getBigInt(field) {
+    return native.cursorGetBigInt(this._req(), field);
+  }
+
   getF64(field) {
     return native.cursorGetF64(this._req(), field);
   }
@@ -219,6 +223,11 @@ export class WriteTxn {
   }
 
   createFtsIndex(collection, fields, name = null) {
+    if (fields === null || fields === undefined) {
+      const err = new Error("fields must be a non-empty string or string[]");
+      err.status = OryqStatus.ERR_INVALID_ARGUMENT;
+      throw err;
+    }
     const csv = Array.isArray(fields) ? fields.join(",") : String(fields);
     native.createFtsIndex(this._req(), collection, csv, name);
   }

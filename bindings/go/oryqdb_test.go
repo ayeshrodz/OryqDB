@@ -84,7 +84,55 @@ func TestEndToEndCRUDIndexAggregateVacuumAndBackup(t *testing.T) {
 		t.Fatalf("NextJSON failed: hasRow=%v err=%v json=%q", hasRow, err, rawJSON)
 	}
 	_ = aggCur.Close()
+
+	// Closing DB while ReadTxn is open must return StatusErrBusy
+	if err := db.Close(); !IsStatus(err, StatusErrBusy) {
+		t.Fatalf("expected StatusErrBusy on Close with open ReadTxn, got %v", err)
+	}
 	_ = rtx.Close()
+
+	// Duplicate unique key + Rollback leaves DB unmodified
+	wtxDup, err := db.BeginWrite()
+	if err != nil {
+		t.Fatalf("BeginWrite dup failed: %v", err)
+	}
+	if err := wtxDup.InsertJSON("users", `{"_id": 3, "name": "Temp", "email": "temp@example.com"}`); err != nil {
+		t.Fatalf("InsertJSON 3 failed: %v", err)
+	}
+	if err := wtxDup.InsertJSON("users", `{"_id": 4, "name": "Dup", "email": "ada@example.com"}`); !IsStatus(err, StatusErrDuplicateKey) {
+		t.Fatalf("expected StatusErrDuplicateKey, got %v", err)
+	}
+	if err := wtxDup.Rollback(); err != nil {
+		t.Fatalf("Rollback failed: %v", err)
+	}
+	// Use-after-finalize returns ErrInvalidArgument
+	if err := wtxDup.InsertJSON("users", `{"_id": 5}`); !IsStatus(err, StatusErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument after Rollback, got %v", err)
+	}
+
+	// Update, delete, drop index, create & drop temporary collection
+	wtxMut, err := db.BeginWrite()
+	if err != nil {
+		t.Fatalf("BeginWrite mut failed: %v", err)
+	}
+	if err := wtxMut.UpdateByIDJSON("users", "1", `{"$set": {"score": 100.0}}`); err != nil {
+		t.Fatalf("UpdateByIDJSON failed: %v", err)
+	}
+	if err := wtxMut.DeleteByIDJSON("users", "2"); err != nil {
+		t.Fatalf("DeleteByIDJSON failed: %v", err)
+	}
+	if err := wtxMut.DropIndex("users", "email_idx"); err != nil {
+		t.Fatalf("DropIndex failed: %v", err)
+	}
+	if err := wtxMut.CreateCollection("temp_col"); err != nil {
+		t.Fatalf("CreateCollection temp_col failed: %v", err)
+	}
+	if err := wtxMut.DropCollection("temp_col"); err != nil {
+		t.Fatalf("DropCollection temp_col failed: %v", err)
+	}
+	if err := wtxMut.Commit(); err != nil {
+		t.Fatalf("Commit mut failed: %v", err)
+	}
 
 	if err := db.Checkpoint(); err != nil {
 		t.Fatalf("Checkpoint failed: %v", err)
@@ -101,6 +149,9 @@ func TestEndToEndCRUDIndexAggregateVacuumAndBackup(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+	if _, err := db.BeginRead(); !IsStatus(err, StatusErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument after Close, got %v", err)
 	}
 
 	// Single-file check: auto-seal removes .oryq-wal

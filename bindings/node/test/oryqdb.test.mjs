@@ -44,6 +44,7 @@ test("end-to-end CRUD, index, aggregation, vacuum, auto-seal & backup", () => {
     const cur = rtx.find("users", { _id: 1 });
     assert.equal(cur.step(), true);
     assert.equal(cur.getI64("_id"), 1);
+    assert.equal(cur.getBigInt("_id"), 1n);
     assert.equal(cur.getUtf8("name"), "Ada");
     assert.equal(cur.getF64("score"), 98.5);
     assert.equal(cur.getBool("active"), true);
@@ -57,13 +58,50 @@ test("end-to-end CRUD, index, aggregation, vacuum, auto-seal & backup", () => {
     aggCur.close();
     assert.equal(aggRows.length, 1);
     assert.equal(aggRows[0].total, 193.5);
+
+    // Close while ReadTxn is open must fail with ERR_BUSY
+    assert.throws(
+      () => db.close(),
+      (err) => err.status === OryqStatus.ERR_BUSY,
+    );
     rtx.close();
+
+    // Duplicate unique key + rollback + use-after-rollback
+    const wtxDup = db.beginWrite();
+    wtxDup.insert("users", { _id: 3, name: "Temp", email: "temp@example.com" });
+    assert.throws(
+      () =>
+        wtxDup.insert("users", {
+          _id: 4,
+          name: "Dup",
+          email: "ada@example.com",
+        }),
+      (err) => err.status === OryqStatus.ERR_DUPLICATE_KEY,
+    );
+    wtxDup.rollback();
+    assert.throws(
+      () => wtxDup.insert("users", { _id: 5 }),
+      (err) => err.status === OryqStatus.ERR_INVALID_ARGUMENT,
+    );
+
+    // Update, delete, drop index, create & drop collection
+    const wtxMut = db.beginWrite();
+    wtxMut.updateById("users", 1, { $set: { score: 100.0 } });
+    wtxMut.deleteById("users", 2);
+    wtxMut.dropIndex("users", "email_idx");
+    wtxMut.createCollection("temp_col");
+    wtxMut.dropCollection("temp_col");
+    wtxMut.commit();
 
     db.checkpoint();
     db.vacuum();
     assert.equal(db.integrityCheck(), true);
     db.backupTo(backupPath);
     db.close();
+    assert.throws(
+      () => db.beginRead(),
+      (err) => err.status === OryqStatus.ERR_INVALID_ARGUMENT,
+    );
 
     assert.equal(fs.existsSync(`${dbPath}-wal`), false);
 

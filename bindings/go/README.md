@@ -13,6 +13,14 @@ cd bindings/go
 ORYQ_EXPECT_HYBRID=1 go test -v ./...
 ```
 
+For external Go modules (`go get`), point `cgo` at your installed `oryq.h` and `liboryq`:
+
+```bash
+CGO_CFLAGS="-I/path/to/oryqdb/include" \
+CGO_LDFLAGS="-L/path/to/oryqdb/lib -loryq -Wl,-rpath,/path/to/oryqdb/lib" \
+go build ./...
+```
+
 ## Quick Example
 
 ```go

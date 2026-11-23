@@ -39,15 +39,21 @@ export declare const VectorQuantization: Readonly<{
   INT8: 1;
 }>;
 
+export type VectorMetricValue = (typeof VectorMetric)[keyof typeof VectorMetric];
+export type VectorQuantizationValue = (typeof VectorQuantization)[keyof typeof VectorQuantization];
+
 export interface OryqError extends Error {
   status: number;
 }
 
 export declare class Cursor {
+  private constructor();
   step(): boolean;
   nextDoc(): Record<string, unknown> | null;
   [Symbol.iterator](): Generator<Record<string, unknown>, void, unknown>;
+  /** Reads a top-level Int64 field as a JS number (exact within ±(2^53 - 1); use `getBigInt` for full 64-bit precision). */
   getI64(field: string): number;
+  getBigInt(field: string): bigint;
   getF64(field: string): number;
   getBool(field: string): boolean;
   getUtf8(field: string): string;
@@ -56,6 +62,7 @@ export declare class Cursor {
 }
 
 export declare class ReadTxn {
+  private constructor();
   find(collection: string, filter?: Record<string, unknown> | string | null): Cursor;
   aggregate(collection: string, pipeline: unknown[] | string): Cursor;
   searchFts(collection: string, indexName: string, queryText: string, limit?: number): Cursor;
@@ -69,6 +76,7 @@ export declare class ReadTxn {
 }
 
 export declare class WriteTxn {
+  private constructor();
   createCollection(name: string): void;
   dropCollection(name: string): void;
   createIndex(
@@ -82,7 +90,11 @@ export declare class WriteTxn {
     collection: string,
     fieldPath: string,
     dimensions: number,
-    options?: { metric?: number; quantization?: number; name?: string | null },
+    options?: {
+      metric?: VectorMetricValue;
+      quantization?: VectorQuantizationValue;
+      name?: string | null;
+    },
   ): void;
   insert(collection: string, doc: Record<string, unknown> | string): void;
   updateById(collection: string, id: unknown, update: Record<string, unknown> | string): void;
@@ -92,6 +104,7 @@ export declare class WriteTxn {
 }
 
 export declare class Database {
+  private constructor();
   static open(dbPath: string): Database;
   static openInMemory(): Database;
   static version(): string;

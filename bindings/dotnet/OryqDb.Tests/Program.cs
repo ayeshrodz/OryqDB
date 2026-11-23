@@ -62,11 +62,60 @@ try
             Assert(busyCaught, "expected ErrBusy when closing db with open ReadTxn");
         }
 
+        // Duplicate unique key + Rollback
+        using (var wtxDup = db.BeginWrite())
+        {
+            wtxDup.InsertJson("users", """{"_id": 3, "name": "Temp", "email": "temp@example.com"}""");
+            bool dupCaught = false;
+            try
+            {
+                wtxDup.InsertJson("users", """{"_id": 4, "name": "Dup", "email": "ada@example.com"}""");
+            }
+            catch (OryqException ex) when (ex.Status == OryqStatus.ErrDuplicateKey)
+            {
+                dupCaught = true;
+            }
+            Assert(dupCaught, "expected ErrDuplicateKey");
+            wtxDup.Rollback();
+            bool finalizedCaught = false;
+            try
+            {
+                wtxDup.InsertJson("users", """{"_id": 5}""");
+            }
+            catch (OryqException ex) when (ex.Status == OryqStatus.ErrInvalidArgument)
+            {
+                finalizedCaught = true;
+            }
+            Assert(finalizedCaught, "expected ErrInvalidArgument after Rollback");
+        }
+
+        // Update, delete, drop index, drop collection
+        using (var wtxMut = db.BeginWrite())
+        {
+            wtxMut.UpdateByIdJson("users", "1", """{"$set": {"score": 100.0}}""");
+            wtxMut.DeleteByIdJson("users", "2");
+            wtxMut.DropIndex("users", "email_idx");
+            wtxMut.CreateCollection("temp_col");
+            wtxMut.DropCollection("temp_col");
+            wtxMut.Commit();
+        }
+
         db.Checkpoint();
         db.Vacuum();
         Assert(db.IntegrityCheck(), "integrity check failed");
         db.BackupTo(backupPath);
         db.Close();
+
+        bool closedCaught = false;
+        try
+        {
+            db.BeginRead();
+        }
+        catch (OryqException ex) when (ex.Status == OryqStatus.ErrInvalidArgument)
+        {
+            closedCaught = true;
+        }
+        Assert(closedCaught, "expected ErrInvalidArgument after Close");
     }
 
     Assert(!File.Exists(dbPath + "-wal"), "expected .oryq-wal removed on clean close");

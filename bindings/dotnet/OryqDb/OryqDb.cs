@@ -147,13 +147,13 @@ public sealed class OryqDatabase : IDisposable
 
     public static OryqDatabase OpenInMemory() => Open(":memory:");
 
-    private IntPtr RequireOpen()
+    private OryqDbHandle RequireOpen()
     {
         if (_handle.IsClosed || _handle.IsInvalid)
         {
             throw new OryqException(OryqStatus.ErrInvalidArgument, "database is closed");
         }
-        return _handle.DangerousGetHandle();
+        return _handle;
     }
 
     public OryqReadTxn BeginRead()
@@ -187,8 +187,20 @@ public sealed class OryqDatabase : IDisposable
         {
             return;
         }
-        OryqException.Check(OryqNative.oryq_db_close(_handle.DangerousGetHandle()));
-        _handle.SetHandleAsInvalid();
+        bool addedRef = false;
+        try
+        {
+            _handle.DangerousAddRef(ref addedRef);
+            OryqException.Check(OryqNative.oryq_db_close(_handle.DangerousGetHandle()));
+            _handle.SetHandleAsInvalid();
+        }
+        finally
+        {
+            if (addedRef)
+            {
+                _handle.DangerousRelease();
+            }
+        }
         _handle.Dispose();
     }
 
@@ -207,13 +219,13 @@ public sealed class OryqWriteTxn : IDisposable
 
     internal OryqWriteTxn(OryqWriteTxnHandle handle) => _handle = handle;
 
-    private IntPtr RequireOpen()
+    private OryqWriteTxnHandle RequireOpen()
     {
         if (_handle.IsClosed || _handle.IsInvalid)
         {
             throw new OryqException(OryqStatus.ErrInvalidArgument, "write transaction is finalized");
         }
-        return _handle.DangerousGetHandle();
+        return _handle;
     }
 
     public void CreateCollection(string name) =>
@@ -260,10 +272,23 @@ public sealed class OryqWriteTxn : IDisposable
 
     public void Commit()
     {
-        var ptr = RequireOpen();
-        _handle.MarkFinalized();
-        OryqException.Check(OryqNative.oryq_write_txn_commit(ptr));
-        _handle.Dispose();
+        var handle = RequireOpen();
+        bool addedRef = false;
+        try
+        {
+            handle.DangerousAddRef(ref addedRef);
+            var ptr = handle.DangerousGetHandle();
+            handle.MarkFinalized();
+            OryqException.Check(OryqNative.oryq_write_txn_commit(ptr));
+        }
+        finally
+        {
+            if (addedRef)
+            {
+                handle.DangerousRelease();
+            }
+            handle.Dispose();
+        }
     }
 
     public void Rollback()
@@ -272,10 +297,22 @@ public sealed class OryqWriteTxn : IDisposable
         {
             return;
         }
-        var ptr = _handle.DangerousGetHandle();
-        _handle.MarkFinalized();
-        OryqException.Check(OryqNative.oryq_write_txn_rollback(ptr));
-        _handle.Dispose();
+        bool addedRef = false;
+        try
+        {
+            _handle.DangerousAddRef(ref addedRef);
+            var ptr = _handle.DangerousGetHandle();
+            _handle.MarkFinalized();
+            OryqException.Check(OryqNative.oryq_write_txn_rollback(ptr));
+        }
+        finally
+        {
+            if (addedRef)
+            {
+                _handle.DangerousRelease();
+            }
+            _handle.Dispose();
+        }
     }
 
     public void Dispose() => _handle.Dispose();
@@ -287,13 +324,13 @@ public sealed class OryqReadTxn : IDisposable
 
     internal OryqReadTxn(OryqReadTxnHandle handle) => _handle = handle;
 
-    private IntPtr RequireOpen()
+    private OryqReadTxnHandle RequireOpen()
     {
         if (_handle.IsClosed || _handle.IsInvalid)
         {
             throw new OryqException(OryqStatus.ErrInvalidArgument, "read transaction is closed");
         }
-        return _handle.DangerousGetHandle();
+        return _handle;
     }
 
     public OryqCursor Find(string collection, string? filterJson = null)
@@ -343,13 +380,13 @@ public sealed class OryqCursor : IDisposable
 
     internal OryqCursor(OryqCursorHandle handle) => _handle = handle;
 
-    private IntPtr RequireOpen()
+    private OryqCursorHandle RequireOpen()
     {
         if (_handle.IsClosed || _handle.IsInvalid)
         {
             throw new OryqException(OryqStatus.ErrInvalidArgument, "cursor is closed");
         }
-        return _handle.DangerousGetHandle();
+        return _handle;
     }
 
     public bool Next()
@@ -405,15 +442,29 @@ public sealed class OryqCursor : IDisposable
 
     public string GetUtf8(string field)
     {
-        OryqException.Check(OryqNative.oryq_cursor_get_utf8(RequireOpen(), field, out var ptr, out var len));
-        if (len == 0)
+        var handle = RequireOpen();
+        bool addedRef = false;
+        try
         {
-            return string.Empty;
+            handle.DangerousAddRef(ref addedRef);
+            OryqException.Check(OryqNative.oryq_cursor_get_utf8(
+                handle.DangerousGetHandle(), field, out var ptr, out var len));
+            if (len == 0)
+            {
+                return string.Empty;
+            }
+            int byteLen = checked((int)len);
+            byte[] buf = new byte[byteLen];
+            Marshal.Copy(ptr, buf, 0, byteLen);
+            return Encoding.UTF8.GetString(buf);
         }
-        int byteLen = checked((int)len);
-        byte[] buf = new byte[byteLen];
-        Marshal.Copy(ptr, buf, 0, byteLen);
-        return Encoding.UTF8.GetString(buf);
+        finally
+        {
+            if (addedRef)
+            {
+                handle.DangerousRelease();
+            }
+        }
     }
 
     public double GetScore()
