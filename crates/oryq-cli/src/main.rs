@@ -431,6 +431,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let dimensions = dims_str
                 .parse::<u32>()
                 .map_err(|_| format!("invalid dimensions '{dims_str}'"))?;
+            if dimensions == 0 {
+                return Err("dimensions must be > 0".to_owned());
+            }
             let mut metric_str = "cosine";
             let mut quant_str = "f32";
             let mut name_opt: Option<&str> = None;
@@ -451,6 +454,16 @@ fn run(args: &[String]) -> Result<(), String> {
                     }
                     other => return Err(format!("unknown vec-index option '{other}'")),
                 }
+            }
+            if !matches!(metric_str, "cosine" | "l2" | "dot") {
+                return Err(format!(
+                    "unknown --metric '{metric_str}' (expected: cosine, l2, dot)"
+                ));
+            }
+            if !matches!(quant_str, "f32" | "int8") {
+                return Err(format!(
+                    "unknown --quant '{quant_str}' (expected: f32, int8)"
+                ));
             }
             #[cfg(feature = "vec")]
             {

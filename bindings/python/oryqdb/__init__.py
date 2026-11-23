@@ -439,6 +439,8 @@ class ReadTxn:
         limit: int = 10,
     ) -> Cursor:
         """Executes an Okapi BM25 full-text search (requires `oryq-ffi --features fts`)."""
+        if limit < 0:
+            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "limit must be >= 0")
         h = self._require_open()
         out_cursor = ctypes.c_void_p()
         _check(
@@ -463,6 +465,8 @@ class ReadTxn:
         top_k: int = 10,
     ) -> Cursor:
         """Executes a top-k vector similarity search (requires `oryq-ffi --features vec`)."""
+        if top_k < 0:
+            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "top_k must be >= 0")
         h = self._require_open()
         n = len(query_vector)
         if n == 0:
@@ -585,6 +589,11 @@ class WriteTxn:
         name: Optional[str] = None,
     ) -> None:
         """Creates a dense vector similarity index (requires `oryq-ffi --features vec`)."""
+        if not (0 < dimensions <= 0xFFFF_FFFF):
+            raise OryqError(
+                OryqStatus.ERR_INVALID_ARGUMENT,
+                "dimensions must be in range 1..=4294967295",
+            )
         _check(
             self._lib,
             self._lib.oryq_create_vector_index(

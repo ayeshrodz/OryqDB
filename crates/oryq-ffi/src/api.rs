@@ -582,8 +582,8 @@ pub unsafe extern "C" fn oryq_cursor_get_i64(
 /// Closes and frees a cursor handle.
 ///
 /// # Safety
-/// `cursor` must be null or a valid pointer from `oryq_find_json` or `oryq_aggregate_json`
-/// not yet closed.
+/// `cursor` must be null or a valid pointer from `oryq_find_json`, `oryq_aggregate_json`,
+/// `oryq_search_fts`, or `oryq_search_vector` not yet closed.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_cursor_close(cursor: *mut OryqCursor) -> OryqStatus {
     ffi_guard(|| {
@@ -599,7 +599,8 @@ pub unsafe extern "C" fn oryq_cursor_close(cursor: *mut OryqCursor) -> OryqStatu
 /// Use with zero-copy `oryq_cursor_get_*` accessors. Returns `ORYQ_CURSOR_DONE` at end.
 ///
 /// # Safety
-/// `cursor` must be a valid pointer from `oryq_find_json` or `oryq_aggregate_json`.
+/// `cursor` must be a valid pointer from `oryq_find_json`, `oryq_aggregate_json`,
+/// `oryq_search_fts`, or `oryq_search_vector`.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_cursor_next(cursor: *mut OryqCursor) -> OryqStatus {
     ffi_guard(|| {

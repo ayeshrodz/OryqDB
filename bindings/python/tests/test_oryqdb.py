@@ -238,6 +238,32 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                 )
                 wtx.commit()
 
+            # Input validation (unsigned bounds, empty query_vector) & unscored get_score()
+            with db.write_txn() as wtx:
+                for bad_dims in (0, -1, 1 << 32):
+                    with self.assertRaises(OryqError) as ctx:
+                        wtx.create_vector_index("docs", "emb", bad_dims)
+                    self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
+
+            with db.read_txn() as rtx:
+                with self.assertRaises(OryqError) as ctx:
+                    rtx.search_fts("docs", "text_idx", "rust", limit=-1)
+                self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
+
+                with self.assertRaises(OryqError) as ctx:
+                    rtx.search_vector("docs", "emb_idx", [1.0, 0.0, 0.0], top_k=-1)
+                self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
+
+                with self.assertRaises(OryqError) as ctx:
+                    rtx.search_vector("docs", "emb_idx", [], top_k=5)
+                self.assertEqual(ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
+
+                with rtx.find("docs") as cur:
+                    self.assertTrue(cur.step())
+                    with self.assertRaises(OryqError) as ctx:
+                        cur.get_score()
+                    self.assertEqual(ctx.exception.status, OryqStatus.ERR_NOT_FOUND)
+
             try:
                 with db.write_txn() as wtx:
                     wtx.create_fts_index("docs", ["title", "body"], name="text_idx")
@@ -254,6 +280,18 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                 if expect_hybrid:
                     self.fail(f"expected hybrid FTS+Vec build, got {exc}")
                 self.assertEqual(exc.status, OryqStatus.ERR_UNSUPPORTED_FEATURE)
+                # Verify all 4 hybrid entrypoints fail cleanly with ERR_UNSUPPORTED_FEATURE
+                with db.write_txn() as wtx:
+                    with self.assertRaises(OryqError) as vctx:
+                        wtx.create_vector_index("docs", "emb", 3, name="emb_idx")
+                    self.assertEqual(vctx.exception.status, OryqStatus.ERR_UNSUPPORTED_FEATURE)
+                with db.read_txn() as rtx:
+                    with self.assertRaises(OryqError) as fctx:
+                        rtx.search_fts("docs", "text_idx", "rust", limit=5)
+                    self.assertEqual(fctx.exception.status, OryqStatus.ERR_UNSUPPORTED_FEATURE)
+                    with self.assertRaises(OryqError) as sctx:
+                        rtx.search_vector("docs", "emb_idx", [1.0, 0.0, 0.0], top_k=2)
+                    self.assertEqual(sctx.exception.status, OryqStatus.ERR_UNSUPPORTED_FEATURE)
                 return
 
             with db.read_txn() as rtx:

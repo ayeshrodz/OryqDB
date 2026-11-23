@@ -109,7 +109,11 @@ jobs:
           cargo test -p oryq-core --features fts
           cargo test -p oryq-core --features vec
           cargo test -p oryq-core --features fts,vec
+          cargo test -p oryq-ffi --features fts
+          cargo test -p oryq-ffi --features vec
           cargo test -p oryq-ffi --features fts,vec
+          cargo test -p oryq-cli --features fts
+          cargo test -p oryq-cli --features vec
           cargo test -p oryq-cli --features fts,vec
 
       - name: Compile and run native C99/C++17 FFI integration tests & examples

@@ -127,21 +127,6 @@ fn ffi_crud_find_lifecycle_and_child_busy_guard() {
             OryqStatus::CursorDone
         );
         assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
-        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
-        let mut find_cur: *mut OryqCursor = ptr::null_mut();
-        assert_eq!(
-            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
-            OryqStatus::Ok
-        );
-        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
-        let mut unscored = 99.0;
-        assert_eq!(
-            oryq_cursor_get_score(find_cur, &mut unscored),
-            OryqStatus::ErrNotFound
-        );
-        assert_eq!(unscored, 0.0);
-        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
-
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
 
         let mut wtx2: *mut OryqWriteTxn = ptr::null_mut();
@@ -324,21 +309,6 @@ fn ffi_zero_copy_getters_indexes_aggregate_backup_and_integrity() {
         );
         assert_eq!(total_qty, 15);
         assert_eq!(oryq_cursor_close(agg_cur), OryqStatus::Ok);
-        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
-        let mut find_cur: *mut OryqCursor = ptr::null_mut();
-        assert_eq!(
-            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
-            OryqStatus::Ok
-        );
-        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
-        let mut unscored = 99.0;
-        assert_eq!(
-            oryq_cursor_get_score(find_cur, &mut unscored),
-            OryqStatus::ErrNotFound
-        );
-        assert_eq!(unscored, 0.0);
-        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
-
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
 
         // Drop index + missing index check
@@ -429,21 +399,6 @@ fn ffi_in_memory_database_crud_vacuum_and_backup_to_disk() {
         );
         assert_eq!(v, 42);
         assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
-        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
-        let mut find_cur: *mut OryqCursor = ptr::null_mut();
-        assert_eq!(
-            oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
-            OryqStatus::Ok
-        );
-        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
-        let mut unscored = 99.0;
-        assert_eq!(
-            oryq_cursor_get_score(find_cur, &mut unscored),
-            OryqStatus::ErrNotFound
-        );
-        assert_eq!(unscored, 0.0);
-        assert_eq!(oryq_cursor_close(find_cur), OryqStatus::Ok);
-
         assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
         assert_eq!(oryq_db_close(bdb), OryqStatus::Ok);
     }
@@ -483,6 +438,25 @@ fn ffi_v1_2_hybrid_fts_and_vector_search_and_feature_gating() {
         assert_eq!(
             oryq_insert_json(wtx, col.as_ptr(), d2.as_ptr()),
             OryqStatus::Ok
+        );
+
+        // Invalid argument checks on v1.2 hybrid APIs
+        let empty_csv = CString::new(" , ").unwrap();
+        assert_eq!(
+            oryq_create_fts_index(wtx, col.as_ptr(), empty_csv.as_ptr(), ptr::null()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_vector_index(wtx, col.as_ptr(), vec_field.as_ptr(), 0, 0, 0, ptr::null()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_vector_index(wtx, col.as_ptr(), vec_field.as_ptr(), 3, 9, 0, ptr::null()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_vector_index(wtx, col.as_ptr(), vec_field.as_ptr(), 3, 0, 2, ptr::null()),
+            OryqStatus::ErrInvalidArgument
         );
 
         let fts_status =
@@ -588,14 +562,46 @@ fn ffi_v1_2_hybrid_fts_and_vector_search_and_feature_gating() {
             assert!(vec_cur.is_null());
         }
 
-        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score`
+        let mut bad_cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_search_vector(
+                rtx,
+                col.as_ptr(),
+                vec_name.as_ptr(),
+                ptr::null(),
+                3,
+                2,
+                &mut bad_cur,
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_search_vector(
+                rtx,
+                col.as_ptr(),
+                vec_name.as_ptr(),
+                qvec.as_ptr(),
+                0,
+                2,
+                &mut bad_cur,
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
+
+        // Unscored find cursor returns ErrNotFound from `oryq_cursor_get_score` (before & after next)
         let mut find_cur: *mut OryqCursor = ptr::null_mut();
         assert_eq!(
             oryq_find_json(rtx, col.as_ptr(), ptr::null(), &mut find_cur),
             OryqStatus::Ok
         );
-        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
         let mut unscored = 99.0;
+        assert_eq!(
+            oryq_cursor_get_score(find_cur, &mut unscored),
+            OryqStatus::ErrNotFound
+        );
+        assert_eq!(unscored, 0.0);
+        assert_eq!(oryq_cursor_next(find_cur), OryqStatus::Ok);
+        unscored = 99.0;
         assert_eq!(
             oryq_cursor_get_score(find_cur, &mut unscored),
             OryqStatus::ErrNotFound
@@ -665,6 +671,49 @@ fn ffi_rejects_null_arguments_and_catches_panics() {
             OryqStatus::ErrInvalidArgument
         );
         assert_eq!(oryq_db_vacuum(ptr::null()), OryqStatus::ErrInvalidArgument);
+        assert_eq!(
+            oryq_cursor_get_score(ptr::null(), ptr::null_mut()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_fts_index(ptr::null_mut(), ptr::null(), ptr::null(), ptr::null()),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_search_fts(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                10,
+                ptr::null_mut(),
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_create_vector_index(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                3,
+                0,
+                0,
+                ptr::null(),
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert_eq!(
+            oryq_search_vector(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                10,
+                ptr::null_mut(),
+            ),
+            OryqStatus::ErrInvalidArgument
+        );
     }
 
     let status = oryq::guard::ffi_guard(|| -> Result<OryqStatus, (OryqStatus, String)> {
