@@ -4,8 +4,8 @@
 Measures:
   1. Batched insert (N JSON documents + secondary index) in one ACID transaction
   2. Primary `_id` point lookups (N lookups)
-  3. Secondary indexed equality queries (200 queries)
-  4. Batched partial updates (N/4 updates)
+  3. Secondary indexed equality queries (200 queries fetching a non-indexed column)
+  4. Batched partial document updates (N/4 updates, updating JSON in both engines)
   5. Single-file size on disk after clean close, after deleting 75% of docs, and after VACUUM
 
 Usage:
@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bindings" / "python"))
@@ -31,11 +31,36 @@ sys.path.insert(0, str(REPO_ROOT / "bindings" / "python"))
 from oryqdb import Database  # noqa: E402
 
 
-def _make_doc(i: int) -> dict:
+def _platform_lib_name() -> str:
+    if sys.platform.startswith("win"):
+        return "oryq.dll"
+    if sys.platform == "darwin":
+        return "liboryq.dylib"
+    return "liboryq.so"
+
+
+def _resolve_release_lib() -> Optional[Path]:
+    env_lib = os.environ.get("ORYQ_LIB_PATH")
+    if env_lib:
+        return Path(env_lib)
+    lib_name = _platform_lib_name()
+    for profile in ("release", "release-small"):
+        cand = REPO_ROOT / "target" / profile / lib_name
+        if cand.is_file():
+            os.environ["ORYQ_LIB_PATH"] = str(cand)
+            return cand
+    return None
+
+
+def _rate(ops: int, elapsed_ms: float) -> float:
+    return ops / max(elapsed_ms / 1000.0, 1e-9)
+
+
+def _make_doc(i: int, n_cats: int) -> dict:
     return {
         "_id": i,
         "email": f"user{i}@example.com",
-        "category": f"cat_{i % 20}",
+        "category": f"cat_{(i - 1) % n_cats}",
         "score": float((i * 37) % 1000) / 10.0,
         "active": (i % 2) == 0,
         "bio": f"OryqDB vs SQLite embedded single-file document benchmark payload #{i:06d}",
@@ -44,7 +69,8 @@ def _make_doc(i: int) -> dict:
 
 def bench_oryqdb(tmp_dir: Path, n_docs: int) -> Dict[str, float]:
     db_path = tmp_dir / "bench.oryq"
-    docs = [_make_doc(i) for i in range(1, n_docs + 1)]
+    n_cats = min(20, n_docs)
+    docs = [_make_doc(i, n_cats) for i in range(1, n_docs + 1)]
     metrics: Dict[str, float] = {}
 
     with Database.open(db_path) as db:
@@ -67,19 +93,20 @@ def bench_oryqdb(tmp_dir: Path, n_docs: int) -> Dict[str, float]:
                     _ = cur.get_f64("score")
         metrics["pk_lookup_ms"] = (time.perf_counter() - t0) * 1000.0
 
-        # 3. Secondary indexed lookups (200 queries)
+        # 3. Secondary indexed lookups (200 queries fetching non-indexed `score`)
         t0 = time.perf_counter()
         with db.read_txn() as rtx:
             for q in range(200):
-                cat = f"cat_{q % 20}"
+                cat = f"cat_{q % n_cats}"
                 with rtx.find("users", {"category": cat}) as cur:
                     count = 0
                     while cur.step():
+                        _ = cur.get_f64("score")
                         count += 1
                     assert count > 0
         metrics["sec_lookup_ms"] = (time.perf_counter() - t0) * 1000.0
 
-        # 4. Batched partial updates (n_docs // 4 updates)
+        # 4. Batched partial document updates (n_docs // 4 updates)
         n_upd = max(1, n_docs // 4)
         t0 = time.perf_counter()
         with db.write_txn() as wtx:
@@ -113,7 +140,8 @@ def bench_oryqdb(tmp_dir: Path, n_docs: int) -> Dict[str, float]:
 
 def bench_sqlite(tmp_dir: Path, n_docs: int) -> Dict[str, float]:
     db_path = tmp_dir / "bench.sqlite"
-    docs = [_make_doc(i) for i in range(1, n_docs + 1)]
+    n_cats = min(20, n_docs)
+    docs = [_make_doc(i, n_cats) for i in range(1, n_docs + 1)]
     metrics: Dict[str, float] = {}
 
     conn = sqlite3.connect(db_path, isolation_level=None)
@@ -142,57 +170,71 @@ def bench_sqlite(tmp_dir: Path, n_docs: int) -> Dict[str, float]:
         assert row is not None
     metrics["pk_lookup_ms"] = (time.perf_counter() - t0) * 1000.0
 
-    # 3. Secondary indexed lookups (200 queries)
+    # 3. Secondary indexed lookups (200 queries fetching non-indexed `score`)
     t0 = time.perf_counter()
     for q in range(200):
-        cat = f"cat_{q % 20}"
-        rows = cur.execute("SELECT id FROM users WHERE category = ?", (cat,)).fetchall()
+        cat = f"cat_{q % n_cats}"
+        rows = cur.execute("SELECT score FROM users WHERE category = ?", (cat,)).fetchall()
         assert len(rows) > 0
     metrics["sec_lookup_ms"] = (time.perf_counter() - t0) * 1000.0
 
-    # 4. Batched partial updates (n_docs // 4 updates)
+    # 4. Batched partial document updates (updating both column and JSON `doc`)
     n_upd = max(1, n_docs // 4)
     t0 = time.perf_counter()
     conn.execute("BEGIN")
     for i in range(1, n_upd + 1):
-        conn.execute("UPDATE users SET score = score + 1.5 WHERE id = ?", (i,))
+        conn.execute(
+            "UPDATE users SET score = score + 1.5, doc = json_set(doc, '$.score', score + 1.5) WHERE id = ?",
+            (i,),
+        )
     conn.execute("COMMIT")
     metrics["update_ms"] = (time.perf_counter() - t0) * 1000.0
 
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
+    assert not Path(f"{db_path}-wal").exists() or Path(f"{db_path}-wal").stat().st_size == 0
     metrics["size_full_bytes"] = float(db_path.stat().st_size)
 
-    # 5. Delete 75% of docs + VACUUM
+    # 5. Delete 75% of docs + VACUUM (matching WAL/synchronous settings)
     del_start = max(2, n_docs // 4 + 1)
     conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("BEGIN")
     conn.execute("DELETE FROM users WHERE id >= ?", (del_start,))
     conn.execute("COMMIT")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     t0 = time.perf_counter()
     conn.execute("VACUUM")
     metrics["vacuum_ms"] = (time.perf_counter() - t0) * 1000.0
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
+    assert not Path(f"{db_path}-wal").exists() or Path(f"{db_path}-wal").stat().st_size == 0
     metrics["size_vacuum_bytes"] = float(db_path.stat().st_size)
     return metrics
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="OryqDB vs SQLite3 single-file benchmark")
-    parser.add_argument("--docs", type=int, default=2000, help="Number of documents (default: 2000)")
+    parser.add_argument("--docs", type=int, default=2000, help="Number of documents (>= 1, default: 2000)")
     args = parser.parse_args()
+    if args.docs < 1:
+        parser.error("--docs must be >= 1")
     n_docs = args.docs
+
+    resolved_lib = _resolve_release_lib()
+    lib_note = str(resolved_lib) if resolved_lib is not None else "auto-discovered (WARNING: build --release for representative timings)"
 
     with tempfile.TemporaryDirectory(prefix="oryq_vs_sqlite_") as td:
         tmp = Path(td)
         oryq = bench_oryqdb(tmp, n_docs)
         sql = bench_sqlite(tmp, n_docs)
 
-    print(f"# OryqDB vs SQLite3 Single-File Benchmark (N={n_docs}, Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version})\n")
+    print(f"# OryqDB vs SQLite3 Single-File Benchmark (N={n_docs}, Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version})")
+    print(f"# OryqDB library: {lib_note}\n")
     print("| Metric | OryqDB (C ABI via Python) | SQLite3 (stdlib C) |")
     print("| :--- | ---: | ---: |")
-    print(f"| Batched Insert ({n_docs} docs + 1 index) | `{oryq['insert_ms']:.2f} ms` ({n_docs / (oryq['insert_ms'] / 1000.0):,.0f} docs/s) | `{sql['insert_ms']:.2f} ms` ({n_docs / (sql['insert_ms'] / 1000.0):,.0f} docs/s) |")
-    print(f"| Primary `_id` Point Lookups ({n_docs} ops) | `{oryq['pk_lookup_ms']:.2f} ms` ({n_docs / (oryq['pk_lookup_ms'] / 1000.0):,.0f} ops/s) | `{sql['pk_lookup_ms']:.2f} ms` ({n_docs / (sql['pk_lookup_ms'] / 1000.0):,.0f} ops/s) |")
+    print(f"| Batched Insert ({n_docs} docs + 1 index) | `{oryq['insert_ms']:.2f} ms` ({_rate(n_docs, oryq['insert_ms']):,.0f} docs/s) | `{sql['insert_ms']:.2f} ms` ({_rate(n_docs, sql['insert_ms']):,.0f} docs/s) |")
+    print(f"| Primary `_id` Point Lookups ({n_docs} ops) | `{oryq['pk_lookup_ms']:.2f} ms` ({_rate(n_docs, oryq['pk_lookup_ms']):,.0f} ops/s) | `{sql['pk_lookup_ms']:.2f} ms` ({_rate(n_docs, sql['pk_lookup_ms']):,.0f} ops/s) |")
     print(f"| Secondary Index Lookups (200 scans) | `{oryq['sec_lookup_ms']:.2f} ms` | `{sql['sec_lookup_ms']:.2f} ms` |")
     print(f"| Batched Partial Updates ({max(1, n_docs // 4)} ops) | `{oryq['update_ms']:.2f} ms` | `{sql['update_ms']:.2f} ms` |")
     print(f"| `VACUUM` after 75% delete | `{oryq['vacuum_ms']:.2f} ms` | `{sql['vacuum_ms']:.2f} ms` |")

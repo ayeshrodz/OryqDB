@@ -47,12 +47,10 @@ undocumented_unsafe_blocks = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+# Must remain "unwind" so `oryq-ffi` `catch_unwind` panic guards work across the C ABI.
 panic = "unwind"
 
 [profile.release-small]
 inherits = "release"
 opt-level = "z"
 lto = "fat"
-codegen-units = 1
-strip = "symbols"
-panic = "unwind"
