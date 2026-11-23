@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple, Union
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 __all__ = [
     "OryqStatus",
     "OryqError",
@@ -518,10 +518,20 @@ class Database:
         *,
         lib_path: Optional[Union[str, os.PathLike[str]]] = None,
     ) -> Database:
+        """Opens or creates an OryqDB database (pass `":memory:"` for an ephemeral in-memory DB)."""
         lib = load_library(lib_path)
         out_db = ctypes.c_void_p()
         _check(lib, lib.oryq_db_open(str(path).encode("utf-8"), ctypes.byref(out_db)))
         return cls(lib, out_db)
+
+    @classmethod
+    def open_in_memory(
+        cls,
+        *,
+        lib_path: Optional[Union[str, os.PathLike[str]]] = None,
+    ) -> Database:
+        """Opens a fresh, isolated, zero-disk in-memory database (`":memory:"`)."""
+        return cls.open(":memory:", lib_path=lib_path)
 
     def _require_open(self) -> ctypes.c_void_p:
         if self._handle is None:

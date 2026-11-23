@@ -4,10 +4,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use oryq_engine::{
     inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, wal_path_for,
-    LockInspectionReport, PageInspectionReport, PageSize, WalInspectionReport,
+    LockInspectionReport, PageInspectionReport, PageSize, StorageIo, WalInspectionReport,
 };
 use oryq_index::IndexKind;
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result};
@@ -115,10 +116,19 @@ pub fn run_integrity_check(db: &Database) -> Result<IntegrityReport> {
 pub fn run_online_backup(
     db: &Database,
     source_path: &Path,
+    source_in_memory: bool,
     page_size: PageSize,
     dest: &Path,
 ) -> Result<BackupReport> {
-    if paths_refer_to_same_target(source_path, dest) {
+    if dest == Path::new(Database::IN_MEMORY_PATH) {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "admin::run_online_backup",
+            "backup destination must be a real file path, not ':memory:'",
+        ));
+    }
+    if !source_in_memory && paths_refer_to_same_target(source_path, dest) {
         return Err(ErrorEnvelope::new(
             ErrorCategory::InvalidArgument,
             MODULE_ID,
@@ -148,132 +158,14 @@ pub fn run_online_backup(
     let _ = fs::remove_file(&tmp_wal);
 
     let result = (|| -> Result<BackupReport> {
-        // Hold one consistent MVCC read snapshot for the entire backup copy.
-        let rtx = db.begin_read()?;
-        let col_names = rtx.list_collections()?;
-
-        let mut collections_copied = 0usize;
-        let mut documents_copied = 0usize;
-        let sealed;
-
-        {
+        let (collections_copied, documents_copied, sealed) = {
             let backup_cfg = DatabaseConfig {
                 page_size,
                 ..DatabaseConfig::default()
             };
             let backup_db = Database::open(&tmp_path, backup_cfg)?;
-            {
-                let mut wtx = backup_db.begin_write()?;
-                for col_name in &col_names {
-                    let src_col = rtx.collection(col_name)?;
-                    wtx.create_collection(col_name)?;
-                    let mut dst_col = wtx.collection(col_name)?;
-
-                    // Recreate non-primary indexes
-                    for idx in src_col.list_indexes() {
-                        match idx.kind {
-                            IndexKind::Primary => {}
-                            IndexKind::Secondary => {
-                                if let Some(f) = idx.fields.first() {
-                                    dst_col.create_index(
-                                        f.path.as_str(),
-                                        f.order,
-                                        idx.unique,
-                                        idx.sparse,
-                                        Some(&idx.name),
-                                    )?;
-                                }
-                            }
-                            IndexKind::Compound => {
-                                let specs: Vec<(&str, oryq_index::SortOrder)> = idx
-                                    .fields
-                                    .iter()
-                                    .map(|f| (f.path.as_str(), f.order))
-                                    .collect();
-                                dst_col.create_compound_index(
-                                    &specs,
-                                    idx.unique,
-                                    idx.sparse,
-                                    Some(&idx.name),
-                                )?;
-                            }
-                            IndexKind::Pluggable(ref kind_name) => {
-                                #[cfg(feature = "fts")]
-                                if kind_name == "fts" {
-                                    let field_paths: Vec<&str> =
-                                        idx.fields.iter().map(|f| f.path.as_str()).collect();
-                                    dst_col.create_fts_index(&field_paths, Some(&idx.name))?;
-                                    continue;
-                                }
-                                #[cfg(feature = "vec")]
-                                if kind_name == "vec" {
-                                    let field = idx.fields.first().ok_or_else(|| {
-                                        ErrorEnvelope::new(
-                                            ErrorCategory::Corruption,
-                                            MODULE_ID,
-                                            "admin::run_online_backup",
-                                            format!(
-                                                "vector index '{}' missing field specification",
-                                                idx.name
-                                            ),
-                                        )
-                                    })?;
-                                    let opts_raw =
-                                        idx.options_json.as_deref().ok_or_else(|| {
-                                            ErrorEnvelope::new(
-                                                ErrorCategory::Corruption,
-                                                MODULE_ID,
-                                                "admin::run_online_backup",
-                                                format!(
-                                                    "vector index '{}' missing options_json",
-                                                    idx.name
-                                                ),
-                                            )
-                                        })?;
-                                    let opts = oryq_vec::VectorIndexOptions::from_json(opts_raw)?;
-                                    dst_col.create_vector_index(
-                                        field.path.as_str(),
-                                        opts,
-                                        Some(&idx.name),
-                                    )?;
-                                    continue;
-                                }
-                                return Err(ErrorEnvelope::new(
-                                    ErrorCategory::UnsupportedFeature,
-                                    MODULE_ID,
-                                    "admin::run_online_backup",
-                                    format!(
-                                        "cannot back up pluggable index '{}' (kind '{kind_name}') without its provider enabled",
-                                        idx.name
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-
-                    // Copy all documents from the pinned snapshot
-                    for doc in src_col.find_all()? {
-                        dst_col.insert(&doc)?;
-                        documents_copied += 1;
-                    }
-                    collections_copied += 1;
-                }
-                wtx.commit()?;
-            }
-
-            // Checkpoint & seal backup so it is standalone (wal_required == false)
-            backup_db.checkpoint(true)?;
-            let check = backup_db.integrity_check()?;
-            if !check.ok {
-                return Err(ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "admin::run_online_backup",
-                    format!("backup integrity verification failed: {:?}", check.issues),
-                ));
-            }
-            sealed = backup_db.is_sealed()?;
-        }
+            copy_snapshot_into_db(db, &backup_db)?
+        };
 
         // Remove any empty companion WAL before atomic publish
         let _ = fs::remove_file(&tmp_wal);
@@ -307,8 +199,154 @@ pub fn run_online_backup(
     result
 }
 
+fn copy_snapshot_into_db(db: &Database, target_db: &Database) -> Result<(usize, usize, bool)> {
+    // Hold one consistent MVCC read snapshot for the entire backup/compaction copy.
+    let rtx = db.begin_read()?;
+    let col_names = rtx.list_collections()?;
+
+    let mut collections_copied = 0usize;
+    let mut documents_copied = 0usize;
+
+    {
+        let mut wtx = target_db.begin_write()?;
+        for col_name in &col_names {
+            let src_col = rtx.collection(col_name)?;
+            wtx.create_collection(col_name)?;
+            let mut dst_col = wtx.collection(col_name)?;
+
+            // Recreate non-primary indexes
+            for idx in src_col.list_indexes() {
+                match idx.kind {
+                    IndexKind::Primary => {}
+                    IndexKind::Secondary => {
+                        if let Some(f) = idx.fields.first() {
+                            dst_col.create_index(
+                                f.path.as_str(),
+                                f.order,
+                                idx.unique,
+                                idx.sparse,
+                                Some(&idx.name),
+                            )?;
+                        }
+                    }
+                    IndexKind::Compound => {
+                        let specs: Vec<(&str, oryq_index::SortOrder)> = idx
+                            .fields
+                            .iter()
+                            .map(|f| (f.path.as_str(), f.order))
+                            .collect();
+                        dst_col.create_compound_index(
+                            &specs,
+                            idx.unique,
+                            idx.sparse,
+                            Some(&idx.name),
+                        )?;
+                    }
+                    IndexKind::Pluggable(ref kind_name) => {
+                        #[cfg(feature = "fts")]
+                        if kind_name == "fts" {
+                            let field_paths: Vec<&str> =
+                                idx.fields.iter().map(|f| f.path.as_str()).collect();
+                            dst_col.create_fts_index(&field_paths, Some(&idx.name))?;
+                            continue;
+                        }
+                        #[cfg(feature = "vec")]
+                        if kind_name == "vec" {
+                            let field = idx.fields.first().ok_or_else(|| {
+                                ErrorEnvelope::new(
+                                    ErrorCategory::Corruption,
+                                    MODULE_ID,
+                                    "admin::run_online_backup",
+                                    format!(
+                                        "vector index '{}' missing field specification",
+                                        idx.name
+                                    ),
+                                )
+                            })?;
+                            let opts_raw = idx.options_json.as_deref().ok_or_else(|| {
+                                ErrorEnvelope::new(
+                                    ErrorCategory::Corruption,
+                                    MODULE_ID,
+                                    "admin::run_online_backup",
+                                    format!("vector index '{}' missing options_json", idx.name),
+                                )
+                            })?;
+                            let opts = oryq_vec::VectorIndexOptions::from_json(opts_raw)?;
+                            dst_col.create_vector_index(
+                                field.path.as_str(),
+                                opts,
+                                Some(&idx.name),
+                            )?;
+                            continue;
+                        }
+                        return Err(ErrorEnvelope::new(
+                            ErrorCategory::UnsupportedFeature,
+                            MODULE_ID,
+                            "admin::run_online_backup",
+                            format!(
+                                "cannot back up pluggable index '{}' (kind '{kind_name}') without its provider enabled",
+                                idx.name
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // Copy all documents from the pinned snapshot
+            for doc in src_col.find_all()? {
+                dst_col.insert(&doc)?;
+                documents_copied += 1;
+            }
+            collections_copied += 1;
+        }
+        wtx.commit()?;
+    }
+
+    // Checkpoint & seal target so it is standalone (wal_required == false)
+    target_db.checkpoint(true)?;
+    let check = target_db.integrity_check()?;
+    if !check.ok {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "admin::run_online_backup",
+            format!("backup integrity verification failed: {:?}", check.issues),
+        ));
+    }
+    let sealed = target_db.is_sealed()?;
+    Ok((collections_copied, documents_copied, sealed))
+}
+
+fn build_in_memory_compacted_image(
+    db: &Database,
+    io: &Arc<dyn StorageIo>,
+    page_size: PageSize,
+    tmp_path: &Path,
+) -> Result<(usize, usize)> {
+    let tmp_wal = wal_path_for(tmp_path);
+    let _ = io.remove_file(tmp_path);
+    let _ = io.remove_file(&tmp_wal);
+
+    let res = (|| -> Result<(usize, usize)> {
+        let backup_cfg = DatabaseConfig {
+            page_size,
+            ..DatabaseConfig::default()
+        };
+        let target_db = Database::open_with_io(Arc::clone(io), tmp_path, backup_cfg)?;
+        let (collections_copied, documents_copied, _) = copy_snapshot_into_db(db, &target_db)?;
+        Ok((collections_copied, documents_copied))
+    })();
+
+    let _ = io.remove_file(&tmp_wal);
+    if res.is_err() {
+        let _ = io.remove_file(tmp_path);
+    }
+    res
+}
+
 /// Compacts `db` in place (`VACUUM`), reclaiming freelist pages, shrinking the `.oryq` file on
-/// disk, and leaving a single sealed `.oryq` file with no `.oryq-wal` sidecar.
+/// disk (or in memory for `:memory:`), and leaving a single sealed `.oryq` file with no `.oryq-wal`
+/// sidecar.
 ///
 /// Fails with `ErrorCategory::Busy` if any active read transaction is currently open, or
 /// `ErrorCategory::UnsupportedFeature` if a collection contains a disabled pluggable index.
@@ -316,6 +354,7 @@ pub fn run_vacuum(
     db: &Database,
     engine: &oryq_engine::StorageEngine,
     source_path: &Path,
+    in_memory: bool,
     page_size: PageSize,
 ) -> Result<VacuumReport> {
     if engine.is_read_only() {
@@ -336,6 +375,35 @@ pub fn run_vacuum(
     }
 
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    if in_memory {
+        let tmp_path = PathBuf::from(format!(
+            "{}.vacuum.tmp.{}.{seq}",
+            source_path.display(),
+            std::process::id()
+        ));
+        let tmp_wal = wal_path_for(&tmp_path);
+        let io = Arc::clone(engine.io());
+        let res = engine
+            .run_exclusive_vacuum(&tmp_path, |p| {
+                build_in_memory_compacted_image(db, &io, page_size, p)
+            })
+            .map(
+                |((collections_compacted, documents_compacted), bytes_before, bytes_after)| {
+                    VacuumReport {
+                        bytes_before,
+                        bytes_after,
+                        bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
+                        collections_compacted,
+                        documents_compacted,
+                        sealed: true,
+                    }
+                },
+            );
+        let _ = engine.io().remove_file(&tmp_path);
+        let _ = engine.io().remove_file(&tmp_wal);
+        return res;
+    }
+
     let tmp_path =
         source_path.with_extension(format!("oryq.vacuum.tmp.{}.{seq}", std::process::id()));
     let tmp_wal = wal_path_for(&tmp_path);
@@ -344,7 +412,7 @@ pub fn run_vacuum(
 
     let res = engine
         .run_exclusive_vacuum(&tmp_path, |p| {
-            run_online_backup(db, source_path, page_size, p)
+            run_online_backup(db, source_path, false, page_size, p)
         })
         .map(|(backup, bytes_before, bytes_after)| VacuumReport {
             bytes_before,

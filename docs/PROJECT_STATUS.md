@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.12.0 — Single-File Auto-Seal on Close & `VACUUM` Compaction (Issue #28)
-STATUS: Active `v0.12.x` SQLite-Parity Polish — single-file auto-seal on close and in-place `VACUUM` compaction implemented across Rust, C ABI v1.2, CLI, and Python.
+MILESTONE: v0.12.1 — In-Memory Ephemeral Databases `:memory:` (Issue #29)
+STATUS: Active `v0.12.x` SQLite-Parity Polish — pure-safe `MemoryVfs` and `:memory:` ephemeral databases implemented across Rust, C ABI v1.2, and Python with online backup to single-file `.oryq`.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_engine::{
     clone_error_envelope, BatchCommitReport, BatchItem, BatchTx, CheckpointOutcome, CommitReceipt,
-    GroupCommitQueue, LockInspectionReport, OsVfs, PageInspectionReport, PageSize, StorageEngine,
-    StorageIo, WalInspectionReport,
+    GroupCommitQueue, LockInspectionReport, MemoryVfs, OsVfs, PageInspectionReport, PageSize,
+    StorageEngine, StorageIo, WalInspectionReport,
 };
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, TxId};
 
@@ -32,6 +32,7 @@ impl BatchTx for CoreWriteBatchTx {
 #[derive(Debug)]
 struct DatabaseInner {
     path: PathBuf,
+    in_memory: bool,
     page_size: PageSize,
     engine: StorageEngine,
     registries: CoreRegistries,
@@ -46,10 +47,31 @@ pub struct Database {
 }
 
 impl Database {
+    /// Special path sentinel that opens an isolated, zero-disk in-memory database.
+    pub const IN_MEMORY_PATH: &'static str = ":memory:";
+
     /// Opens or creates an OryqDB database at `path` using the default OS VFS.
+    ///
+    /// Passing `":memory:"` ([`Database::IN_MEMORY_PATH`]) opens a fresh, isolated,
+    /// zero-disk in-memory database backed by [`oryq_engine::MemoryVfs`].
     pub fn open(path: impl AsRef<Path>, config: DatabaseConfig) -> Result<Self> {
+        let path_ref = path.as_ref();
+        if path_ref == Path::new(Self::IN_MEMORY_PATH) {
+            return Self::open_in_memory_with_config(config);
+        }
         let vfs = Arc::new(OsVfs::new());
-        Self::open_with_io(vfs, path, config)
+        Self::open_with_io_internal(vfs, path_ref, config, false)
+    }
+
+    /// Opens a fresh, isolated, zero-disk in-memory database with default configuration.
+    pub fn open_in_memory() -> Result<Self> {
+        Self::open_in_memory_with_config(DatabaseConfig::default())
+    }
+
+    /// Opens a fresh, isolated, zero-disk in-memory database with custom configuration.
+    pub fn open_in_memory_with_config(config: DatabaseConfig) -> Result<Self> {
+        let vfs = Arc::new(MemoryVfs::new());
+        Self::open_with_io_internal(vfs, Path::new(Self::IN_MEMORY_PATH), config, true)
     }
 
     /// Opens or creates an OryqDB database using a caller-supplied [`StorageIo`] VFS.
@@ -58,13 +80,25 @@ impl Database {
         path: impl AsRef<Path>,
         config: DatabaseConfig,
     ) -> Result<Self> {
+        let path_ref = path.as_ref();
+        let in_memory = io.is_in_memory() || path_ref == Path::new(Self::IN_MEMORY_PATH);
+        Self::open_with_io_internal(io, path_ref, config, in_memory)
+    }
+
+    fn open_with_io_internal(
+        io: Arc<dyn StorageIo>,
+        path: &Path,
+        config: DatabaseConfig,
+        in_memory: bool,
+    ) -> Result<Self> {
         let uuid = generate_database_uuid();
-        let engine = StorageEngine::open(io, path.as_ref(), config.to_engine_config(), uuid)?;
+        let engine = StorageEngine::open(io, path, config.to_engine_config(), uuid)?;
         let registries = CoreRegistries::default_v1();
         let batch_queue = GroupCommitQueue::new(config.group_commit);
         Ok(Self {
             inner: Arc::new(DatabaseInner {
-                path: path.as_ref().to_path_buf(),
+                path: path.to_path_buf(),
+                in_memory,
                 page_size: config.page_size,
                 engine,
                 registries,
@@ -277,6 +311,11 @@ impl Database {
         &self.inner.path
     }
 
+    /// Returns `true` if this database is backed by an ephemeral in-memory VFS (`:memory:`).
+    pub fn is_in_memory(&self) -> bool {
+        self.inner.in_memory
+    }
+
     /// Verifies snapshot-consistent collection & index integrity across the database.
     pub fn integrity_check(&self) -> Result<IntegrityReport> {
         run_integrity_check(self)
@@ -284,7 +323,13 @@ impl Database {
 
     /// Creates a standalone, sealed online backup of this database at `dest`.
     pub fn backup_to(&self, dest: impl AsRef<Path>) -> Result<BackupReport> {
-        run_online_backup(self, &self.inner.path, self.inner.page_size, dest.as_ref())
+        run_online_backup(
+            self,
+            &self.inner.path,
+            self.inner.in_memory,
+            self.inner.page_size,
+            dest.as_ref(),
+        )
     }
 
     /// Compacts this database in place (`VACUUM`), reclaiming free space, shrinking the `.oryq`
@@ -294,6 +339,7 @@ impl Database {
             self,
             &self.inner.engine,
             &self.inner.path,
+            self.inner.in_memory,
             self.inner.page_size,
         )
     }

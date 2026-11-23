@@ -41,7 +41,9 @@ pub use inspect::{
     inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, LockInspectionReport,
     PageInspectionReport, WalInspectionReport,
 };
-pub use io::{FileHandle, FileIdentity, FileLease, FileRegistry, OpenMode, OsVfs, StorageIo};
+pub use io::{
+    FileHandle, FileIdentity, FileLease, FileRegistry, MemoryVfs, OpenMode, OsVfs, StorageIo,
+};
 pub use oryq_types::{PageId, Result, SnapshotId, TxId};
 pub use pager::{FreelistManager, OverflowStore, PageAllocator, PageBuf, PageGuard, Pager};
 pub use ports::{CheckpointOutcome, CommitReceipt, RecordCompactor};

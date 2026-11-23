@@ -76,7 +76,8 @@ pub unsafe extern "C" fn oryq_free_string(ptr: *mut c_char) {
     }
 }
 
-/// Opens or creates an OryqDB database file at `path_utf8`.
+/// Opens or creates an OryqDB database file at `path_utf8` (pass `":memory:"` for an isolated,
+/// zero-disk ephemeral in-memory database).
 ///
 /// # Safety
 /// `path_utf8` must be a valid NUL-terminated UTF-8 string; `out_db` must be a valid writable pointer.
