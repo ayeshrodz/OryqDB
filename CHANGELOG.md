@@ -7,7 +7,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.12.4` (#32): Binary footprint optimization, SQLite comparison benchmark & final pre-1.0 soak audit.
+- `1.0.0`: Production GA evaluation (all `0.12.x` pre-1.0 gates completed).
+
+## [0.12.4] - 2026-11-24
+
+### Added (#32 — Binary Footprint Optimization, SQLite Benchmark & Final Pre-1.0 Audit)
+- Added `strip = "symbols"` to `[profile.release]` and introduced opt-in `[profile.release-small]` (`opt-level = "z"`, fat LTO, stripped, `panic = "unwind"`) in `Cargo.toml`, shrinking `liboryq.so` to `1.2 MiB` minimal / `1.4 MiB` hybrid (smaller than system `libsqlite3.so` at `1.5 MiB`) and `oryq` CLI to `954 KiB`.
+- Added reproducible single-file benchmark script `tools/bench_vs_sqlite.py` comparing OryqDB vs SQLite3 across batched inserts, point lookups, secondary scans, partial updates, `VACUUM`, and single-file size on disk.
+- Published full release footprint and SQLite comparison tables in `docs/BENCHMARK_RESULTS.md`.
+- Completed final `cargo +nightly miri test` (24/24 passed, 0 UB/leaks) and `cargo audit` (0 vulnerabilities across 51 dependencies) and updated `docs/PRE_1_0_READINESS_CHECKLIST.md`.
 
 ## [0.12.3] - 2026-11-24
 

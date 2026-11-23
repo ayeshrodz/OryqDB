@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
-    <Version>0.12.3</Version>
+    <Version>0.12.4</Version>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Official C# (.NET P/Invoke) bindings for OryqDB (C ABI v1.2).</Description>
   </PropertyGroup>
