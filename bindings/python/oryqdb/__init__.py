@@ -11,18 +11,35 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Iterator, Optional, Tuple, Union
+from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 
-__version__ = "0.12.1"
+__version__ = "0.12.2"
 __all__ = [
     "OryqStatus",
     "OryqError",
+    "VectorMetric",
+    "VectorQuantization",
     "Database",
     "ReadTxn",
     "WriteTxn",
     "Cursor",
     "load_library",
 ]
+
+
+class VectorMetric(enum.IntEnum):
+    """Distance metric for vector similarity indexes (`oryq_create_vector_index`)."""
+
+    COSINE = 0
+    L2 = 1
+    DOT_PRODUCT = 2
+
+
+class VectorQuantization(enum.IntEnum):
+    """Storage quantization for vector similarity indexes (`oryq_create_vector_index`)."""
+
+    F32 = 0
+    INT8 = 1
 
 
 class OryqStatus(enum.IntEnum):
@@ -197,8 +214,36 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
         POINTER(c_size_t),
     ]
     lib.oryq_cursor_get_utf8.restype = c_int
+    lib.oryq_cursor_get_score.argtypes = [c_void_p, POINTER(c_double)]
+    lib.oryq_cursor_get_score.restype = c_int
     lib.oryq_cursor_close.argtypes = [c_void_p]
     lib.oryq_cursor_close.restype = c_int
+
+    # Optional Hybrid FTS & Vector Search (ABI v1.2)
+    lib.oryq_create_fts_index.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
+    lib.oryq_create_fts_index.restype = c_int
+    lib.oryq_search_fts.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p, c_size_t, POINTER(c_void_p)]
+    lib.oryq_search_fts.restype = c_int
+    lib.oryq_create_vector_index.argtypes = [
+        c_void_p,
+        c_char_p,
+        c_char_p,
+        c_uint32,
+        c_int32,
+        c_int32,
+        c_char_p,
+    ]
+    lib.oryq_create_vector_index.restype = c_int
+    lib.oryq_search_vector.argtypes = [
+        c_void_p,
+        c_char_p,
+        c_char_p,
+        POINTER(ctypes.c_float),
+        c_size_t,
+        c_size_t,
+        POINTER(c_void_p),
+    ]
+    lib.oryq_search_vector.restype = c_int
     return lib
 
 
@@ -339,6 +384,13 @@ class Cursor:
             return ""
         return ctypes.string_at(ptr.value, length.value).decode("utf-8")
 
+    def get_score(self) -> float:
+        """Returns the BM25 relevance score (FTS) or distance (Vector) for the current row."""
+        h = self._require_open()
+        out = ctypes.c_double()
+        _check(self._lib, self._lib.oryq_cursor_get_score(h, ctypes.byref(out)))
+        return float(out.value)
+
 
 class ReadTxn:
     """Snapshot-isolated read transaction backed by `OryqReadTxn*`."""
@@ -373,6 +425,64 @@ class ReadTxn:
                 h,
                 collection.encode("utf-8"),
                 _to_json_bytes(pipeline),
+                ctypes.byref(out_cursor),
+            ),
+        )
+        return Cursor(self._lib, out_cursor)
+
+    def search_fts(
+        self,
+        collection: str,
+        index_name: str,
+        query_text: str,
+        *,
+        limit: int = 10,
+    ) -> Cursor:
+        """Executes an Okapi BM25 full-text search (requires `oryq-ffi --features fts`)."""
+        if limit < 0:
+            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "limit must be >= 0")
+        h = self._require_open()
+        out_cursor = ctypes.c_void_p()
+        _check(
+            self._lib,
+            self._lib.oryq_search_fts(
+                h,
+                collection.encode("utf-8"),
+                index_name.encode("utf-8"),
+                query_text.encode("utf-8"),
+                int(limit),
+                ctypes.byref(out_cursor),
+            ),
+        )
+        return Cursor(self._lib, out_cursor)
+
+    def search_vector(
+        self,
+        collection: str,
+        index_name: str,
+        query_vector: Sequence[float],
+        *,
+        top_k: int = 10,
+    ) -> Cursor:
+        """Executes a top-k vector similarity search (requires `oryq-ffi --features vec`)."""
+        if top_k < 0:
+            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "top_k must be >= 0")
+        h = self._require_open()
+        n = len(query_vector)
+        if n == 0:
+            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "query_vector must not be empty")
+        arr_type = ctypes.c_float * n
+        arr = arr_type(*(float(x) for x in query_vector))
+        out_cursor = ctypes.c_void_p()
+        _check(
+            self._lib,
+            self._lib.oryq_search_vector(
+                h,
+                collection.encode("utf-8"),
+                index_name.encode("utf-8"),
+                arr,
+                n,
+                int(top_k),
                 ctypes.byref(out_cursor),
             ),
         )
@@ -446,6 +556,54 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_drop_index(
                 self._require_open(), collection.encode("utf-8"), index_name.encode("utf-8")
+            ),
+        )
+
+    def create_fts_index(
+        self,
+        collection: str,
+        fields: Union[str, Sequence[str]],
+        *,
+        name: Optional[str] = None,
+    ) -> None:
+        """Creates a BM25 full-text search index (requires `oryq-ffi --features fts`)."""
+        fields_csv = fields if isinstance(fields, str) else ",".join(fields)
+        _check(
+            self._lib,
+            self._lib.oryq_create_fts_index(
+                self._require_open(),
+                collection.encode("utf-8"),
+                fields_csv.encode("utf-8"),
+                name.encode("utf-8") if name is not None else None,
+            ),
+        )
+
+    def create_vector_index(
+        self,
+        collection: str,
+        field_path: str,
+        dimensions: int,
+        *,
+        metric: VectorMetric = VectorMetric.COSINE,
+        quantization: VectorQuantization = VectorQuantization.F32,
+        name: Optional[str] = None,
+    ) -> None:
+        """Creates a dense vector similarity index (requires `oryq-ffi --features vec`)."""
+        if not (0 < dimensions <= 0xFFFF_FFFF):
+            raise OryqError(
+                OryqStatus.ERR_INVALID_ARGUMENT,
+                "dimensions must be in range 1..=4294967295",
+            )
+        _check(
+            self._lib,
+            self._lib.oryq_create_vector_index(
+                self._require_open(),
+                collection.encode("utf-8"),
+                field_path.encode("utf-8"),
+                int(dimensions),
+                int(metric),
+                int(quantization),
+                name.encode("utf-8") if name is not None else None,
             ),
         )
 

@@ -41,7 +41,7 @@ jobs:
       - name: Run Clippy
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy -p oryq-core --features fts,vec --all-targets -- -D warnings
+          cargo clippy -p oryq-core -p oryq-ffi -p oryq-cli --features fts,vec --all-targets -- -D warnings
 
       - name: Run architecture boundary check (PR diff)
         if: github.event_name == 'pull_request'
@@ -109,6 +109,12 @@ jobs:
           cargo test -p oryq-core --features fts
           cargo test -p oryq-core --features vec
           cargo test -p oryq-core --features fts,vec
+          cargo test -p oryq-ffi --features fts
+          cargo test -p oryq-ffi --features vec
+          cargo test -p oryq-ffi --features fts,vec
+          cargo test -p oryq-cli --features fts
+          cargo test -p oryq-cli --features vec
+          cargo test -p oryq-cli --features fts,vec
 
       - name: Compile and run native C99/C++17 FFI integration tests & examples
         if: runner.os != 'Windows'
@@ -126,10 +132,16 @@ jobs:
 
       - name: Run Python ctypes binding tests (Linux / macOS)
         if: runner.os != 'Windows'
-        run: python3 -m unittest discover -s bindings/python/tests -v
+        run: |
+          python3 -m unittest discover -s bindings/python/tests -v
+          cargo build -p oryq-ffi --features fts,vec
+          ORYQ_EXPECT_HYBRID=1 python3 -m unittest discover -s bindings/python/tests -v
 
       - name: Run Python ctypes binding tests (Windows)
         if: runner.os == 'Windows'
         run: |
           cargo build -p oryq-ffi
+          python -m unittest discover -s bindings/python/tests -v
+          cargo build -p oryq-ffi --features fts,vec
+          $env:ORYQ_EXPECT_HYBRID = "1"
           python -m unittest discover -s bindings/python/tests -v

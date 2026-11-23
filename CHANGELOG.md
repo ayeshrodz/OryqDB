@@ -7,9 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.12.2` (#30): Hybrid FTS & Vector search in C ABI v1.2, CLI, and Python.
 - `0.12.3` (#31): Official Go (`cgo`), Node.js, and C# (.NET P/Invoke) bindings.
 - `0.12.4` (#32): Binary footprint optimization, SQLite comparison benchmark & final pre-1.0 soak audit.
+
+## [0.12.2] - 2026-11-24
+
+### Added (#30 — Hybrid FTS & Vector Search in C ABI v1.2, CLI, and Python)
+- Added optional `fts` and `vec` Cargo features to `oryq-ffi` and `oryq-cli` (default builds remain minimal).
+- Added additive C ABI v1.2 symbols (`include/oryq.h` / `oryq-ffi`): `oryq_create_fts_index`, `oryq_search_fts`, `oryq_create_vector_index`, `oryq_search_vector`, and `oryq_cursor_get_score`, returning `ORYQ_ERR_UNSUPPORTED_FEATURE` cleanly when compiled without the corresponding feature.
+- Added optional CLI commands: `oryq fts-index`, `oryq fts-search`, `oryq vec-index`, and `oryq vec-search`.
+- Added Python `oryqdb` hybrid search API (`VectorMetric`, `VectorQuantization`, `WriteTxn.create_fts_index`, `WriteTxn.create_vector_index`, `ReadTxn.search_fts`, `ReadTxn.search_vector`, `Cursor.get_score`) and updated CI + tests to verify both minimal and `--features fts,vec` builds.
+- Recorded `CC-0024` in `architecture/contract-changes.toml`.
 
 ## [0.12.1] - 2026-11-22
 

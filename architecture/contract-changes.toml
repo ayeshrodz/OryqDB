@@ -391,3 +391,26 @@ evidence = [
     "python3 -m unittest discover -s bindings/python/tests -v",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0024"
+modules = ["ffi", "cli"]
+files = [
+    "crates/oryq-ffi/Cargo.toml",
+    "crates/oryq-ffi/src/api.rs",
+    "include/oryq.h",
+    "crates/oryq-cli/Cargo.toml",
+    "crates/oryq-cli/src/main.rs",
+]
+reason = "Implement Issue #30 (v0.12.2): feature-gated hybrid FTS (BM25) and Vector similarity search across C ABI v1.2 (oryq_create_fts_index, oryq_search_fts, oryq_create_vector_index, oryq_search_vector, oryq_cursor_get_score), oryq CLI (fts-index, fts-search, vec-index, vec-search), and Python oryqdb bindings."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-ffi",
+    "cargo test -p oryq-ffi --features fts,vec",
+    "cargo test -p oryq-cli",
+    "cargo test -p oryq-cli --features fts,vec",
+    "python3 -m unittest discover -s bindings/python/tests -v",
+    "ORYQ_EXPECT_HYBRID=1 python3 -m unittest discover -s bindings/python/tests -v",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

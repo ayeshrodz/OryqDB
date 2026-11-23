@@ -2,7 +2,7 @@
 
 An open-source (`MIT`), embedded, serverless, single-file NoSQL document database engine written in Rust with a native C ABI (`include/oryq.h`) and CLI (`oryq`).
 
-> **Current Version:** `0.12.1` (In-Memory `:memory:` Ephemeral DBs, Single-File Auto-Seal on Close & `VACUUM`, C ABI v1.2, Python/C99/C++17 Bindings, FTS/Vector Search, `.oryq-shm`, Group Commit; see [PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md).)
+> **Current Version:** `0.12.2` (Hybrid FTS & Vector Search in C ABI v1.2/CLI/Python, In-Memory `:memory:`, Single-File Auto-Seal & `VACUUM`, `.oryq-shm`, Group Commit; see [PRE_1_0_READINESS_CHECKLIST.md](docs/PRE_1_0_READINESS_CHECKLIST.md).)
 
 ## Design Overview
 
