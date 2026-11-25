@@ -35,6 +35,19 @@ fn read_cstr<'a>(ptr: *const c_char, name: &str) -> Result<&'a str, (OryqStatus,
 }
 
 fn parse_id_json(id_json: &str) -> Result<Value, (OryqStatus, String)> {
+    let trimmed = id_json.trim();
+    // Fast path for plain non-leading-zero JSON integer `_id` literals (avoids serde_json + DocBuf).
+    if !trimmed.is_empty() && trimmed != "-0" {
+        let digits = trimmed.strip_prefix('-').unwrap_or(trimmed);
+        let valid_json_int = !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && (digits.len() == 1 || !digits.starts_with('0'));
+        if valid_json_int {
+            if let Ok(n) = trimmed.parse::<i64>() {
+                return Ok(Value::Int64(n));
+            }
+        }
+    }
     let wrapped = format!(r#"{{"_id":{id_json}}}"#);
     let (doc, _) =
         from_json_str(&wrapped, None).map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;

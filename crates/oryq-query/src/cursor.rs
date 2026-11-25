@@ -25,6 +25,14 @@ pub struct QueryCursor {
 }
 
 impl QueryCursor {
+    /// Constructs a [`QueryCursor`] directly from pre-fetched rows and an [`ExplainPlan`].
+    pub fn from_rows(rows: Vec<DocumentBuf>, plan: ExplainPlan) -> Self {
+        Self {
+            rows: rows.into_iter(),
+            plan,
+        }
+    }
+
     pub fn plan(&self) -> &ExplainPlan {
         &self.plan
     }

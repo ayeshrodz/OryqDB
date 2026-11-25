@@ -26,6 +26,7 @@ use oryq_types::{
 };
 
 use crate::adapters::DocumentRecordCompactor;
+use crate::api::read::with_value_view;
 use crate::catalog::{
     delete_collection_entry, load_catalog_meta, load_collection_entry, save_catalog_meta,
     save_collection_entry, validate_collection_name, CatalogEntry,
@@ -336,6 +337,26 @@ pub fn insert_doc_stmt(
     doc: &DocumentBuf,
     max_document_bytes: usize,
 ) -> Result<(Value, RecordId)> {
+    let mut entry = load_collection_entry(tx, tx.catalog_root_page_id(), collection_name)?
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::NotFound,
+                MODULE_ID,
+                "write::insert_doc_stmt",
+                format!("collection '{collection_name}' does not exist"),
+            )
+        })?;
+    insert_doc_with_entry(tx, registries, &mut entry, doc, max_document_bytes)
+}
+
+/// Inserts `doc` using a pre-loaded [`CatalogEntry`], updating `entry` in place only on success.
+pub(crate) fn insert_doc_with_entry(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    entry: &mut CatalogEntry,
+    doc: &DocumentBuf,
+    max_document_bytes: usize,
+) -> Result<(Value, RecordId)> {
     let doc_with_id = ensure_document_id(doc)?;
     if doc_with_id.len() > max_document_bytes {
         return Err(ErrorEnvelope::new(
@@ -355,35 +376,27 @@ pub fn insert_doc_stmt(
         .to_owned_value();
 
     let sp = tx.savepoint();
+    let mut next_entry = entry.clone();
     let res = (|| -> Result<(Value, RecordId)> {
         let catalog_root = tx.catalog_root_page_id();
-        let mut entry =
-            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "write::insert_doc_stmt",
-                    format!("collection '{collection_name}' does not exist"),
-                )
-            })?;
 
-        let record_id = entry.next_record_id;
-        entry.next_record_id = record_id.checked_next()?;
+        let record_id = next_entry.next_record_id;
+        next_entry.next_record_id = record_id.checked_next()?;
 
-        let mut data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
         let rec_val = encode_collection_record(&doc_with_id);
         data_tree.insert(tx, &rec_key, &rec_val)?;
-        entry.data_root_page_id = data_tree.root();
+        next_entry.data_root_page_id = data_tree.root();
 
         let view = doc_with_id.view();
-        for desc in &mut entry.indexes {
+        for desc in &mut next_entry.indexes {
             let provider = registries.indexes.require(&desc.provider_id)?;
             let maint = provider.on_insert(tx, desc, record_id, &view)?;
             desc.root_page_id = maint.new_root_page_id;
         }
 
-        let new_catalog_root = save_collection_entry(tx, catalog_root, &entry)?;
+        let new_catalog_root = save_collection_entry(tx, catalog_root, &next_entry)?;
         tx.set_catalog_root_page_id(new_catalog_root);
         Ok((id_value, record_id))
     })();
@@ -391,6 +404,7 @@ pub fn insert_doc_stmt(
     match res {
         Ok(ok) => {
             tx.release_savepoint(sp)?;
+            *entry = next_entry;
             Ok(ok)
         }
         Err(err) => {
@@ -409,27 +423,49 @@ pub fn update_by_id_stmt(
     update_spec: &UpdateSpec,
     max_document_bytes: usize,
 ) -> Result<bool> {
+    let mut entry = load_collection_entry(tx, tx.catalog_root_page_id(), collection_name)?
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::NotFound,
+                MODULE_ID,
+                "write::update_by_id_stmt",
+                format!("collection '{collection_name}' does not exist"),
+            )
+        })?;
+    update_by_id_with_entry(
+        tx,
+        registries,
+        &mut entry,
+        id_value,
+        update_spec,
+        max_document_bytes,
+    )
+}
+
+/// Applies `update_spec` using a pre-loaded [`CatalogEntry`], skipping `save_collection_entry`
+/// whenever no tree root page changed.
+pub(crate) fn update_by_id_with_entry(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    entry: &mut CatalogEntry,
+    id_value: &Value,
+    update_spec: &UpdateSpec,
+    max_document_bytes: usize,
+) -> Result<bool> {
     let sp = tx.savepoint();
+    let mut next_entry = entry.clone();
     let res = (|| -> Result<bool> {
         let catalog_root = tx.catalog_root_page_id();
-        let mut entry =
-            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "write::update_by_id_stmt",
-                    format!("collection '{collection_name}' does not exist"),
-                )
-            })?;
 
-        let primary_root = entry.primary_index()?.root_page_id;
-        let (id_doc, _) = encode_document(&[("_id".into(), id_value.clone())], None)?;
-        let id_view = id_doc.view().get_field("_id").unwrap();
-        let Some(record_id) = lookup_primary_id(tx, primary_root, &id_view)? else {
+        let primary_root = next_entry.primary_index()?.root_page_id;
+        let Some(record_id) = with_value_view(id_value, |id_view| {
+            lookup_primary_id(tx, primary_root, id_view)
+        })?
+        else {
             return Ok(false);
         };
 
-        let mut data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
         let raw = data_tree.get(tx, &rec_key)?.ok_or_else(|| {
             ErrorEnvelope::new(
@@ -437,8 +473,9 @@ pub fn update_by_id_stmt(
                 MODULE_ID,
                 "write::update_by_id_stmt",
                 format!(
-                    "primary index points to missing RecordId({}) in collection '{collection_name}'",
-                    record_id.raw()
+                    "primary index points to missing RecordId({}) in collection '{}'",
+                    record_id.raw(),
+                    next_entry.name
                 ),
             )
         })?;
@@ -469,24 +506,31 @@ pub fn update_by_id_stmt(
             &mutated.updated_doc,
         )?;
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
-        entry.data_root_page_id = data_tree.root();
+        let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
+        next_entry.data_root_page_id = data_tree.root();
 
         let before_view = existing_doc.view();
         let after_view = mutated.updated_doc.view();
-        for desc in &mut entry.indexes {
+        for desc in &mut next_entry.indexes {
             let provider = registries.indexes.require(&desc.provider_id)?;
             let maint = provider.on_update(tx, desc, record_id, &before_view, &after_view)?;
-            desc.root_page_id = maint.new_root_page_id;
+            if maint.new_root_page_id != desc.root_page_id {
+                desc.root_page_id = maint.new_root_page_id;
+                catalog_changed = true;
+            }
         }
 
-        let new_catalog_root = save_collection_entry(tx, catalog_root, &entry)?;
-        tx.set_catalog_root_page_id(new_catalog_root);
+        if catalog_changed {
+            let new_catalog_root = save_collection_entry(tx, catalog_root, &next_entry)?;
+            tx.set_catalog_root_page_id(new_catalog_root);
+        }
         Ok(true)
     })();
 
     match res {
         Ok(ok) => {
             tx.release_savepoint(sp)?;
+            *entry = next_entry;
             Ok(ok)
         }
         Err(err) => {
@@ -505,6 +549,34 @@ pub fn replace_by_id_stmt(
     replacement: &DocumentBuf,
     max_document_bytes: usize,
 ) -> Result<bool> {
+    let mut entry = load_collection_entry(tx, tx.catalog_root_page_id(), collection_name)?
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::NotFound,
+                MODULE_ID,
+                "write::replace_by_id_stmt",
+                format!("collection '{collection_name}' does not exist"),
+            )
+        })?;
+    replace_by_id_with_entry(
+        tx,
+        registries,
+        &mut entry,
+        id_value,
+        replacement,
+        max_document_bytes,
+    )
+}
+
+/// Replaces the document matching `id_value` using a pre-loaded [`CatalogEntry`].
+pub(crate) fn replace_by_id_with_entry(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    entry: &mut CatalogEntry,
+    id_value: &Value,
+    replacement: &DocumentBuf,
+    max_document_bytes: usize,
+) -> Result<bool> {
     if replacement.len() > max_document_bytes {
         return Err(ErrorEnvelope::new(
             ErrorCategory::Overflow,
@@ -518,26 +590,19 @@ pub fn replace_by_id_stmt(
     }
 
     let sp = tx.savepoint();
+    let mut next_entry = entry.clone();
     let res = (|| -> Result<bool> {
         let catalog_root = tx.catalog_root_page_id();
-        let mut entry =
-            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "write::replace_by_id_stmt",
-                    format!("collection '{collection_name}' does not exist"),
-                )
-            })?;
 
-        let primary_root = entry.primary_index()?.root_page_id;
-        let (id_doc, _) = encode_document(&[("_id".into(), id_value.clone())], None)?;
-        let id_view = id_doc.view().get_field("_id").unwrap();
-        let Some(record_id) = lookup_primary_id(tx, primary_root, &id_view)? else {
+        let primary_root = next_entry.primary_index()?.root_page_id;
+        let Some(record_id) = with_value_view(id_value, |id_view| {
+            lookup_primary_id(tx, primary_root, id_view)
+        })?
+        else {
             return Ok(false);
         };
 
-        let mut data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
         let raw = data_tree.get(tx, &rec_key)?.ok_or_else(|| {
             ErrorEnvelope::new(
@@ -552,24 +617,31 @@ pub fn replace_by_id_stmt(
 
         let new_rec_val = encode_collection_record(replacement);
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
-        entry.data_root_page_id = data_tree.root();
+        let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
+        next_entry.data_root_page_id = data_tree.root();
 
         let before_view = existing_doc.view();
         let after_view = replacement.view();
-        for desc in &mut entry.indexes {
+        for desc in &mut next_entry.indexes {
             let provider = registries.indexes.require(&desc.provider_id)?;
             let maint = provider.on_update(tx, desc, record_id, &before_view, &after_view)?;
-            desc.root_page_id = maint.new_root_page_id;
+            if maint.new_root_page_id != desc.root_page_id {
+                desc.root_page_id = maint.new_root_page_id;
+                catalog_changed = true;
+            }
         }
 
-        let new_catalog_root = save_collection_entry(tx, catalog_root, &entry)?;
-        tx.set_catalog_root_page_id(new_catalog_root);
+        if catalog_changed {
+            let new_catalog_root = save_collection_entry(tx, catalog_root, &next_entry)?;
+            tx.set_catalog_root_page_id(new_catalog_root);
+        }
         Ok(true)
     })();
 
     match res {
         Ok(ok) => {
             tx.release_savepoint(sp)?;
+            *entry = next_entry;
             Ok(ok)
         }
         Err(err) => {
@@ -586,49 +658,68 @@ pub fn delete_by_id_stmt(
     collection_name: &str,
     id_value: &Value,
 ) -> Result<bool> {
+    let mut entry = load_collection_entry(tx, tx.catalog_root_page_id(), collection_name)?
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::NotFound,
+                MODULE_ID,
+                "write::delete_by_id_stmt",
+                format!("collection '{collection_name}' does not exist"),
+            )
+        })?;
+    delete_by_id_with_entry(tx, registries, &mut entry, id_value)
+}
+
+/// Deletes the document matching `id_value` using a pre-loaded [`CatalogEntry`].
+pub(crate) fn delete_by_id_with_entry(
+    tx: &mut WriteTxn<'_>,
+    registries: &CoreRegistries,
+    entry: &mut CatalogEntry,
+    id_value: &Value,
+) -> Result<bool> {
     let sp = tx.savepoint();
+    let mut next_entry = entry.clone();
     let res = (|| -> Result<bool> {
         let catalog_root = tx.catalog_root_page_id();
-        let mut entry =
-            load_collection_entry(tx, catalog_root, collection_name)?.ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "write::delete_by_id_stmt",
-                    format!("collection '{collection_name}' does not exist"),
-                )
-            })?;
 
-        let primary_root = entry.primary_index()?.root_page_id;
-        let (id_doc, _) = encode_document(&[("_id".into(), id_value.clone())], None)?;
-        let id_view = id_doc.view().get_field("_id").unwrap();
-        let Some(record_id) = lookup_primary_id(tx, primary_root, &id_view)? else {
+        let primary_root = next_entry.primary_index()?.root_page_id;
+        let Some(record_id) = with_value_view(id_value, |id_view| {
+            lookup_primary_id(tx, primary_root, id_view)
+        })?
+        else {
             return Ok(false);
         };
 
-        let mut data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
         let Some(raw) = data_tree.delete(tx, &rec_key)? else {
             return Ok(false);
         };
-        entry.data_root_page_id = data_tree.root();
+        let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
+        next_entry.data_root_page_id = data_tree.root();
 
         let existing_doc = decode_collection_record(&raw)?;
         let view = existing_doc.view();
-        for desc in &mut entry.indexes {
+        for desc in &mut next_entry.indexes {
             let provider = registries.indexes.require(&desc.provider_id)?;
             let maint = provider.on_delete(tx, desc, record_id, &view)?;
-            desc.root_page_id = maint.new_root_page_id;
+            if maint.new_root_page_id != desc.root_page_id {
+                desc.root_page_id = maint.new_root_page_id;
+                catalog_changed = true;
+            }
         }
 
-        let new_catalog_root = save_collection_entry(tx, catalog_root, &entry)?;
-        tx.set_catalog_root_page_id(new_catalog_root);
+        if catalog_changed {
+            let new_catalog_root = save_collection_entry(tx, catalog_root, &next_entry)?;
+            tx.set_catalog_root_page_id(new_catalog_root);
+        }
         Ok(true)
     })();
 
     match res {
         Ok(ok) => {
             tx.release_savepoint(sp)?;
+            *entry = next_entry;
             Ok(ok)
         }
         Err(err) => {

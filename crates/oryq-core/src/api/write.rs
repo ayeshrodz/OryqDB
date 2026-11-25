@@ -6,12 +6,12 @@ use oryq_index::{IndexDescriptor, SortOrder};
 use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result, TxId};
 
 use crate::api::read::{find_all_in_store, find_by_id_in_store};
-use crate::catalog::{list_collection_names, load_collection_entry};
+use crate::catalog::{list_collection_names, load_collection_entry, CatalogEntry};
 use crate::composition::CoreRegistries;
 use crate::write::{
     create_collection_stmt, create_compound_index_stmt, create_secondary_index_stmt,
-    delete_by_id_stmt, drop_collection_stmt, drop_index_stmt, insert_doc_stmt, replace_by_id_stmt,
-    update_by_id_stmt,
+    delete_by_id_with_entry, drop_collection_stmt, drop_index_stmt, insert_doc_with_entry,
+    replace_by_id_with_entry, update_by_id_with_entry,
 };
 
 const MODULE_ID: &str = "core";
@@ -58,18 +58,19 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub fn collection(&mut self, name: &str) -> Result<WriteCollection<'_, 'db>> {
-        if load_collection_entry(&self.tx, self.tx.catalog_root_page_id(), name)?.is_none() {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::NotFound,
-                MODULE_ID,
-                "WriteTransaction::collection",
-                format!("collection '{name}' does not exist"),
-            ));
-        }
+        let entry = load_collection_entry(&self.tx, self.tx.catalog_root_page_id(), name)?
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::NotFound,
+                    MODULE_ID,
+                    "WriteTransaction::collection",
+                    format!("collection '{name}' does not exist"),
+                )
+            })?;
         Ok(WriteCollection {
             tx: &mut self.tx,
             registries: self.registries,
-            name: name.to_owned(),
+            entry,
             max_document_bytes: self.max_document_bytes,
         })
     }
@@ -105,20 +106,29 @@ impl<'db> WriteTransaction<'db> {
 pub struct WriteCollection<'tx, 'db> {
     tx: &'tx mut WriteTxn<'db>,
     registries: &'db CoreRegistries,
-    name: String,
+    entry: CatalogEntry,
     max_document_bytes: usize,
 }
 
 impl WriteCollection<'_, '_> {
     pub fn name(&self) -> &str {
-        &self.name
+        &self.entry.name
+    }
+
+    fn refresh_entry(&mut self) -> Result<()> {
+        if let Some(updated) =
+            load_collection_entry(self.tx, self.tx.catalog_root_page_id(), &self.entry.name)?
+        {
+            self.entry = updated;
+        }
+        Ok(())
     }
 
     pub fn insert(&mut self, doc: &DocumentBuf) -> Result<(Value, RecordId)> {
-        insert_doc_stmt(
+        insert_doc_with_entry(
             self.tx,
             self.registries,
-            &self.name,
+            &mut self.entry,
             doc,
             self.max_document_bytes,
         )
@@ -130,37 +140,19 @@ impl WriteCollection<'_, '_> {
     }
 
     pub fn find_by_id(&self, id: &Value) -> Result<Option<DocumentBuf>> {
-        let entry = load_collection_entry(self.tx, self.tx.catalog_root_page_id(), &self.name)?
-            .ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "WriteCollection::find_by_id",
-                    format!("collection '{}' does not exist", self.name),
-                )
-            })?;
-        find_by_id_in_store(self.tx, &entry, id)
+        find_by_id_in_store(self.tx, &self.entry, id)
     }
 
     pub fn find_all(&self) -> Result<Vec<DocumentBuf>> {
-        let entry = load_collection_entry(self.tx, self.tx.catalog_root_page_id(), &self.name)?
-            .ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "WriteCollection::find_all",
-                    format!("collection '{}' does not exist", self.name),
-                )
-            })?;
-        find_all_in_store(self.tx, &entry)
+        find_all_in_store(self.tx, &self.entry)
     }
 
     pub fn update_by_id(&mut self, id: &Value, update_json: &str) -> Result<bool> {
         let spec = UpdateSpec::from_json_str(update_json, &self.registries.updates)?;
-        update_by_id_stmt(
+        update_by_id_with_entry(
             self.tx,
             self.registries,
-            &self.name,
+            &mut self.entry,
             id,
             &spec,
             self.max_document_bytes,
@@ -169,10 +161,10 @@ impl WriteCollection<'_, '_> {
 
     pub fn replace_by_id(&mut self, id: &Value, replacement_json: &str) -> Result<bool> {
         let (replacement, _) = from_json_str(replacement_json, None)?;
-        replace_by_id_stmt(
+        replace_by_id_with_entry(
             self.tx,
             self.registries,
-            &self.name,
+            &mut self.entry,
             id,
             &replacement,
             self.max_document_bytes,
@@ -180,7 +172,7 @@ impl WriteCollection<'_, '_> {
     }
 
     pub fn delete_by_id(&mut self, id: &Value) -> Result<bool> {
-        delete_by_id_stmt(self.tx, self.registries, &self.name, id)
+        delete_by_id_with_entry(self.tx, self.registries, &mut self.entry, id)
     }
 
     pub fn create_index(
@@ -191,16 +183,18 @@ impl WriteCollection<'_, '_> {
         sparse: bool,
         name: Option<&str>,
     ) -> Result<IndexDescriptor> {
-        create_secondary_index_stmt(
+        let desc = create_secondary_index_stmt(
             self.tx,
             self.registries,
-            &self.name,
+            &self.entry.name,
             name,
             path,
             order,
             unique,
             sparse,
-        )
+        )?;
+        self.refresh_entry()?;
+        Ok(desc)
     }
 
     pub fn create_compound_index(
@@ -210,15 +204,17 @@ impl WriteCollection<'_, '_> {
         sparse: bool,
         name: Option<&str>,
     ) -> Result<IndexDescriptor> {
-        create_compound_index_stmt(
+        let desc = create_compound_index_stmt(
             self.tx,
             self.registries,
-            &self.name,
+            &self.entry.name,
             name,
             fields,
             unique,
             sparse,
-        )
+        )?;
+        self.refresh_entry()?;
+        Ok(desc)
     }
 
     #[cfg(feature = "fts")]
@@ -227,7 +223,15 @@ impl WriteCollection<'_, '_> {
         fields: &[&str],
         name: Option<&str>,
     ) -> Result<IndexDescriptor> {
-        crate::write::create_fts_index_stmt(self.tx, self.registries, &self.name, name, fields)
+        let desc = crate::write::create_fts_index_stmt(
+            self.tx,
+            self.registries,
+            &self.entry.name,
+            name,
+            fields,
+        )?;
+        self.refresh_entry()?;
+        Ok(desc)
     }
 
     #[cfg(feature = "vec")]
@@ -237,30 +241,27 @@ impl WriteCollection<'_, '_> {
         options: oryq_vec::VectorIndexOptions,
         name: Option<&str>,
     ) -> Result<IndexDescriptor> {
-        crate::write::create_vector_index_stmt(
+        let desc = crate::write::create_vector_index_stmt(
             self.tx,
             self.registries,
-            &self.name,
+            &self.entry.name,
             name,
             field,
             options,
-        )
+        )?;
+        self.refresh_entry()?;
+        Ok(desc)
     }
 
     pub fn drop_index(&mut self, index_name: &str) -> Result<bool> {
-        drop_index_stmt(self.tx, self.registries, &self.name, index_name)
+        let dropped = drop_index_stmt(self.tx, self.registries, &self.entry.name, index_name)?;
+        if dropped {
+            self.refresh_entry()?;
+        }
+        Ok(dropped)
     }
 
     pub fn list_indexes(&self) -> Result<Vec<IndexDescriptor>> {
-        let entry = load_collection_entry(self.tx, self.tx.catalog_root_page_id(), &self.name)?
-            .ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::NotFound,
-                    MODULE_ID,
-                    "WriteCollection::list_indexes",
-                    format!("collection '{}' does not exist", self.name),
-                )
-            })?;
-        Ok(entry.indexes)
+        Ok(self.entry.indexes.clone())
     }
 }

@@ -447,3 +447,25 @@ evidence = [
     "cargo run -p xtask -- modules engine",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0027"
+modules = ["query", "core", "ffi"]
+files = [
+    "crates/oryq-query/src/cursor.rs",
+    "crates/oryq-core/src/adapters/query_source.rs",
+    "crates/oryq-core/src/api/read.rs",
+    "crates/oryq-core/src/api/write.rs",
+    "crates/oryq-core/src/write/statement.rs",
+    "crates/oryq-ffi/src/api.rs",
+]
+reason = "Implement Issue #40 (v0.13.2): add QueryCursor::from_rows, CoreQuerySource::with_entry + per-snapshot catalog caching on CoreQuerySource/ReadTransaction/WriteCollection, zero-alloc scalar ValueView borrows, primary _id equality fast path in ReadCollection::find, conditional catalog writes on update/replace/delete, and fast integer parse_id_json in oryq-ffi."
+compatibility = "api_change"
+evidence = [
+    "cargo test --workspace",
+    "cargo run -p xtask -- modules query",
+    "cargo run -p xtask -- modules core",
+    "cargo run -p xtask -- modules ffi",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

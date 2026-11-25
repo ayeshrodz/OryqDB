@@ -6,8 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 
 ## [Unreleased]
 
-### Planned
-- `0.13.2` (#40): Core/Query/FFI hot-path optimizations & updated SQLite benchmark report.
+## [0.13.2] - 2026-11-26
+
+### Performance (#40 — Core/Query/FFI Hot-Path Optimizations & Updated SQLite Benchmark Report)
+- Added per-snapshot `CatalogEntry` caching in `CoreQuerySource` (`with_entry` + `entry_cache`) and `ReadTransaction::catalog_cache`, eliminating per-row catalog B+ tree lookups during secondary index scans and repeated `ReadTransaction::collection()` calls.
+- Added zero-allocation scalar `ValueView` borrowing (`with_value_view`) across `find_by_id`, `probe_primary_id`, `scan_secondary_eq`, `scan_secondary_range`, `update_by_id`, `replace_by_id`, and `delete_by_id`, avoiding throwaway `encode_document` allocations on scalar keys.
+- Added primary `_id` equality fast path in `ReadCollection::find` + `QueryCursor::from_rows` and zero-allocation integer `parse_id_json` fast path in `oryq-ffi`.
+- Cached `CatalogEntry` on `WriteCollection` and skipped redundant `save_collection_entry` catalog page rewrites in `update_by_id`/`replace_by_id`/`delete_by_id` when no tree root changed.
+- Published full `v0.12.4 -> v0.13.2` before/after Rust and SQLite3 comparison tables in `docs/BENCHMARK_RESULTS.md` (`743,582 ops/sec` Rust point lookups [4.84×], `3,671 scans/sec` secondary scans [5.56×], `30,962 docs/sec` batched inserts [2.48×], `118,545 ops/sec` Python C ABI `_id` lookups [3.29×], and `-29–33%` smaller `.oryq` files).
+- Recorded `CC-0027` in `architecture/contract-changes.toml`.
 
 ## [0.13.1] - 2026-11-26
 

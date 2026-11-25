@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.13.1 — PageCache Main-File Hit Path, Verified Page Views & Zero-Copy B+ Tree Cursor/Descent (Issue #39)
-STATUS: Active `v0.13.x` Performance & Storage-Efficiency Sprint — `717k ops/sec` Rust primary lookups, `29k docs/sec` batched inserts, and -29–33% smaller single-file `.oryq` databases.
+MILESTONE: v0.13.2 — Core/Query/FFI Hot-Path Optimizations & Updated Benchmark Report (Issue #40 — v0.13.x Sprint Complete)
+STATUS: `v0.13.x` Performance & Storage-Efficiency Sprint Complete — `743k ops/sec` Rust point lookups (4.84×), `3,671 scans/sec` secondary scans (5.56×), `31k docs/sec` batched inserts (2.48×), `118k ops/sec` Python C ABI `_id` lookups (3.29×), and -29–33% smaller single-file `.oryq` databases.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

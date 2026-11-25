@@ -12,3 +12,7 @@ pub use statement::{
     encode_collection_record, generate_object_id, insert_doc_stmt, replace_by_id_stmt,
     update_by_id_stmt,
 };
+pub(crate) use statement::{
+    delete_by_id_with_entry, insert_doc_with_entry, replace_by_id_with_entry,
+    update_by_id_with_entry,
+};
