@@ -236,4 +236,38 @@ fn find_count_and_explain_analyze_end_to_end() {
         oryq_core::AccessPlan::SecondaryRangeScan { .. }
     ));
     assert_eq!(exp.docs_returned, 2);
+
+    // Primary `_id` equality fast path + ReadTransaction catalog cache + limit == Some(0) parity
+    let users_cached = rtx.collection("users").unwrap();
+    let cur_hit = users_cached
+        .find_json(Some(r#"{"_id": 2}"#), None, None, 0, None)
+        .unwrap();
+    assert!(matches!(
+        cur_hit.plan().access,
+        oryq_core::AccessPlan::PrimaryIdLookup { .. }
+    ));
+    let hit_docs = cur_hit.collect_all();
+    assert_eq!(hit_docs.len(), 1);
+    assert_eq!(
+        hit_docs[0]
+            .view()
+            .get_field("name")
+            .unwrap()
+            .to_owned_value(),
+        Value::String("Bob".into())
+    );
+    assert!(users_cached
+        .find_json(Some(r#"{"_id": 999}"#), None, None, 0, None)
+        .unwrap()
+        .collect_all()
+        .is_empty());
+    assert!(users_cached
+        .find_json(Some(r#"{"_id": 2}"#), None, None, 0, Some(0))
+        .unwrap()
+        .collect_all()
+        .is_empty());
+    // Invalid `_id` type with `limit == Some(0)` still errors identically to `execute_find`.
+    assert!(users_cached
+        .find_json(Some(r#"{"_id": null}"#), None, None, 0, Some(0))
+        .is_err());
 }

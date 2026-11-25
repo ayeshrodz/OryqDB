@@ -1,4 +1,4 @@
-# OryqDB Binary Footprint, Baseline & SQLite Comparison Benchmarks (`v0.12.4`)
+# OryqDB Binary Footprint, Baseline & SQLite Comparison Benchmarks (`v0.13.2`)
 
 ## 1. Release Binary Footprint Audit (`Linux x86_64`)
 
@@ -20,41 +20,41 @@ Measured on Linux `x86_64` (`strip = "symbols"`, `panic = "unwind"` preserved fo
 
 ## 2. Single-File Comparison: OryqDB vs SQLite3 (`tools/bench_vs_sqlite.py`)
 
-Measured with `cargo build --release -p oryq-ffi && ORYQ_LIB_PATH="$PWD/target/release/liboryq.so" python3 tools/bench_vs_sqlite.py --docs 2000` (Python `3.14.4`, SQLite `3.46.1`, Linux `x86_64`):
+Measured with `cargo build --release -p oryq-ffi && ORYQ_LIB_PATH="$PWD/target/release/liboryq.so" python3 tools/bench_vs_sqlite.py --docs 2000` (Python `3.14.4`, SQLite `3.46.1`, Linux `x86_64`), showing the full **`v0.12.4` → `v0.13.2`** Performance Sprint progression (`#38`–`#40`):
 
-| Metric | OryqDB (C ABI via Python `ctypes`) | SQLite3 (CPython C extension) |
-| :--- | ---: | ---: |
-| Batched Insert (`2,000` JSON docs + 1 index) | `220.60 ms` (`9,066 docs/s`) | `8.03 ms` (`249,218 docs/s`) |
-| Primary `_id` Point Lookups (`2,000` ops) | `55.47 ms` (`36,053 ops/s`) | `4.01 ms` (`498,431 ops/s`) |
-| Secondary Index Lookups (`200` scans) | `165.00 ms` | `4.41 ms` |
-| Batched Partial Updates (`500` ops) | `21.57 ms` | `0.84 ms` |
-| `VACUUM` after 75% delete | `33.10 ms` | `0.29 ms` |
-| Single-File Size (`100%` docs, sealed, 0 `-wal`) | `1,352.0 KiB` | `436.0 KiB` |
-| Single-File Size (`25%` docs after `VACUUM`) | `360.0 KiB` (`-73.4%`) | `116.0 KiB` (`-73.4%`) |
+| Metric | OryqDB `v0.12.4` | **OryqDB `v0.13.2` (C ABI via Python)** | Sprint Gain | SQLite3 (CPython C ext) |
+| :--- | ---: | ---: | ---: | ---: |
+| Batched Insert (`2,000` JSON docs + 1 index) | `220.60 ms` (`9,066/s`) | **`87.75 ms` (`22,791 docs/s`)** | **2.51× faster** | `9.96 ms` (`200,889 docs/s`) |
+| Primary `_id` Point Lookups (`2,000` ops) | `55.47 ms` (`36,053/s`) | **`16.87 ms` (`118,545 ops/s`)** | **3.29× faster** | `4.08 ms` (`490,688 ops/s`) |
+| Secondary Index Lookups (`200` scans) | `165.00 ms` | **`52.28 ms`** | **3.16× faster** | `7.64 ms` |
+| Batched Partial Updates (`500` ops) | `21.57 ms` | **`9.44 ms`** | **2.28× faster** | `1.09 ms` |
+| `VACUUM` after 75% delete | `33.10 ms` | **`17.18 ms`** | **1.93× faster** | `0.29 ms` |
+| Single-File Size (`100%` docs, sealed, 0 `-wal`) | `1,352.0 KiB` | **`960.0 KiB`** | **-29.0% smaller** | `432.0 KiB` |
+| Single-File Size (`25%` docs after `VACUUM`) | `360.0 KiB` | **`240.0 KiB`** (`-75.0%`) | **-33.3% smaller** | `116.0 KiB` (`-73.1%`) |
 
-> **Honest Interpretation:** In Python, `oryqdb` crosses `ctypes` + per-call JSON encoding/decoding for schemaless `OryqDoc` documents, whereas `sqlite3` is a compiled CPython C extension operating on a fixed-schema relational table. In native Rust (`§3` below), OryqDB delivers `153,614 ops/sec` point lookups and `19,972 ops/sec` durable single-fsync batched writes, while maintaining a single sealed `.oryq` file with `~73%` space reclamation on `VACUUM`.
+> **Honest Interpretation:** In Python, `oryqdb` crosses `ctypes` + per-call JSON encoding/decoding for schemaless `OryqDoc` documents, whereas `sqlite3` is a compiled CPython C extension operating on a fixed-schema relational table. Across the `v0.13.x` sprint (`#38`–`#40`), OryqDB achieved **2.3×–3.3×** faster Python C ABI throughput and **29%–33% smaller** single-file `.oryq` databases with zero on-disk format changes. In native Rust (`§3` below), OryqDB delivers **`743,582 ops/sec`** point lookups, **`3,671 scans/sec`** secondary range scans, and **`37,650 ops/sec`** durable single-fsync batched writes.
 
-## 3. Native Rust Storage & Query Baseline (`W12`, `SyncMode::Normal`)
+## 3. Native Rust Storage & Query Benchmarks (`SyncMode::Normal`)
 
 Measured with `cargo run --release -p oryq-core --example bench_suite` on Linux `x86_64` (`8 KiB` pages, `temp_dir` / tmpfs):
 
-| Workload | Total Time | Throughput |
-| :--- | ---: | ---: |
-| Batched Insert (`2,000` docs + 1 secondary index) | `159.92 ms` | `12,507 docs/sec` |
-| Primary `_id` Point Lookup (`2,000` lookups) | `13.02 ms` | `153,614 ops/sec` |
-| Partial Delta Updates (`1,200` ops, 6 rounds w/ 4-delta chain + compaction) | `70.08 ms` | `17,123 ops/sec` |
-| Secondary Range Scan (`100` scans × ~`200` rows) | `151.35 ms` | `661 scans/sec` |
-| WAL Checkpoint + Reset (`117` pages copied) | `0.56 ms` | — |
+| Workload | `v0.12.4` Baseline | **`v0.13.2` Result** | Throughput | Sprint Gain |
+| :--- | ---: | ---: | ---: | ---: |
+| Batched Insert (`2,000` docs + 1 secondary index) | `159.92 ms` | **`64.59 ms`** | **`30,962 docs/sec`** | **2.48× faster** |
+| Primary `_id` Point Lookup (`2,000` lookups) | `13.02 ms` | **`2.69 ms`** | **`743,582 ops/sec`** | **4.84× faster** |
+| Partial Delta Updates (`1,200` ops, 6 rounds w/ 4-delta chain + compaction) | `70.08 ms` | **`35.38 ms`** | **`33,915 ops/sec`** | **1.98× faster** |
+| Secondary Range Scan (`100` scans × ~`200` rows) | `151.35 ms` | **`27.24 ms`** | **`3,671 scans/sec`** | **5.56× faster** |
+| WAL Checkpoint + Reset (`76` pages copied vs `117` in `v0.12.4`) | `0.56 ms` | **`0.45 ms`** | — | **-35% pages** |
 
-## 4. Comparative Group Commit Throughput (`X03` / `v0.10.3`, `SyncMode::Full`, 400 durable writes)
+## 4. Comparative Group Commit Throughput (`X03`, `SyncMode::Full`, 400 durable writes)
 
 Comparing 8 concurrent writer threads × 50 durable inserts (`400` total inserts, `SyncMode::Full`, `linger = 0`):
 
-| Mode | Total Time | Throughput | Speedup vs Individual |
-| :--- | ---: | ---: | ---: |
-| Concurrent Individual Commits (`begin_write` + `commit`, 8 threads) | `28.22 ms` | `14,175 ops/sec` | `1.00×` |
-| Concurrent Group Commit (`Database::submit_batched`, 8 threads, `max_batch_size = 64`) | `25.25 ms` | `15,840 ops/sec` | `1.12×` |
-| Explicit Single-Fsync Batch (`Database::commit_batch`, 400 ops) | `20.03 ms` | `19,972 ops/sec` | `1.41×` |
+| Mode | `v0.12.4` | **`v0.13.2`** | Throughput | Speedup vs Individual |
+| :--- | ---: | ---: | ---: | ---: |
+| Concurrent Individual Commits (`begin_write` + `commit`, 8 threads) | `28.22 ms` | **`21.38 ms`** | **`18,708 ops/sec`** | `1.00×` |
+| Concurrent Group Commit (`Database::submit_batched`, 8 threads, `max_batch_size = 64`) | `25.25 ms` | **`15.25 ms`** | **`26,222 ops/sec`** | `1.40×` |
+| Explicit Single-Fsync Batch (`Database::commit_batch`, 400 ops) | `20.03 ms` | **`10.62 ms`** | **`37,650 ops/sec`** | `2.01×` |
 
 > **Note:** On `tmpfs`, `fsync` latency is sub-millisecond so CPU/serialization dominates; on physical SSD/NVMe storage where each `fsync` costs `0.5–5 ms`, coalescing `K` concurrent writers into a single WAL `fsync` reduces durable sync overhead proportionally by up to `K×`.
 

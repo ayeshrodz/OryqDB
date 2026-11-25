@@ -1,4 +1,4 @@
-# OryqDB Official Language Bindings & Native Examples (`v0.13.1`)
+# OryqDB Official Language Bindings & Native Examples (`v0.13.2`)
 
 All official language bindings target the stable, panic-safe **OryqDB C ABI v1.2** (`include/oryq.h` + `liboryq`), supporting single-file `.oryq` persistence, auto-seal on close, `:memory:` ephemeral databases, `VACUUM`, online backup, and optional hybrid FTS + Vector search (`--features fts,vec`).
 
