@@ -35,7 +35,8 @@ fn read_cstr<'a>(ptr: *const c_char, name: &str) -> Result<&'a str, (OryqStatus,
 }
 
 fn parse_id_json(id_json: &str) -> Result<Value, (OryqStatus, String)> {
-    let trimmed = id_json.trim();
+    // Match RFC 8259 JSON whitespace only (` `, `\t`, `\n`, `\r`), never Unicode `White_Space`.
+    let trimmed = id_json.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
     // Fast path for plain non-leading-zero JSON integer `_id` literals (avoids serde_json + DocBuf).
     if !trimmed.is_empty() && trimmed != "-0" {
         let digits = trimmed.strip_prefix('-').unwrap_or(trimmed);
@@ -1310,4 +1311,34 @@ pub unsafe extern "C" fn oryq_search_vector(
             ))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_id_json_edge_cases_match_rfc8259_json() {
+        assert_eq!(parse_id_json("42").unwrap(), Value::Int64(42));
+        assert_eq!(parse_id_json(" \t\r\n-42\n ").unwrap(), Value::Int64(-42));
+        assert_eq!(parse_id_json("0").unwrap(), Value::Int64(0));
+        assert_eq!(
+            parse_id_json(&i64::MAX.to_string()).unwrap(),
+            Value::Int64(i64::MAX)
+        );
+        assert_eq!(
+            parse_id_json(&i64::MIN.to_string()).unwrap(),
+            Value::Int64(i64::MIN)
+        );
+        // Leading zero and non-RFC-8259 Unicode whitespace must be rejected just like serde_json.
+        assert!(parse_id_json("01").is_err());
+        assert!(parse_id_json("\u{00A0}42").is_err());
+        assert!(parse_id_json("\u{2003}42").is_err());
+        // String and -0 fall through to standard JSON parser cleanly.
+        assert_eq!(
+            parse_id_json(r#""user-1""#).unwrap(),
+            Value::String("user-1".into())
+        );
+        assert!(parse_id_json("-0").is_ok());
+    }
 }

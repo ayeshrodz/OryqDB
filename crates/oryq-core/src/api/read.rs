@@ -102,8 +102,12 @@ impl ReadCollection<'_, '_> {
 
     /// Executes a structured [`FindOptions`] query within this read snapshot.
     pub fn find(&self, options: &FindOptions) -> Result<QueryCursor> {
-        // Fast path for direct primary `_id` equality lookups without sort/projection/skip.
-        if options.sort.is_none() && options.projection.is_none() && options.skip == 0 {
+        // Fast path for direct primary `_id` equality lookups without sort/projection/skip/zero-limit.
+        if options.sort.is_none()
+            && options.projection.is_none()
+            && options.skip == 0
+            && options.limit != Some(0)
+        {
             if let Some(FilterExpr::Eq(path, val)) = &options.filter {
                 if path.as_str() == "_id" {
                     let plan = ExplainPlan {
@@ -113,9 +117,6 @@ impl ReadCollection<'_, '_> {
                         },
                         residual_filter: None,
                     };
-                    if options.limit == Some(0) {
-                        return Ok(QueryCursor::from_rows(Vec::new(), plan));
-                    }
                     let rows = match find_by_id_in_store(self.tx, &self.entry, val)? {
                         Some(doc) => vec![doc],
                         None => Vec::new(),
