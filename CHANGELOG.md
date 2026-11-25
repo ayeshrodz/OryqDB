@@ -7,8 +7,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `0.13.1` (#39): PageCache main-file hit path, zero-rehash verified page views & allocation-free B+ tree descent.
 - `0.13.2` (#40): Core/Query/FFI hot-path optimizations & updated SQLite benchmark report.
+
+## [0.13.1] - 2026-11-26
+
+### Performance (#39 — PageCache Main-File Hit Path, Verified Page Views & Zero-Copy B+ Tree Cursor/Descent)
+- Added `main_page_lsns` tracking and `StorageEngine::cache_stats()` in `crates/oryq-engine/src/transaction/mod.rs` so `read_page_at_snapshot` serves checkpointed main `.oryq` pages directly from `PageCache` before touching disk (`pread`), refreshing cleanly on checkpoint and clearing on `VACUUM`.
+- Added `PageHeader::decode_without_checksum`, `SlottedPageView::parse_with_header`, and O(1) allocation-free `SlottedPageView::parse_verified` in `crates/oryq-engine/src/format/page.rs` so slotted pages are checksum- and span-verified once at the I/O boundary rather than re-hashing 8 KiB and sorting slot spans on every B+ tree probe.
+- Eliminated per-lookup heap allocations (`HashSet`, `InternalNode`, `Vec<LeafEntry>`) in `btree::search` (stack `[PageId; MAX_BTREE_HEIGHT]` cycle guard) and `BTreeCursor` (pinned `Arc<[u8]>` frames + in-place binary search returning zero-copy slices).
+- Measured release gains vs `v0.13.0`: Rust batched insert `108.62 ms -> 68.95 ms` (`29,006 docs/sec`), Rust primary `_id` point lookups `2.79 ms` (`717,471 ops/sec`), Python C ABI batched insert `142.34 ms -> 91.26 ms` (`21,916 docs/sec`), Python `_id` lookups `45.79 ms` (`43,679 ops/sec`), Python partial updates `13.93 ms`, and `VACUUM` `19.66 ms`.
+- Recorded `CC-0026` in `architecture/contract-changes.toml` and added `checkpointed_main_file_reads_hit_page_cache_and_refresh_on_update`.
 
 ## [0.13.0] - 2026-11-26
 

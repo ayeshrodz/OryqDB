@@ -108,6 +108,9 @@ impl PageStore for PagerPageStore<'_> {
     fn read_page(&self, page_id: PageId) -> Result<Arc<[u8]>> {
         let guard = self.pager.read_page(page_id, None)?;
         let hdr = PageHeader::decode_and_verify(guard.as_slice(), page_id)?;
+        if TreeKind::is_leaf(hdr.page_type) || TreeKind::is_internal(hdr.page_type) {
+            let _ = SlottedPageView::parse_with_header(guard.as_slice(), hdr)?;
+        }
         if let Some(cache) = self.cache {
             if let Some(hit) = cache.get(page_id, hdr.lsn_tx_id) {
                 return Ok(hit.as_arc());
@@ -262,7 +265,7 @@ pub fn decode_internal_slot(payload: &[u8]) -> Result<(&[u8], PageId)> {
 
 /// Reads all live sorted `(key, value)` entries from a validated leaf page.
 pub fn read_leaf_entries(page: &[u8], expected_page_id: PageId) -> Result<Vec<LeafEntry>> {
-    let view = SlottedPageView::parse(page, expected_page_id)?;
+    let view = SlottedPageView::parse_verified(page, expected_page_id)?;
     if !TreeKind::is_leaf(view.header().page_type) {
         return Err(corrupt(
             "btree::read_leaf_entries",
@@ -292,7 +295,7 @@ pub fn read_leaf_entries(page: &[u8], expected_page_id: PageId) -> Result<Vec<Le
 
 /// Reads an internal node from a validated internal page.
 pub fn read_internal_node(page: &[u8], expected_page_id: PageId) -> Result<InternalNode> {
-    let view = SlottedPageView::parse(page, expected_page_id)?;
+    let view = SlottedPageView::parse_verified(page, expected_page_id)?;
     if !TreeKind::is_internal(view.header().page_type) {
         return Err(corrupt(
             "btree::read_internal_node",

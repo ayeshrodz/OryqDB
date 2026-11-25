@@ -1,6 +1,5 @@
 //! Point lookup and cycle-checked descent through logical B+ tree pages.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, Result};
@@ -27,8 +26,7 @@ pub fn descend_to_leaf(
     root: PageId,
     key: &[u8],
 ) -> Result<(PageId, Arc<[u8]>, Vec<DescentFrame>)> {
-    let mut visited = HashSet::new();
-    let mut path = Vec::new();
+    let mut path = Vec::with_capacity(4);
     let mut current = root;
 
     loop {
@@ -40,7 +38,7 @@ pub fn descend_to_leaf(
                 format!("B+ tree height exceeded maximum {MAX_BTREE_HEIGHT}"),
             ));
         }
-        if !visited.insert(current) {
+        if path.iter().any(|f: &DescentFrame| f.page_id == current) {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
                 MODULE_ID,
@@ -50,7 +48,7 @@ pub fn descend_to_leaf(
         }
 
         let page_bytes = store.read_page(current)?;
-        let view = SlottedPageView::parse(&page_bytes, current)?;
+        let view = SlottedPageView::parse_verified(&page_bytes, current)?;
         let ptype = view.header().page_type;
 
         if TreeKind::is_leaf(ptype) {
@@ -126,31 +124,74 @@ pub fn choose_child(view: &SlottedPageView<'_>, key: &[u8]) -> Result<(usize, Pa
     Ok((chosen_slot, child_pid))
 }
 
-/// Point lookup of `key` in the B+ tree rooted at `root`.
+/// Point lookup of `key` in the B+ tree rooted at `root` (allocation-free descent).
 pub fn btree_get(store: &impl PageStore, root: PageId, key: &[u8]) -> Result<Option<Vec<u8>>> {
-    let (leaf_pid, leaf_bytes, _) = descend_to_leaf(store, root, key)?;
-    let view = SlottedPageView::parse(&leaf_bytes, leaf_pid)?;
-    let count = usize::from(view.slot_count());
+    let mut visited = [PageId::HEADER; MAX_BTREE_HEIGHT];
+    let mut depth = 0usize;
+    let mut current = root;
 
-    let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let payload = view.payload(mid as u16).ok_or_else(|| {
-            ErrorEnvelope::new(
+    loop {
+        if depth >= MAX_BTREE_HEIGHT {
+            return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
                 MODULE_ID,
                 "btree::btree_get",
-                format!("unexpected tombstone in compact leaf slot {mid}"),
-            )
-        })?;
-        let (entry_key, entry_val) = decode_leaf_entry(payload)?;
-        match entry_key.cmp(key) {
-            core::cmp::Ordering::Less => lo = mid + 1,
-            core::cmp::Ordering::Greater => hi = mid,
-            core::cmp::Ordering::Equal => return Ok(Some(entry_val.to_vec())),
+                format!("B+ tree height exceeded maximum {MAX_BTREE_HEIGHT}"),
+            ));
         }
-    }
+        if visited[..depth].contains(&current) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "btree::btree_get",
+                format!("cycle detected in B+ tree at page {}", current.raw()),
+            ));
+        }
+        visited[depth] = current;
+        depth += 1;
 
-    Ok(None)
+        let page_bytes = store.read_page(current)?;
+        let view = SlottedPageView::parse_verified(&page_bytes, current)?;
+        let ptype = view.header().page_type;
+
+        if TreeKind::is_leaf(ptype) {
+            let count = usize::from(view.slot_count());
+            let mut lo = 0usize;
+            let mut hi = count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let payload = view.payload(mid as u16).ok_or_else(|| {
+                    ErrorEnvelope::new(
+                        ErrorCategory::Corruption,
+                        MODULE_ID,
+                        "btree::btree_get",
+                        format!("unexpected tombstone in compact leaf slot {mid}"),
+                    )
+                })?;
+                let (entry_key, entry_val) = decode_leaf_entry(payload)?;
+                match entry_key.cmp(key) {
+                    core::cmp::Ordering::Less => lo = mid + 1,
+                    core::cmp::Ordering::Greater => hi = mid,
+                    core::cmp::Ordering::Equal => return Ok(Some(entry_val.to_vec())),
+                }
+            }
+            return Ok(None);
+        }
+
+        if !TreeKind::is_internal(ptype) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "btree::btree_get",
+                format!(
+                    "unexpected page type {:?} at page {} during B+ tree lookup",
+                    ptype,
+                    current.raw()
+                ),
+            ));
+        }
+
+        let (_, next_pid) = choose_child(&view, key)?;
+        current = next_pid;
+    }
 }

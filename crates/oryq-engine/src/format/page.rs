@@ -176,7 +176,19 @@ impl PageHeader {
                 ),
             ));
         }
+        Self::decode_without_checksum(page, expected_page_id)
+    }
 
+    /// Decodes a 32-byte header from an already I/O-verified page without recomputing `XXH3_64`.
+    #[inline]
+    pub fn decode_without_checksum(page: &[u8], expected_page_id: PageId) -> Result<Self> {
+        if page.len() < PAGE_HEADER_SIZE {
+            return Err(corrupt(
+                "PageHeader::decode_without_checksum",
+                format!("page buffer too small ({} bytes)", page.len()),
+            ));
+        }
+        let stored_checksum = u64::from_le_bytes(page[24..32].try_into().unwrap());
         let raw_id = u64::from_le_bytes(page[0..8].try_into().unwrap());
         if raw_id == 0 {
             return Err(corrupt(
@@ -304,6 +316,11 @@ impl<'a> SlottedPageView<'a> {
     /// Parses and validates header checksum, directory bounds, and non-overlapping live spans.
     pub fn parse(page_bytes: &'a [u8], expected_page_id: PageId) -> Result<Self> {
         let header = PageHeader::decode_and_verify(page_bytes, expected_page_id)?;
+        Self::parse_with_header(page_bytes, header)
+    }
+
+    /// Validates directory bounds and non-overlapping live spans using an already-verified header.
+    pub fn parse_with_header(page_bytes: &'a [u8], header: PageHeader) -> Result<Self> {
         let dir_end = PAGE_HEADER_SIZE
             .checked_add(usize::from(header.slot_count) * SLOT_ENTRY_SIZE)
             .ok_or_else(|| corrupt("SlottedPageView::parse", "slot directory size overflow"))?;
@@ -367,6 +384,34 @@ impl<'a> SlottedPageView<'a> {
             }
         }
 
+        Ok(Self {
+            bytes: page_bytes,
+            header,
+        })
+    }
+
+    /// O(1), allocation-free view over an immutable page already verified at the I/O or write
+    /// boundary (skips redundant `XXH3_64` hashing and full-directory span sorting).
+    #[inline]
+    pub fn parse_verified(page_bytes: &'a [u8], expected_page_id: PageId) -> Result<Self> {
+        let header = PageHeader::decode_without_checksum(page_bytes, expected_page_id)?;
+        let dir_end = PAGE_HEADER_SIZE
+            .checked_add(usize::from(header.slot_count) * SLOT_ENTRY_SIZE)
+            .ok_or_else(|| {
+                corrupt(
+                    "SlottedPageView::parse_verified",
+                    "slot directory size overflow",
+                )
+            })?;
+        if dir_end > usize::from(header.free_space_end) {
+            return Err(corrupt(
+                "SlottedPageView::parse_verified",
+                format!(
+                    "slot directory end {dir_end} overlaps free_space_end {}",
+                    header.free_space_end
+                ),
+            ));
+        }
         Ok(Self {
             bytes: page_bytes,
             header,

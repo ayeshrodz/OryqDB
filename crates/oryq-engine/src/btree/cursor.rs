@@ -1,13 +1,12 @@
-//! Stack-based forward and reverse B+ tree range cursor (no on-disk sibling links,
+//! Zero-copy stack-based forward and reverse B+ tree range cursor (no on-disk sibling links,
 //! matching `docs/file-format.md` §4.1).
 
-use std::collections::HashSet;
+use std::sync::Arc;
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, Result};
 
 use crate::btree::layout::{
-    read_internal_node, read_leaf_entries, InternalNode, LeafEntry, PageStore, TreeKind,
-    MAX_BTREE_HEIGHT,
+    decode_internal_slot, decode_leaf_entry, PageStore, TreeKind, MAX_BTREE_HEIGHT,
 };
 use crate::btree::search::choose_child;
 use crate::format::SlottedPageView;
@@ -16,32 +15,48 @@ const MODULE_ID: &str = "engine";
 
 #[derive(Debug, Clone)]
 struct CursorFrame {
-    node: InternalNode,
-    /// Child index currently descended (`0` = leftmost, `1..=separators.len()` = right child).
+    page_id: PageId,
+    page_bytes: Arc<[u8]>,
+    slot_count: usize,
+    /// Child slot index currently descended (`0` = leftmost sentinel, `1..slot_count` = right child).
     child_idx: usize,
 }
 
 impl CursorFrame {
+    #[inline]
     fn child_count(&self) -> usize {
-        1 + self.node.separators.len()
+        self.slot_count
     }
 
-    fn child_pid(&self, idx: usize) -> PageId {
-        if idx == 0 {
-            self.node.leftmost_child
-        } else {
-            self.node.separators[idx - 1].1
-        }
+    fn child_pid(&self, idx: usize) -> Result<PageId> {
+        let view = SlottedPageView::parse_verified(&self.page_bytes, self.page_id)?;
+        let payload = view.payload(idx as u16).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "BTreeCursor::child_pid",
+                format!("missing internal slot {idx} on page {}", self.page_id.raw()),
+            )
+        })?;
+        let (_, pid) = decode_internal_slot(payload)?;
+        Ok(pid)
     }
 }
 
-/// Forward and reverse B+ tree cursor retaining an ancestor traversal stack.
+#[derive(Debug)]
+struct ActiveLeaf {
+    page_id: PageId,
+    page_bytes: Arc<[u8]>,
+    slot_count: usize,
+}
+
+/// Forward and reverse B+ tree cursor retaining pinned `Arc<[u8]>` pages for zero-copy traversal.
 #[derive(Debug)]
 pub struct BTreeCursor<'a, S: PageStore> {
     store: &'a S,
     root: PageId,
     stack: Vec<CursorFrame>,
-    leaf_entries: Vec<LeafEntry>,
+    leaf: Option<ActiveLeaf>,
     entry_idx: usize,
     valid: bool,
 }
@@ -51,8 +66,8 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
         Self {
             store,
             root,
-            stack: Vec::new(),
-            leaf_entries: Vec::new(),
+            stack: Vec::with_capacity(4),
+            leaf: None,
             entry_idx: 0,
             valid: false,
         }
@@ -62,10 +77,12 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
     pub fn seek_first(&mut self) -> Result<bool> {
         self.stack.clear();
         self.descend_leftmost(self.root)?;
-        if !self.leaf_entries.is_empty() {
-            self.entry_idx = 0;
-            self.valid = true;
-            return Ok(true);
+        if let Some(leaf) = &self.leaf {
+            if leaf.slot_count > 0 {
+                self.entry_idx = 0;
+                self.valid = true;
+                return Ok(true);
+            }
         }
         self.advance_to_next_nonempty_leaf()
     }
@@ -74,10 +91,12 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
     pub fn seek_last(&mut self) -> Result<bool> {
         self.stack.clear();
         self.descend_rightmost(self.root)?;
-        if !self.leaf_entries.is_empty() {
-            self.entry_idx = self.leaf_entries.len() - 1;
-            self.valid = true;
-            return Ok(true);
+        if let Some(leaf) = &self.leaf {
+            if leaf.slot_count > 0 {
+                self.entry_idx = leaf.slot_count - 1;
+                self.valid = true;
+                return Ok(true);
+            }
         }
         self.retreat_to_prev_nonempty_leaf()
     }
@@ -85,58 +104,95 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
     /// Positions the cursor at the first key `>= target`.
     pub fn seek_ge(&mut self, target: &[u8]) -> Result<bool> {
         self.stack.clear();
-        let mut visited = HashSet::new();
+        self.leaf = None;
         let mut current = self.root;
 
         loop {
-            if self.stack.len() >= MAX_BTREE_HEIGHT {
+            if self.stack.len() >= MAX_BTREE_HEIGHT
+                || self.stack.iter().any(|f| f.page_id == current)
+            {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
                     MODULE_ID,
                     "BTreeCursor::seek_ge",
-                    format!("B+ tree height exceeded maximum {MAX_BTREE_HEIGHT}"),
-                ));
-            }
-            if !visited.insert(current) {
-                return Err(ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "BTreeCursor::seek_ge",
-                    format!("cycle detected at page {}", current.raw()),
+                    format!(
+                        "cycle or excessive height in B+ tree at page {}",
+                        current.raw()
+                    ),
                 ));
             }
 
             let page_bytes = self.store.read_page(current)?;
-            let view = SlottedPageView::parse(&page_bytes, current)?;
+            let view = SlottedPageView::parse_verified(&page_bytes, current)?;
             let ptype = view.header().page_type;
+            let slot_count = usize::from(view.slot_count());
 
             if TreeKind::is_leaf(ptype) {
-                self.leaf_entries = read_leaf_entries(&page_bytes, current)?;
-                let pos = self
-                    .leaf_entries
-                    .partition_point(|e| e.key.as_slice() < target);
-                if pos < self.leaf_entries.len() {
-                    self.entry_idx = pos;
+                // Binary search directly over leaf slots without allocating `Vec<LeafEntry>`.
+                let mut lo = 0usize;
+                let mut hi = slot_count;
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let payload = view.payload(mid as u16).ok_or_else(|| {
+                        ErrorEnvelope::new(
+                            ErrorCategory::Corruption,
+                            MODULE_ID,
+                            "BTreeCursor::seek_ge",
+                            format!("unexpected tombstone in leaf slot {mid}"),
+                        )
+                    })?;
+                    let (k, _) = decode_leaf_entry(payload)?;
+                    if k < target {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                self.leaf = Some(ActiveLeaf {
+                    page_id: current,
+                    page_bytes,
+                    slot_count,
+                });
+                if lo < slot_count {
+                    self.entry_idx = lo;
                     self.valid = true;
                     return Ok(true);
                 }
                 return self.advance_to_next_nonempty_leaf();
             }
 
-            let node = read_internal_node(&page_bytes, current)?;
+            if !TreeKind::is_internal(ptype) || slot_count == 0 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "BTreeCursor::seek_ge",
+                    format!("invalid internal page {} during seek_ge", current.raw()),
+                ));
+            }
+
             let (child_idx, next_pid) = choose_child(&view, target)?;
-            self.stack.push(CursorFrame { node, child_idx });
+            self.stack.push(CursorFrame {
+                page_id: current,
+                page_bytes,
+                slot_count,
+                child_idx,
+            });
             current = next_pid;
         }
     }
 
-    /// Returns the current `(key, value)` slice if the cursor is positioned on a valid entry.
+    /// Returns the current `(key, value)` zero-copy slice if the cursor is positioned on a valid entry.
     pub fn current(&self) -> Option<(&[u8], &[u8])> {
         if !self.valid {
             return None;
         }
-        let e = self.leaf_entries.get(self.entry_idx)?;
-        Some((e.key.as_slice(), e.value.as_slice()))
+        let leaf = self.leaf.as_ref()?;
+        if self.entry_idx >= leaf.slot_count {
+            return None;
+        }
+        let view = SlottedPageView::parse_verified(&leaf.page_bytes, leaf.page_id).ok()?;
+        let payload = view.payload(self.entry_idx as u16)?;
+        decode_leaf_entry(payload).ok()
     }
 
     /// Advances the cursor forward by one entry, returning `true` if still positioned on an entry.
@@ -144,9 +200,11 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
         if !self.valid {
             return Ok(false);
         }
-        if self.entry_idx + 1 < self.leaf_entries.len() {
-            self.entry_idx += 1;
-            return Ok(true);
+        if let Some(leaf) = &self.leaf {
+            if self.entry_idx + 1 < leaf.slot_count {
+                self.entry_idx += 1;
+                return Ok(true);
+            }
         }
         self.advance_to_next_nonempty_leaf()
     }
@@ -165,9 +223,10 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
 
     fn descend_leftmost(&mut self, start: PageId) -> Result<()> {
         let mut current = start;
-        let mut visited = HashSet::new();
         loop {
-            if self.stack.len() >= MAX_BTREE_HEIGHT || !visited.insert(current) {
+            if self.stack.len() >= MAX_BTREE_HEIGHT
+                || self.stack.iter().any(|f| f.page_id == current)
+            {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
                     MODULE_ID,
@@ -176,23 +235,51 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
                 ));
             }
             let page_bytes = self.store.read_page(current)?;
-            let view = SlottedPageView::parse(&page_bytes, current)?;
-            if TreeKind::is_leaf(view.header().page_type) {
-                self.leaf_entries = read_leaf_entries(&page_bytes, current)?;
+            let view = SlottedPageView::parse_verified(&page_bytes, current)?;
+            let ptype = view.header().page_type;
+            let slot_count = usize::from(view.slot_count());
+
+            if TreeKind::is_leaf(ptype) {
+                self.leaf = Some(ActiveLeaf {
+                    page_id: current,
+                    page_bytes,
+                    slot_count,
+                });
                 return Ok(());
             }
-            let node = read_internal_node(&page_bytes, current)?;
-            let next_pid = node.leftmost_child;
-            self.stack.push(CursorFrame { node, child_idx: 0 });
+            if !TreeKind::is_internal(ptype) || slot_count == 0 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "BTreeCursor::descend_leftmost",
+                    format!("invalid internal page {}", current.raw()),
+                ));
+            }
+            let payload = view.payload(0).ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "BTreeCursor::descend_leftmost",
+                    "internal sentinel slot 0 missing",
+                )
+            })?;
+            let (_, next_pid) = decode_internal_slot(payload)?;
+            self.stack.push(CursorFrame {
+                page_id: current,
+                page_bytes,
+                slot_count,
+                child_idx: 0,
+            });
             current = next_pid;
         }
     }
 
     fn descend_rightmost(&mut self, start: PageId) -> Result<()> {
         let mut current = start;
-        let mut visited = HashSet::new();
         loop {
-            if self.stack.len() >= MAX_BTREE_HEIGHT || !visited.insert(current) {
+            if self.stack.len() >= MAX_BTREE_HEIGHT
+                || self.stack.iter().any(|f| f.page_id == current)
+            {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
                     MODULE_ID,
@@ -201,20 +288,40 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
                 ));
             }
             let page_bytes = self.store.read_page(current)?;
-            let view = SlottedPageView::parse(&page_bytes, current)?;
-            if TreeKind::is_leaf(view.header().page_type) {
-                self.leaf_entries = read_leaf_entries(&page_bytes, current)?;
+            let view = SlottedPageView::parse_verified(&page_bytes, current)?;
+            let ptype = view.header().page_type;
+            let slot_count = usize::from(view.slot_count());
+
+            if TreeKind::is_leaf(ptype) {
+                self.leaf = Some(ActiveLeaf {
+                    page_id: current,
+                    page_bytes,
+                    slot_count,
+                });
                 return Ok(());
             }
-            let node = read_internal_node(&page_bytes, current)?;
-            let last_idx = node.separators.len();
-            let next_pid = if last_idx == 0 {
-                node.leftmost_child
-            } else {
-                node.separators[last_idx - 1].1
-            };
+            if !TreeKind::is_internal(ptype) || slot_count == 0 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "BTreeCursor::descend_rightmost",
+                    format!("invalid internal page {}", current.raw()),
+                ));
+            }
+            let last_idx = slot_count - 1;
+            let payload = view.payload(last_idx as u16).ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "BTreeCursor::descend_rightmost",
+                    format!("missing internal slot {last_idx}"),
+                )
+            })?;
+            let (_, next_pid) = decode_internal_slot(payload)?;
             self.stack.push(CursorFrame {
-                node,
+                page_id: current,
+                page_bytes,
+                slot_count,
                 child_idx: last_idx,
             });
             current = next_pid;
@@ -226,9 +333,9 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
             while let Some(top) = self.stack.last_mut() {
                 if top.child_idx + 1 < top.child_count() {
                     top.child_idx += 1;
-                    let next_child = top.child_pid(top.child_idx);
+                    let next_child = top.child_pid(top.child_idx)?;
                     self.descend_leftmost(next_child)?;
-                    if !self.leaf_entries.is_empty() {
+                    if self.leaf.as_ref().is_some_and(|l| l.slot_count > 0) {
                         self.entry_idx = 0;
                         self.valid = true;
                         return Ok(true);
@@ -239,7 +346,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
             }
             if self.stack.is_empty() {
                 self.valid = false;
-                self.leaf_entries.clear();
+                self.leaf = None;
                 return Ok(false);
             }
         }
@@ -250,12 +357,14 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
             while let Some(top) = self.stack.last_mut() {
                 if top.child_idx > 0 {
                     top.child_idx -= 1;
-                    let prev_child = top.child_pid(top.child_idx);
+                    let prev_child = top.child_pid(top.child_idx)?;
                     self.descend_rightmost(prev_child)?;
-                    if !self.leaf_entries.is_empty() {
-                        self.entry_idx = self.leaf_entries.len() - 1;
-                        self.valid = true;
-                        return Ok(true);
+                    if let Some(leaf) = &self.leaf {
+                        if leaf.slot_count > 0 {
+                            self.entry_idx = leaf.slot_count - 1;
+                            self.valid = true;
+                            return Ok(true);
+                        }
                     }
                     break;
                 }
@@ -263,7 +372,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
             }
             if self.stack.is_empty() {
                 self.valid = false;
-                self.leaf_entries.clear();
+                self.leaf = None;
                 return Ok(false);
             }
         }
