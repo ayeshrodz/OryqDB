@@ -414,3 +414,19 @@ evidence = [
     "ORYQ_EXPECT_HYBRID=1 python3 -m unittest discover -s bindings/python/tests -v",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0025"
+modules = ["engine"]
+files = [
+    "crates/oryq-engine/src/transaction/mod.rs",
+]
+reason = "Implement Issue #38 (v0.13.0): switch pub(crate) commit_write_txn dirty_pages map from Vec<u8> to Arc<[u8]> alongside O(1) undo-log savepoints and right-edge B+ tree append splits (no public API or on-disk format change)."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-engine",
+    "cargo test --workspace",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

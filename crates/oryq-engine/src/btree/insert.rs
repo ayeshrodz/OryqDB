@@ -41,22 +41,24 @@ pub fn btree_insert(
     let (leaf_pid, leaf_bytes, mut path) = descend_to_leaf(store, root, key)?;
     let mut entries = read_leaf_entries(&leaf_bytes, leaf_pid)?;
 
-    let previous = match entries.binary_search_by(|e| e.key.as_slice().cmp(key)) {
-        Ok(idx) => {
-            let prev = core::mem::replace(&mut entries[idx].value, value.to_vec());
-            Some(prev)
-        }
-        Err(idx) => {
-            entries.insert(
-                idx,
-                LeafEntry {
-                    key: key.to_vec(),
-                    value: value.to_vec(),
-                },
-            );
-            None
-        }
-    };
+    let (previous, inserted_at_right_edge) =
+        match entries.binary_search_by(|e| e.key.as_slice().cmp(key)) {
+            Ok(idx) => {
+                let prev = core::mem::replace(&mut entries[idx].value, value.to_vec());
+                (Some(prev), false)
+            }
+            Err(idx) => {
+                let at_right_edge = idx == entries.len();
+                entries.insert(
+                    idx,
+                    LeafEntry {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    },
+                );
+                (None, at_right_edge)
+            }
+        };
 
     let lsn = store.writer_tx_id();
     let is_root = path.is_empty();
@@ -68,7 +70,11 @@ pub fn btree_insert(
     }
 
     // Leaf split: split entries cleanly into two non-empty halves that each fit in one page.
-    let split_idx = choose_leaf_split_index(&entries, max_page_usable_bytes(page_size))?;
+    let split_idx = choose_leaf_split_index(
+        &entries,
+        max_page_usable_bytes(page_size),
+        inserted_at_right_edge,
+    )?;
     let right_entries = entries.split_off(split_idx);
     let left_entries = entries;
     let promoted_key = right_entries[0].key.clone();
@@ -178,7 +184,11 @@ pub fn btree_insert(
     Ok((new_root_pid, previous))
 }
 
-fn choose_leaf_split_index(entries: &[LeafEntry], max_bytes: usize) -> Result<usize> {
+fn choose_leaf_split_index(
+    entries: &[LeafEntry],
+    max_bytes: usize,
+    inserted_at_right_edge: bool,
+) -> Result<usize> {
     if entries.len() < 2 {
         return Err(ErrorEnvelope::new(
             ErrorCategory::Internal,
@@ -186,6 +196,17 @@ fn choose_leaf_split_index(entries: &[LeafEntry], max_bytes: usize) -> Result<us
             "btree::choose_leaf_split_index",
             "cannot split leaf with fewer than 2 entries",
         ));
+    }
+    // Right-edge append optimization: on strictly increasing / sequential inserts, keep the
+    // left leaf ~95-99% full (like SQLite) and move only the new rightmost entry into the new
+    // right leaf, avoiding 50% page fill bloat and halving sequential page splits.
+    if inserted_at_right_edge {
+        let candidate = entries.len() - 1;
+        if leaf_serialized_bytes(&entries[..candidate]) <= max_bytes
+            && leaf_serialized_bytes(&entries[candidate..]) <= max_bytes
+        {
+            return Ok(candidate);
+        }
     }
     let total = leaf_serialized_bytes(entries);
     let target = total / 2;

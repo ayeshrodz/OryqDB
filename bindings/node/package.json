@@ -1,6 +1,6 @@
 {
   "name": "oryqdb",
-  "version": "0.12.4",
+  "version": "0.13.0",
   "description": "Official zero-dependency Node.js (Node-API) bindings for OryqDB (C ABI v1.2)",
   "license": "MIT",
   "type": "module",

@@ -42,7 +42,7 @@ pub(crate) struct WalFrameLocation {
 /// poisons the engine and requires reopen recovery.
 pub(crate) fn append_and_sync_wal_commit(
     wal: &mut WalAppendState,
-    dirty_pages: &BTreeMap<PageId, Vec<u8>>,
+    dirty_pages: &BTreeMap<PageId, Arc<[u8]>>,
     tx_id: TxId,
     meta: CommittedDbMeta,
     sync_mode: SyncMode,
@@ -187,7 +187,7 @@ pub(crate) fn append_and_sync_wal_commit(
 pub(crate) fn install_committed_versions(
     versions: &mut VersionIndex,
     cache: &PageCache,
-    dirty_pages: &BTreeMap<PageId, Vec<u8>>,
+    dirty_pages: &BTreeMap<PageId, Arc<[u8]>>,
     frame_locations: &[WalFrameLocation],
     tx_id: TxId,
 ) -> Result<()> {
@@ -203,8 +203,7 @@ pub(crate) fn install_committed_versions(
             },
         )?;
         if let Some(bytes) = dirty_pages.get(&loc.page_id) {
-            let arc: Arc<[u8]> = Arc::from(bytes.as_slice());
-            let _ = cache.insert(loc.page_id, tx_id, arc);
+            let _ = cache.insert(loc.page_id, tx_id, Arc::clone(bytes));
         }
     }
     Ok(())
