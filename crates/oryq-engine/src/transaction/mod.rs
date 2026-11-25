@@ -381,14 +381,24 @@ impl StorageEngine {
 
         let pages_copied = if let Some(wf) = st.wal.file.clone() {
             if horizon > st.pager.header().checkpointed_tx_id {
-                let copied = copy_committed_pages_to_main(
+                let copied = match copy_committed_pages_to_main(
                     &mut st.pager,
                     wf.as_ref(),
                     &st.versions,
                     &dirty_list,
                     horizon,
                     meta_at_horizon,
-                )?;
+                ) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        // Invalidate cached main-file LSNs for any page that may have been
+                        // partially overwritten before the error so reads re-verify from disk.
+                        for pid in &dirty_list {
+                            st.main_page_lsns.remove(pid);
+                        }
+                        return Err(err);
+                    }
+                };
                 if copied > 0 {
                     for pid in &dirty_list {
                         if let Some(entry) = st.versions.resolve_for_snapshot(*pid, horizon) {
@@ -606,7 +616,8 @@ impl StorageEngine {
         }
 
         // Fast path: check PageCache for main `.oryq` page before doing disk I/O.
-        if let Some(&lsn) = st.main_page_lsns.get(&page_id) {
+        let known_lsn = st.main_page_lsns.get(&page_id).copied();
+        if let Some(lsn) = known_lsn {
             if let Some(hit) = self.cache.get(page_id, lsn) {
                 return Ok(hit.as_arc());
             }
@@ -621,8 +632,10 @@ impl StorageEngine {
             let _ = crate::format::SlottedPageView::parse_with_header(guard.as_slice(), hdr)?;
         }
         st.main_page_lsns.insert(page_id, hdr.lsn_tx_id);
-        if let Some(hit) = self.cache.get(page_id, hdr.lsn_tx_id) {
-            return Ok(hit.as_arc());
+        if known_lsn != Some(hdr.lsn_tx_id) {
+            if let Some(hit) = self.cache.get(page_id, hdr.lsn_tx_id) {
+                return Ok(hit.as_arc());
+            }
         }
         let arc: Arc<[u8]> = Arc::from(guard.as_slice());
         let _ = self.cache.insert(page_id, hdr.lsn_tx_id, Arc::clone(&arc));

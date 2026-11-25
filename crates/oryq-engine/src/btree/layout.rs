@@ -132,6 +132,9 @@ impl PageStoreMut for PagerPageStore<'_> {
         self.pager.write_page(page_id, bytes)?;
         if let Some(cache) = self.cache {
             let hdr = PageHeader::decode_and_verify(bytes, page_id)?;
+            if TreeKind::is_leaf(hdr.page_type) || TreeKind::is_internal(hdr.page_type) {
+                let _ = SlottedPageView::parse_with_header(bytes, hdr)?;
+            }
             let arc: Arc<[u8]> = Arc::from(bytes);
             let _ = cache.put_replace(page_id, hdr.lsn_tx_id, arc);
         }

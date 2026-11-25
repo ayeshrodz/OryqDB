@@ -192,14 +192,14 @@ impl PageHeader {
         let raw_id = u64::from_le_bytes(page[0..8].try_into().unwrap());
         if raw_id == 0 {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 "logical page header has invalid PageId 0",
             ));
         }
         let page_id = PageId::new(raw_id);
         if page_id != expected_page_id {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 format!(
                     "page_id mismatch: expected {}, found {}",
                     expected_page_id.raw(),
@@ -217,7 +217,7 @@ impl PageHeader {
 
         if usize::from(free_space_end) > page.len() {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 format!(
                     "free_space_end {free_space_end} exceeds page_size {}",
                     page.len()
@@ -335,7 +335,13 @@ impl<'a> SlottedPageView<'a> {
             ));
         }
 
-        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(usize::from(header.slot_count));
+        // Fast path: `SlottedPageMut` allocates live payloads strictly top-down (non-increasing
+        // `payload_offset`, so each span's `end <= prev_start`). Proving monotonic non-overlap
+        // in a single pass avoids heap allocation and sorting on freshly built / compacted pages;
+        // out-of-order spans fall back to exact sort-and-sweep overlap checking.
+        let mut prev_start = page_bytes.len();
+        let mut needs_sort_check = false;
+        let mut live_count = 0usize;
         for idx in 0..usize::from(header.slot_count) {
             let off = PAGE_HEADER_SIZE + idx * SLOT_ENTRY_SIZE;
             let raw: &[u8; SLOT_ENTRY_SIZE] =
@@ -366,21 +372,42 @@ impl<'a> SlottedPageView<'a> {
                 ));
             }
             if len > 0 {
-                spans.push((start, end));
+                live_count += 1;
+                if end <= prev_start {
+                    prev_start = start;
+                } else {
+                    needs_sort_check = true;
+                }
             }
         }
 
-        // Verify live payload spans are strictly non-overlapping.
-        spans.sort_unstable_by_key(|&(s, _)| s);
-        for w in spans.windows(2) {
-            if w[0].1 > w[1].0 {
-                return Err(corrupt(
-                    "SlottedPageView::parse",
-                    format!(
-                        "overlapping slot payload spans [{}, {}) and [{}, {})",
-                        w[0].0, w[0].1, w[1].0, w[1].1
-                    ),
-                ));
+        if needs_sort_check {
+            let mut spans: Vec<(usize, usize)> = Vec::with_capacity(live_count);
+            for idx in 0..usize::from(header.slot_count) {
+                let off = PAGE_HEADER_SIZE + idx * SLOT_ENTRY_SIZE;
+                let raw: &[u8; SLOT_ENTRY_SIZE] =
+                    page_bytes[off..off + SLOT_ENTRY_SIZE].try_into().unwrap();
+                let entry = SlotEntry::decode(raw)?;
+                if entry.is_tombstone() || entry.payload_len == 0 {
+                    continue;
+                }
+                let start = usize::from(entry.payload_offset);
+                let end = start + usize::from(entry.payload_len);
+                spans.push((start, end));
+            }
+
+            // Verify live payload spans are strictly non-overlapping.
+            spans.sort_unstable_by_key(|&(s, _)| s);
+            for w in spans.windows(2) {
+                if w[0].1 > w[1].0 {
+                    return Err(corrupt(
+                        "SlottedPageView::parse",
+                        format!(
+                            "overlapping slot payload spans [{}, {}) and [{}, {})",
+                            w[0].0, w[0].1, w[1].0, w[1].1
+                        ),
+                    ));
+                }
             }
         }
 
@@ -451,8 +478,11 @@ impl<'a> SlottedPageView<'a> {
             return None;
         }
         let start = usize::from(entry.payload_offset);
-        let end = start + usize::from(entry.payload_len);
-        Some(&self.bytes[start..end])
+        if start < usize::from(self.header.free_space_end) {
+            return None;
+        }
+        let end = start.checked_add(usize::from(entry.payload_len))?;
+        self.bytes.get(start..end)
     }
 }
 

@@ -73,13 +73,58 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
         }
     }
 
+    /// Resets cursor position state before starting a fresh seek or on corruption.
+    #[inline]
+    fn reset_state(&mut self) {
+        self.stack.clear();
+        self.leaf = None;
+        self.entry_idx = 0;
+        self.valid = false;
+    }
+
+    /// Validates that the currently landed leaf slot is a live, well-formed B+ tree entry.
+    /// Fails closed with `ErrorCategory::Corruption` and invalidates the cursor on corrupt data.
+    fn validate_landed_entry(&mut self, op: &'static str) -> Result<()> {
+        let Some(leaf) = &self.leaf else {
+            self.valid = false;
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                op,
+                "cursor has no active leaf page",
+            ));
+        };
+        let res = (|| -> Result<()> {
+            let view = SlottedPageView::parse_verified(&leaf.page_bytes, leaf.page_id)?;
+            let payload = view.payload(self.entry_idx as u16).ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    op,
+                    format!(
+                        "unexpected tombstone or out-of-bounds leaf slot {} on page {}",
+                        self.entry_idx,
+                        leaf.page_id.raw()
+                    ),
+                )
+            })?;
+            let _ = decode_leaf_entry(payload)?;
+            Ok(())
+        })();
+        if res.is_err() {
+            self.reset_state();
+        }
+        res
+    }
+
     /// Positions the cursor at the smallest key in the tree.
     pub fn seek_first(&mut self) -> Result<bool> {
-        self.stack.clear();
+        self.reset_state();
         self.descend_leftmost(self.root)?;
         if let Some(leaf) = &self.leaf {
             if leaf.slot_count > 0 {
                 self.entry_idx = 0;
+                self.validate_landed_entry("BTreeCursor::seek_first")?;
                 self.valid = true;
                 return Ok(true);
             }
@@ -89,11 +134,12 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
 
     /// Positions the cursor at the largest key in the tree.
     pub fn seek_last(&mut self) -> Result<bool> {
-        self.stack.clear();
+        self.reset_state();
         self.descend_rightmost(self.root)?;
         if let Some(leaf) = &self.leaf {
             if leaf.slot_count > 0 {
                 self.entry_idx = leaf.slot_count - 1;
+                self.validate_landed_entry("BTreeCursor::seek_last")?;
                 self.valid = true;
                 return Ok(true);
             }
@@ -103,8 +149,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
 
     /// Positions the cursor at the first key `>= target`.
     pub fn seek_ge(&mut self, target: &[u8]) -> Result<bool> {
-        self.stack.clear();
-        self.leaf = None;
+        self.reset_state();
         let mut current = self.root;
 
         loop {
@@ -203,6 +248,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
         if let Some(leaf) = &self.leaf {
             if self.entry_idx + 1 < leaf.slot_count {
                 self.entry_idx += 1;
+                self.validate_landed_entry("BTreeCursor::step_next")?;
                 return Ok(true);
             }
         }
@@ -216,6 +262,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
         }
         if self.entry_idx > 0 {
             self.entry_idx -= 1;
+            self.validate_landed_entry("BTreeCursor::step_prev")?;
             return Ok(true);
         }
         self.retreat_to_prev_nonempty_leaf()
@@ -329,6 +376,8 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
     }
 
     fn advance_to_next_nonempty_leaf(&mut self) -> Result<bool> {
+        self.valid = false;
+        self.leaf = None;
         loop {
             while let Some(top) = self.stack.last_mut() {
                 if top.child_idx + 1 < top.child_count() {
@@ -337,6 +386,7 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
                     self.descend_leftmost(next_child)?;
                     if self.leaf.as_ref().is_some_and(|l| l.slot_count > 0) {
                         self.entry_idx = 0;
+                        self.validate_landed_entry("BTreeCursor::advance_to_next_nonempty_leaf")?;
                         self.valid = true;
                         return Ok(true);
                     }
@@ -353,6 +403,8 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
     }
 
     fn retreat_to_prev_nonempty_leaf(&mut self) -> Result<bool> {
+        self.valid = false;
+        self.leaf = None;
         loop {
             while let Some(top) = self.stack.last_mut() {
                 if top.child_idx > 0 {
@@ -362,6 +414,9 @@ impl<'a, S: PageStore> BTreeCursor<'a, S> {
                     if let Some(leaf) = &self.leaf {
                         if leaf.slot_count > 0 {
                             self.entry_idx = leaf.slot_count - 1;
+                            self.validate_landed_entry(
+                                "BTreeCursor::retreat_to_prev_nonempty_leaf",
+                            )?;
                             self.valid = true;
                             return Ok(true);
                         }
