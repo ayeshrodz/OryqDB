@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.13.0 — O(1) Undo-Log Savepoints, Zero-Copy Dirty Pages & Right-Edge B+ Tree Splits (Issue #38)
-STATUS: Active `v0.13.x` Performance & Storage-Efficiency Sprint — +47–55% faster batched inserts and -29–33% smaller single-file `.oryq` databases on sequential inserts.
+MILESTONE: v0.13.1 — PageCache Main-File Hit Path, Verified Page Views & Zero-Copy B+ Tree Cursor/Descent (Issue #39)
+STATUS: Active `v0.13.x` Performance & Storage-Efficiency Sprint — `717k ops/sec` Rust primary lookups, `29k docs/sec` batched inserts, and -29–33% smaller single-file `.oryq` databases.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

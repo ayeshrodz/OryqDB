@@ -196,8 +196,13 @@ impl PageStoreMut for WriteTxn<'_> {
                 "page slice length does not match configured page_size",
             ));
         }
-        // Validate page header checksum and lsn_tx_id match before buffering.
+        // Validate page header checksum, slotted layout, and lsn_tx_id match before buffering.
         let hdr = PageHeader::decode_and_verify(bytes, page_id)?;
+        if crate::btree::TreeKind::is_leaf(hdr.page_type)
+            || crate::btree::TreeKind::is_internal(hdr.page_type)
+        {
+            let _ = crate::format::SlottedPageView::parse_with_header(bytes, hdr)?;
+        }
         if hdr.lsn_tx_id != self.tx_id {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::InvalidArgument,

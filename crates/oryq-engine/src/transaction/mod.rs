@@ -46,6 +46,9 @@ struct EngineState {
     versions: VersionIndex,
     /// Pages that have at least one committed WAL version in the current cycle.
     wal_dirty_pages: HashSet<PageId>,
+    /// Known `(PageId -> lsn_tx_id)` for pages resident in the main `.oryq` file so
+    /// `read_page_at_snapshot` can hit `PageCache` in RAM without doing a disk `pread`.
+    main_page_lsns: std::collections::HashMap<PageId, TxId>,
     /// Committed metadata history ordered by `TxId` for snapshot-consistent reads and checkpoints.
     meta_history: BTreeMap<TxId, CommittedDbMeta>,
     salt_counter: u64,
@@ -258,6 +261,7 @@ impl StorageEngine {
                 wal: wal_state,
                 versions,
                 wal_dirty_pages,
+                main_page_lsns: std::collections::HashMap::new(),
                 meta_history,
                 salt_counter,
             }),
@@ -282,8 +286,15 @@ impl StorageEngine {
         self.coordinator.is_poisoned()
     }
 
+    #[inline]
     pub fn is_read_only(&self) -> bool {
         self.config.read_only
+    }
+
+    /// Returns a point-in-time snapshot of [`PageCache`] hit/miss/eviction metrics.
+    #[inline]
+    pub fn cache_stats(&self) -> crate::cache::CacheStats {
+        self.cache.stats()
     }
 
     /// Executes an ordered batch of write closures inside a single [`WriteTxn`] and a single
@@ -370,14 +381,34 @@ impl StorageEngine {
 
         let pages_copied = if let Some(wf) = st.wal.file.clone() {
             if horizon > st.pager.header().checkpointed_tx_id {
-                copy_committed_pages_to_main(
+                let copied = match copy_committed_pages_to_main(
                     &mut st.pager,
                     wf.as_ref(),
                     &st.versions,
                     &dirty_list,
                     horizon,
                     meta_at_horizon,
-                )?
+                ) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        // Invalidate cached main-file LSNs for any page that may have been
+                        // partially overwritten before the error so reads re-verify from disk.
+                        for pid in &dirty_list {
+                            st.main_page_lsns.remove(pid);
+                        }
+                        return Err(err);
+                    }
+                };
+                if copied > 0 {
+                    for pid in &dirty_list {
+                        if let Some(entry) = st.versions.resolve_for_snapshot(*pid, horizon) {
+                            st.main_page_lsns.insert(*pid, entry.tx_id);
+                        } else {
+                            st.main_page_lsns.remove(pid);
+                        }
+                    }
+                }
+                copied
             } else {
                 0
             }
@@ -535,6 +566,7 @@ impl StorageEngine {
             st.wal.last_checksum = 0;
             st.versions = VersionIndex::new(self.config.max_version_entries);
             st.wal_dirty_pages.clear();
+            st.main_page_lsns.clear();
             self.cache.clear();
 
             let new_meta = CommittedDbMeta::from_header(st.pager.header());
@@ -555,7 +587,7 @@ impl StorageEngine {
         page_id: PageId,
         snapshot_id: SnapshotId,
     ) -> Result<Arc<[u8]>> {
-        let st = self.lock_state()?;
+        let mut st = self.lock_state()?;
         if let Some(entry) = st.versions.resolve_for_snapshot(page_id, snapshot_id) {
             if let Some(hit) = self.cache.get(page_id, entry.tx_id) {
                 return Ok(hit.as_arc());
@@ -571,18 +603,39 @@ impl StorageEngine {
                 })?;
                 let mut buf = vec![0u8; self.page_size.bytes()];
                 wf.read_exact_at(&mut buf, file_offset)?;
-                let _ = PageHeader::decode_and_verify(&buf, page_id)?;
+                let hdr = PageHeader::decode_and_verify(&buf, page_id)?;
+                if crate::btree::TreeKind::is_leaf(hdr.page_type)
+                    || crate::btree::TreeKind::is_internal(hdr.page_type)
+                {
+                    let _ = crate::format::SlottedPageView::parse_with_header(&buf, hdr)?;
+                }
                 let arc: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
                 let _ = self.cache.insert(page_id, entry.tx_id, Arc::clone(&arc));
                 return Ok(arc);
             }
         }
 
-        // Fall back to main `.oryq` file.
+        // Fast path: check PageCache for main `.oryq` page before doing disk I/O.
+        let known_lsn = st.main_page_lsns.get(&page_id).copied();
+        if let Some(lsn) = known_lsn {
+            if let Some(hit) = self.cache.get(page_id, lsn) {
+                return Ok(hit.as_arc());
+            }
+        }
+
+        // Cache miss -> read from main `.oryq` file and verify checksum + slotted layout once.
         let guard = st.pager.read_page(page_id, None)?;
         let hdr = PageHeader::decode_and_verify(guard.as_slice(), page_id)?;
-        if let Some(hit) = self.cache.get(page_id, hdr.lsn_tx_id) {
-            return Ok(hit.as_arc());
+        if crate::btree::TreeKind::is_leaf(hdr.page_type)
+            || crate::btree::TreeKind::is_internal(hdr.page_type)
+        {
+            let _ = crate::format::SlottedPageView::parse_with_header(guard.as_slice(), hdr)?;
+        }
+        st.main_page_lsns.insert(page_id, hdr.lsn_tx_id);
+        if known_lsn != Some(hdr.lsn_tx_id) {
+            if let Some(hit) = self.cache.get(page_id, hdr.lsn_tx_id) {
+                return Ok(hit.as_arc());
+            }
         }
         let arc: Arc<[u8]> = Arc::from(guard.as_slice());
         let _ = self.cache.insert(page_id, hdr.lsn_tx_id, Arc::clone(&arc));

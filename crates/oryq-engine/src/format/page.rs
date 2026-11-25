@@ -176,18 +176,30 @@ impl PageHeader {
                 ),
             ));
         }
+        Self::decode_without_checksum(page, expected_page_id)
+    }
 
+    /// Decodes a 32-byte header from an already I/O-verified page without recomputing `XXH3_64`.
+    #[inline]
+    pub fn decode_without_checksum(page: &[u8], expected_page_id: PageId) -> Result<Self> {
+        if page.len() < PAGE_HEADER_SIZE {
+            return Err(corrupt(
+                "PageHeader::decode_without_checksum",
+                format!("page buffer too small ({} bytes)", page.len()),
+            ));
+        }
+        let stored_checksum = u64::from_le_bytes(page[24..32].try_into().unwrap());
         let raw_id = u64::from_le_bytes(page[0..8].try_into().unwrap());
         if raw_id == 0 {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 "logical page header has invalid PageId 0",
             ));
         }
         let page_id = PageId::new(raw_id);
         if page_id != expected_page_id {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 format!(
                     "page_id mismatch: expected {}, found {}",
                     expected_page_id.raw(),
@@ -205,7 +217,7 @@ impl PageHeader {
 
         if usize::from(free_space_end) > page.len() {
             return Err(corrupt(
-                "PageHeader::decode_and_verify",
+                "PageHeader::decode_without_checksum",
                 format!(
                     "free_space_end {free_space_end} exceeds page_size {}",
                     page.len()
@@ -304,6 +316,11 @@ impl<'a> SlottedPageView<'a> {
     /// Parses and validates header checksum, directory bounds, and non-overlapping live spans.
     pub fn parse(page_bytes: &'a [u8], expected_page_id: PageId) -> Result<Self> {
         let header = PageHeader::decode_and_verify(page_bytes, expected_page_id)?;
+        Self::parse_with_header(page_bytes, header)
+    }
+
+    /// Validates directory bounds and non-overlapping live spans using an already-verified header.
+    pub fn parse_with_header(page_bytes: &'a [u8], header: PageHeader) -> Result<Self> {
         let dir_end = PAGE_HEADER_SIZE
             .checked_add(usize::from(header.slot_count) * SLOT_ENTRY_SIZE)
             .ok_or_else(|| corrupt("SlottedPageView::parse", "slot directory size overflow"))?;
@@ -318,7 +335,13 @@ impl<'a> SlottedPageView<'a> {
             ));
         }
 
-        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(usize::from(header.slot_count));
+        // Fast path: `SlottedPageMut` allocates live payloads strictly top-down (non-increasing
+        // `payload_offset`, so each span's `end <= prev_start`). Proving monotonic non-overlap
+        // in a single pass avoids heap allocation and sorting on freshly built / compacted pages;
+        // out-of-order spans fall back to exact sort-and-sweep overlap checking.
+        let mut prev_start = page_bytes.len();
+        let mut needs_sort_check = false;
+        let mut live_count = 0usize;
         for idx in 0..usize::from(header.slot_count) {
             let off = PAGE_HEADER_SIZE + idx * SLOT_ENTRY_SIZE;
             let raw: &[u8; SLOT_ENTRY_SIZE] =
@@ -349,24 +372,73 @@ impl<'a> SlottedPageView<'a> {
                 ));
             }
             if len > 0 {
+                live_count += 1;
+                if end <= prev_start {
+                    prev_start = start;
+                } else {
+                    needs_sort_check = true;
+                }
+            }
+        }
+
+        if needs_sort_check {
+            let mut spans: Vec<(usize, usize)> = Vec::with_capacity(live_count);
+            for idx in 0..usize::from(header.slot_count) {
+                let off = PAGE_HEADER_SIZE + idx * SLOT_ENTRY_SIZE;
+                let raw: &[u8; SLOT_ENTRY_SIZE] =
+                    page_bytes[off..off + SLOT_ENTRY_SIZE].try_into().unwrap();
+                let entry = SlotEntry::decode(raw)?;
+                if entry.is_tombstone() || entry.payload_len == 0 {
+                    continue;
+                }
+                let start = usize::from(entry.payload_offset);
+                let end = start + usize::from(entry.payload_len);
                 spans.push((start, end));
             }
-        }
 
-        // Verify live payload spans are strictly non-overlapping.
-        spans.sort_unstable_by_key(|&(s, _)| s);
-        for w in spans.windows(2) {
-            if w[0].1 > w[1].0 {
-                return Err(corrupt(
-                    "SlottedPageView::parse",
-                    format!(
-                        "overlapping slot payload spans [{}, {}) and [{}, {})",
-                        w[0].0, w[0].1, w[1].0, w[1].1
-                    ),
-                ));
+            // Verify live payload spans are strictly non-overlapping.
+            spans.sort_unstable_by_key(|&(s, _)| s);
+            for w in spans.windows(2) {
+                if w[0].1 > w[1].0 {
+                    return Err(corrupt(
+                        "SlottedPageView::parse",
+                        format!(
+                            "overlapping slot payload spans [{}, {}) and [{}, {})",
+                            w[0].0, w[0].1, w[1].0, w[1].1
+                        ),
+                    ));
+                }
             }
         }
 
+        Ok(Self {
+            bytes: page_bytes,
+            header,
+        })
+    }
+
+    /// O(1), allocation-free view over an immutable page already verified at the I/O or write
+    /// boundary (skips redundant `XXH3_64` hashing and full-directory span sorting).
+    #[inline]
+    pub fn parse_verified(page_bytes: &'a [u8], expected_page_id: PageId) -> Result<Self> {
+        let header = PageHeader::decode_without_checksum(page_bytes, expected_page_id)?;
+        let dir_end = PAGE_HEADER_SIZE
+            .checked_add(usize::from(header.slot_count) * SLOT_ENTRY_SIZE)
+            .ok_or_else(|| {
+                corrupt(
+                    "SlottedPageView::parse_verified",
+                    "slot directory size overflow",
+                )
+            })?;
+        if dir_end > usize::from(header.free_space_end) {
+            return Err(corrupt(
+                "SlottedPageView::parse_verified",
+                format!(
+                    "slot directory end {dir_end} overlaps free_space_end {}",
+                    header.free_space_end
+                ),
+            ));
+        }
         Ok(Self {
             bytes: page_bytes,
             header,
@@ -406,8 +478,11 @@ impl<'a> SlottedPageView<'a> {
             return None;
         }
         let start = usize::from(entry.payload_offset);
-        let end = start + usize::from(entry.payload_len);
-        Some(&self.bytes[start..end])
+        if start < usize::from(self.header.free_space_end) {
+            return None;
+        }
+        let end = start.checked_add(usize::from(entry.payload_len))?;
+        self.bytes.get(start..end)
     }
 }
 

@@ -130,3 +130,68 @@ fn interrupted_reset_intent_completes_on_reopen() {
         assert!(!pager.header().wal_required);
     }
 }
+
+#[test]
+fn checkpointed_main_file_reads_hit_page_cache_and_refresh_on_update() {
+    let vfs = FaultVfs::new();
+    let io = Arc::new(FaultVfsIo(Arc::clone(&vfs)));
+    let path = Path::new("/mem/cache_main_hits.oryq");
+    let cfg = EngineConfig {
+        page_size: PageSize::Size4096,
+        ..EngineConfig::default()
+    };
+
+    let engine = StorageEngine::open(io, path, cfg, TEST_UUID).unwrap();
+
+    // Commit Tx 1 and checkpoint + reset WAL so pages live solely in the main `.oryq` file.
+    {
+        let mut w = engine.begin_write().unwrap();
+        let mut tree = BTree::open(w.catalog_root_page_id(), TreeKind::Collection);
+        tree.insert(&mut w, b"alpha", b"v1").unwrap();
+        w.set_catalog_root_page_id(tree.root());
+        w.commit().unwrap();
+    }
+    let ckpt = engine.checkpoint(true).unwrap();
+    assert!(ckpt.wal_reset);
+
+    // Warm main_page_lsns / PageCache on first read, then verify subsequent reads hit PageCache
+    // with zero additional misses.
+    {
+        let r = engine.begin_read().unwrap();
+        let tree = BTree::open(r.catalog_root_page_id(), TreeKind::Collection);
+        assert_eq!(tree.get(&r, b"alpha").unwrap().as_deref(), Some(&b"v1"[..]));
+    }
+    let before = engine.cache_stats();
+    for _ in 0..10 {
+        let r = engine.begin_read().unwrap();
+        let tree = BTree::open(r.catalog_root_page_id(), TreeKind::Collection);
+        assert_eq!(tree.get(&r, b"alpha").unwrap().as_deref(), Some(&b"v1"[..]));
+    }
+    let after = engine.cache_stats();
+    assert!(
+        after.hits >= before.hits + 10,
+        "expected >= 10 PageCache hits on checkpointed reads, before={} after={}",
+        before.hits,
+        after.hits
+    );
+    assert_eq!(
+        after.misses, before.misses,
+        "expected zero PageCache misses on repeated checkpointed reads"
+    );
+
+    // Update the same key in Tx 2, checkpoint + reset WAL again, and verify reads see the new value
+    // (proving main_page_lsns refreshes cleanly and never serves stale cached pages).
+    {
+        let mut w = engine.begin_write().unwrap();
+        let mut tree = BTree::open(w.catalog_root_page_id(), TreeKind::Collection);
+        tree.insert(&mut w, b"alpha", b"v2").unwrap();
+        w.set_catalog_root_page_id(tree.root());
+        w.commit().unwrap();
+    }
+    assert!(engine.checkpoint(true).unwrap().wal_reset);
+    {
+        let r = engine.begin_read().unwrap();
+        let tree = BTree::open(r.catalog_root_page_id(), TreeKind::Collection);
+        assert_eq!(tree.get(&r, b"alpha").unwrap().as_deref(), Some(&b"v2"[..]));
+    }
+}
