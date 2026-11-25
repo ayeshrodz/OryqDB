@@ -592,7 +592,7 @@ impl StorageEngine {
     pub(crate) fn commit_write_txn(
         &self,
         tx_id: TxId,
-        dirty_pages: BTreeMap<PageId, Vec<u8>>,
+        dirty_pages: BTreeMap<PageId, Arc<[u8]>>,
         meta: CommittedDbMeta,
     ) -> Result<CommitReceipt> {
         let mut st = self.lock_state()?;

@@ -305,3 +305,33 @@ fn btree_rejects_oversized_single_entry() {
     let err = tree.insert(&mut store, b"k", &huge_val).unwrap_err();
     assert_eq!(err.category(), ErrorCategory::InvalidArgument);
 }
+
+#[test]
+fn btree_sequential_right_edge_inserts_achieve_high_page_fill_factor() {
+    let io: Arc<dyn oryq_engine::StorageIo> = Arc::new(oryq_engine::MemoryVfs::new());
+    let path = std::path::Path::new("seq_fill.oryq");
+    let cfg = EngineConfig {
+        page_size: PageSize::Size4096,
+        sync_mode: oryq_engine::SyncMode::Off,
+        ..EngineConfig::default()
+    };
+
+    let mut pager = Pager::create_new(io, path, &cfg, [0x77; 16]).unwrap();
+    let cache = PageCache::with_limit(4 * 1024 * 1024);
+    let mut store = PagerPageStore::new(&mut pager, Some(&cache), TxId::new(1), TxId::new(1));
+    let mut tree = BTree::create_empty(&mut store, TreeKind::Collection).unwrap();
+
+    // Insert 400 sequential 128-byte values (~51 KiB payload); with 50% splits this would
+    // consume ~32+ pages, while right-edge append splits keep leaf fill ~95% (<= 20 pages).
+    let val = vec![0xABu8; 128];
+    for i in 0..400u32 {
+        let key = format!("seq-{i:06}").into_bytes();
+        assert!(tree.insert(&mut store, &key, &val).unwrap().is_none());
+    }
+    let total_pages = store.pager().header().total_page_count;
+    assert!(
+        total_pages <= 22,
+        "expected right-edge append splits to pack 400 sequential entries into <= 22 4KiB pages, got {total_pages}"
+    );
+    assert_eq!(tree.scan_all(&store).unwrap().len(), 400);
+}

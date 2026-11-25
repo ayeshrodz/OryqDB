@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.12.4 — Binary Footprint Optimization, SQLite Comparison Benchmark & Final Pre-1.0 Audit (Issue #32)
-STATUS: Pre-1.0 Readiness Complete — all `v0.9.x`–`v0.12.4` milestones verified (`1.2 MiB` `liboryq.so`, `954 KiB` `oryq` CLI, Miri 24/24 clean, `cargo audit` 0 vulnerabilities, multi-OS CI green across 6 languages).
+MILESTONE: v0.13.0 — O(1) Undo-Log Savepoints, Zero-Copy Dirty Pages & Right-Edge B+ Tree Splits (Issue #38)
+STATUS: Active `v0.13.x` Performance & Storage-Efficiency Sprint — +47–55% faster batched inserts and -29–33% smaller single-file `.oryq` databases on sequential inserts.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

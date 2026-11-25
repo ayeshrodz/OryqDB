@@ -7,7 +7,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 ## [Unreleased]
 
 ### Planned
-- `1.0.0`: Production GA evaluation (all `0.12.x` pre-1.0 gates completed).
+- `0.13.1` (#39): PageCache main-file hit path, zero-rehash verified page views & allocation-free B+ tree descent.
+- `0.13.2` (#40): Core/Query/FFI hot-path optimizations & updated SQLite benchmark report.
+
+## [0.13.0] - 2026-11-26
+
+### Performance (#38 — O(1) Undo-Log Savepoints, Zero-Copy Dirty Pages & Right-Edge B+ Tree Append Splits)
+- Replaced O(N) `dirty_pages.clone()` in `WriteTxn::savepoint` with an O(1) undo-log (`SavepointMark` + `undo_log`), eliminating quadratic memory copying during batched statement writes (+47–55% faster batched inserts).
+- Switched `WriteTxn::dirty_pages` and `commit_write_txn` from `Vec<u8>` to `Arc<[u8]>` for zero-copy dirty-page reads (`Arc::clone`) and zero-copy PageCache population on commit.
+- Added right-edge append split in `btree::insert::choose_leaf_split_index`, raising sequential leaf fill factor from ~50% to ~95% and shrinking single-file `.oryq` size by ~29–33% (e.g. `1,352 KiB -> 960 KiB` for 2,000 docs; `360 KiB -> 240 KiB` after `VACUUM`).
+- Recorded `CC-0025` in `architecture/contract-changes.toml` and added `btree_sequential_right_edge_inserts_achieve_high_page_fill_factor`.
 
 ## [0.12.4] - 2026-11-24
 

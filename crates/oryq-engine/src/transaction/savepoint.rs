@@ -1,8 +1,4 @@
-//! Nested statement savepoint snapshots for [`crate::transaction::WriteTxn`].
-
-use std::collections::HashMap;
-
-use oryq_types::PageId;
+//! Nested statement savepoint markers for [`crate::transaction::WriteTxn`].
 
 use crate::recovery::CommittedDbMeta;
 
@@ -22,10 +18,10 @@ impl SavepointId {
     }
 }
 
-/// Captured transaction-private state prior to a savepoint.
-#[derive(Debug, Clone)]
-pub(crate) struct SavepointSnapshot {
-    pub dirty_pages: HashMap<PageId, Vec<u8>>,
-    pub retired_pages: Vec<PageId>,
+/// O(1) savepoint marker referencing positions in `WriteTxn`'s undo log and retired-page list.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SavepointMark {
+    pub undo_len: usize,
+    pub retired_len: usize,
     pub meta: CommittedDbMeta,
 }

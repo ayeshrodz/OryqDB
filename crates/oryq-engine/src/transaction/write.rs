@@ -1,5 +1,5 @@
-//! Exclusive write transaction with private dirty page buffers, nested statement savepoints,
-//! and atomic WAL commit/rollback (`docs/transactions.md` §3 & §4.2).
+//! Exclusive write transaction with private dirty page buffers, O(1) undo-log nested
+//! statement savepoints, and atomic WAL commit/rollback (`docs/transactions.md` §3 & §4.2).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use crate::coordinator::WriterPermit;
 use crate::format::PageHeader;
 use crate::ports::CommitReceipt;
 use crate::recovery::CommittedDbMeta;
-use crate::transaction::savepoint::{SavepointId, SavepointSnapshot};
+use crate::transaction::savepoint::{SavepointId, SavepointMark};
 use crate::transaction::StorageEngine;
 
 const MODULE_ID: &str = "engine";
@@ -27,10 +27,11 @@ pub struct WriteTxn<'a> {
     _permit: WriterPermit,
     base_tx_id: TxId,
     tx_id: TxId,
-    dirty_pages: HashMap<PageId, Vec<u8>>,
+    dirty_pages: HashMap<PageId, Arc<[u8]>>,
+    undo_log: Vec<(PageId, Option<Arc<[u8]>>)>,
     retired_pages: Vec<PageId>,
     meta: CommittedDbMeta,
-    savepoints: Vec<SavepointSnapshot>,
+    savepoints: Vec<SavepointMark>,
     committed: bool,
 }
 
@@ -48,6 +49,7 @@ impl<'a> WriteTxn<'a> {
             base_tx_id,
             tx_id,
             dirty_pages: HashMap::new(),
+            undo_log: Vec::new(),
             retired_pages: Vec::new(),
             meta: base_meta,
             savepoints: Vec::new(),
@@ -75,19 +77,19 @@ impl<'a> WriteTxn<'a> {
         self.meta.total_page_count
     }
 
-    /// Creates a nested statement savepoint capturing current dirty pages, allocations,
-    /// retired pages, and root metadata.
+    /// Creates an O(1) nested statement savepoint marker inside this write transaction.
     pub fn savepoint(&mut self) -> SavepointId {
         let id = SavepointId::new(self.savepoints.len());
-        self.savepoints.push(SavepointSnapshot {
-            dirty_pages: self.dirty_pages.clone(),
-            retired_pages: self.retired_pages.clone(),
+        self.savepoints.push(SavepointMark {
+            undo_len: self.undo_log.len(),
+            retired_len: self.retired_pages.len(),
             meta: self.meta,
         });
         id
     }
 
-    /// Rolls back all changes made since `savepoint` (and discards any deeper nested savepoints).
+    /// Rolls back all changes made since `savepoint` (and discards any deeper nested savepoints)
+    /// by replaying only the pages modified after `savepoint` in reverse order.
     pub fn rollback_to(&mut self, savepoint: SavepointId) -> Result<()> {
         let idx = savepoint.depth();
         if idx >= self.savepoints.len() {
@@ -98,11 +100,23 @@ impl<'a> WriteTxn<'a> {
                 "invalid or already-released savepoint handle",
             ));
         }
-        let snap = self.savepoints[idx].clone();
+        let mark = self.savepoints[idx];
         self.savepoints.truncate(idx);
-        self.dirty_pages = snap.dirty_pages;
-        self.retired_pages = snap.retired_pages;
-        self.meta = snap.meta;
+        for (pid, prev) in self.undo_log.drain(mark.undo_len..).rev() {
+            match prev {
+                Some(old_bytes) => {
+                    self.dirty_pages.insert(pid, old_bytes);
+                }
+                None => {
+                    self.dirty_pages.remove(&pid);
+                }
+            }
+        }
+        if self.savepoints.is_empty() {
+            self.undo_log.clear();
+        }
+        self.retired_pages.truncate(mark.retired_len);
+        self.meta = mark.meta;
         Ok(())
     }
 
@@ -118,13 +132,17 @@ impl<'a> WriteTxn<'a> {
             ));
         }
         self.savepoints.truncate(idx);
+        if self.savepoints.is_empty() {
+            self.undo_log.clear();
+        }
         Ok(())
     }
 
     /// Durably commits all buffered page mutations to `.oryq-wal`, syncs, and publishes
     /// the new snapshot atomically.
     pub fn commit(mut self) -> Result<CommitReceipt> {
-        let ordered: BTreeMap<PageId, Vec<u8>> = self.dirty_pages.drain().collect();
+        self.undo_log.clear();
+        let ordered: BTreeMap<PageId, Arc<[u8]>> = self.dirty_pages.drain().collect();
         self.meta.latest_tx_id = self.tx_id;
         let receipt = self
             .engine
@@ -136,6 +154,7 @@ impl<'a> WriteTxn<'a> {
     /// Explicitly discards all uncommitted changes and releases writer ownership.
     pub fn rollback(mut self) {
         self.dirty_pages.clear();
+        self.undo_log.clear();
         self.retired_pages.clear();
         self.savepoints.clear();
         self.committed = true;
@@ -149,7 +168,7 @@ impl PageStore for WriteTxn<'_> {
 
     fn read_page(&self, page_id: PageId) -> Result<Arc<[u8]>> {
         if let Some(dirty) = self.dirty_pages.get(&page_id) {
-            return Ok(Arc::from(dirty.as_slice()));
+            return Ok(Arc::clone(dirty));
         }
         self.engine.read_page_at_snapshot(page_id, self.base_tx_id)
     }
@@ -192,7 +211,10 @@ impl PageStoreMut for WriteTxn<'_> {
                 ),
             ));
         }
-        self.dirty_pages.insert(page_id, bytes.to_vec());
+        let prev = self.dirty_pages.insert(page_id, Arc::from(bytes));
+        if !self.savepoints.is_empty() {
+            self.undo_log.push((page_id, prev));
+        }
         if page_id.raw() >= self.meta.total_page_count {
             self.meta.total_page_count = page_id.raw() + 1;
         }
