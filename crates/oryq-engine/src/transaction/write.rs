@@ -275,6 +275,7 @@ impl<'a> WriteTxn<'a> {
         while let Some(page_id) = queue.pop_front() {
             if page_id == PageId::HEADER
                 || page_id == self.meta.catalog_root_page_id
+                || page_id.raw() >= self.meta.total_page_count
                 || existing.contains(&page_id)
             {
                 continue;
@@ -311,42 +312,13 @@ impl<'a> WriteTxn<'a> {
             // otherwise extending `total_page_count`). If unlinking an emptied trunk staged new
             // retired pages, enqueue them into the same worklist so none are ever dropped.
             let new_trunk_pid = self.allocate_page_raw_or_reclaim()?;
+            debug_assert_ne!(new_trunk_pid, page_id);
             existing.remove(&new_trunk_pid);
             if !self.retired_pages.is_empty() {
                 for extra in self.retired_pages.drain(..) {
                     existing.remove(&extra);
                     queue.push_back(extra);
                 }
-            }
-            if new_trunk_pid == page_id {
-                let alt_trunk_pid = PageId::new(self.meta.total_page_count);
-                self.meta.total_page_count += 1;
-                let prev_head = (self.meta.freelist_trunk_page_id != 0)
-                    .then(|| PageId::new(self.meta.freelist_trunk_page_id));
-                let entries = [
-                    FreelistEntry {
-                        page_id: new_trunk_pid,
-                        retired_tx_id: self.tx_id,
-                    },
-                    FreelistEntry {
-                        page_id,
-                        retired_tx_id: self.tx_id,
-                    },
-                ];
-                FreelistTrunkHeader::encode_page(
-                    &mut buf,
-                    alt_trunk_pid,
-                    self.tx_id,
-                    prev_head,
-                    &entries,
-                )?;
-                self.write_page(alt_trunk_pid, &buf)?;
-                self.meta.freelist_trunk_page_id = alt_trunk_pid.raw();
-                self.meta.freelist_page_count += 2;
-                existing.insert(alt_trunk_pid);
-                existing.insert(new_trunk_pid);
-                existing.insert(page_id);
-                continue;
             }
 
             let prev_head = if self.meta.freelist_trunk_page_id == 0 {
@@ -477,6 +449,18 @@ impl PageStoreMut for WriteTxn<'_> {
                 MODULE_ID,
                 "WriteTxn::free_page",
                 "cannot free Page 0",
+            ));
+        }
+        if page_id.raw() >= self.meta.total_page_count {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "WriteTxn::free_page",
+                format!(
+                    "page_id {} out of bounds (total_page_count={})",
+                    page_id.raw(),
+                    self.meta.total_page_count
+                ),
             ));
         }
         self.retired_pages.push(page_id);

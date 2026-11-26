@@ -318,9 +318,15 @@ fn multi_trunk_freelist_under_pinned_reader_validates_and_unlinks_non_head_trunk
     {
         let engine = StorageEngine::open(io.clone(), path, eng_cfg.clone(), [0x99; 16]).unwrap();
 
-        // Tx 1 & Tx 2: allocate and retire 300 pages in Tx 2 (`retired_tx_id = 2`, > 1 trunk).
+        // Tx 1: allocate 300 pages, then pin `pin_at_1` (`horizon = 1`) BEFORE Tx 2 retires them!
         let batch1: Vec<_> = {
             let mut w = engine.begin_write().unwrap();
+            assert_eq!(
+                w.free_page(oryq_engine::PageId::new(999_999))
+                    .unwrap_err()
+                    .category(),
+                ErrorCategory::InvalidArgument
+            );
             let mut pids = Vec::with_capacity(300);
             for _ in 0..300 {
                 pids.push(w.allocate_page().unwrap());
@@ -328,6 +334,9 @@ fn multi_trunk_freelist_under_pinned_reader_validates_and_unlinks_non_head_trunk
             w.commit().unwrap();
             pids
         };
+        let pin_at_1 = engine.begin_read().unwrap();
+
+        // Tx 2: retire `batch1` (300 pages, `retired_tx_id = 2`, creating older trunks T1 -> T0).
         {
             let mut w = engine.begin_write().unwrap();
             for pid in batch1 {
@@ -335,17 +344,16 @@ fn multi_trunk_freelist_under_pinned_reader_validates_and_unlinks_non_head_trunk
             }
             w.commit().unwrap();
         }
-
-        // Pin a reader at snapshot 2 (`horizon = 2`), so Tx 2's 300 retired pages ARE eligible
-        // (`2 <= 2`), then allocate + retire 300 MORE pages across Tx 3 & Tx 4 (`retired_tx_id = 4 > 2`),
-        // placing ineligible entries at the head trunk while older non-head trunks are eligible!
         let pin_at_2 = engine.begin_read().unwrap();
+
+        // Tx 3 & Tx 4: while `pin_at_1` (`horizon = 1`) is still held, Tx 2's retired pages CANNOT
+        // be reused (`2 <= 1` is false), so Tx 3 allocates 300 fresh pages and Tx 4 retires them
+        // (`retired_tx_id = 4`) onto a newer head trunk ABOVE Tx 2's older trunks!
         let batch2: Vec<_> = {
             let mut w = engine.begin_write().unwrap();
             let mut pids = Vec::with_capacity(300);
             for _ in 0..300 {
                 let p = w.allocate_page().unwrap();
-                // Write valid pages so we also exercise intra-tx dirty cleanup on retirement
                 let mut buf = vec![0u8; 4096];
                 oryq_engine::OverflowHeader::encode_page(&mut buf, p, w.tx_id(), None, b"tmp")
                     .unwrap();
@@ -355,31 +363,32 @@ fn multi_trunk_freelist_under_pinned_reader_validates_and_unlinks_non_head_trunk
             w.commit().unwrap();
             pids
         };
-        // Now allocate 300 NEW pages in Tx 4 so batch2 cannot reuse batch1 before retiring
-        let batch3: Vec<_> = {
-            let mut w = engine.begin_write().unwrap();
-            let mut pids = Vec::with_capacity(300);
-            for _ in 0..300 {
-                pids.push(w.allocate_page().unwrap());
-            }
-            w.commit().unwrap();
-            pids
-        };
-        // Retire batch2 (300 pages, retired_tx_id = 5) AND batch3 (300 pages, retired_tx_id = 5) -> >2 trunks at tx 5
         {
             let mut w = engine.begin_write().unwrap();
-            for pid in batch2.into_iter().chain(batch3) {
+            for pid in batch2 {
                 w.free_page(pid).unwrap();
             }
             w.commit().unwrap();
         }
-        drop(pin_at_2);
 
-        // Now all ~600 retired pages are `<= horizon`. Allocate 600 pages to drain ALL trunks,
-        // then checkpoint & seal on drop.
+        // Drop `pin_at_1` while keeping `pin_at_2` (`horizon = 2`): now the head trunk (`tx=4`) is
+        // INELIGIBLE (`4 > 2`), while the older non-head trunks (`tx=2 <= 2`) ARE ELIGIBLE!
+        // Allocating 300 pages in Tx 5 drains and unlinks the non-head trunks (`Some((prev_pid, ...))`)!
+        drop(pin_at_1);
         {
             let mut w = engine.begin_write().unwrap();
-            for _ in 0..600 {
+            for _ in 0..300 {
+                let _ = w.allocate_page().unwrap();
+            }
+            w.commit().unwrap();
+        }
+        engine.checkpoint(false).unwrap();
+
+        // Now drop `pin_at_2` (`horizon = latest`) and drain the remaining ~300 pages as well.
+        drop(pin_at_2);
+        {
+            let mut w = engine.begin_write().unwrap();
+            for _ in 0..310 {
                 let _ = w.allocate_page().unwrap();
             }
             w.commit().unwrap();
