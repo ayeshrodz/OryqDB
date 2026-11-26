@@ -38,6 +38,8 @@ const MODULE_ID: &str = "core";
 const RECORD_KIND_INLINE: u8 = 0x00;
 const RECORD_KIND_DELTA_CHAIN: u8 = 0x01;
 const RECORD_KIND_OVERFLOW: u8 = 0x02;
+/// Maximum valid binary `OryqDoc` length (`256 MiB - 1`, `docs/file-format.md` §5).
+const MAX_ORYQDOC_BYTES: usize = (1 << 28) - 1;
 /// Maximum number of chained physical delta patches before automatic compaction (`docs/file-format.md` §4.2).
 pub const MAX_DELTA_CHAIN: u8 = 4;
 
@@ -126,6 +128,26 @@ pub fn decode_collection_record_from_store(
             )
         })?;
         let oref = OverflowRef::decode(raw_ref)?;
+        if oref.original_tag != RECORD_KIND_INLINE {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::decode_collection_record_from_store",
+                format!(
+                    "unsupported overflow original_tag 0x{:02x}",
+                    oref.original_tag
+                ),
+            ));
+        }
+        let total = oref.total_len as usize;
+        if !(8..=MAX_ORYQDOC_BYTES).contains(&total) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::decode_collection_record_from_store",
+                format!("overflow document total_len {total} outside valid OryqDoc bounds"),
+            ));
+        }
         let (blob, _) = OverflowStore::read_from_store(store, &oref, None)?;
         return DocumentBuf::from_bytes(blob);
     }
@@ -246,9 +268,6 @@ fn append_or_compact_record(
     fallback_compacted: &DocumentBuf,
 ) -> Result<Vec<u8>> {
     let max_inline = max_inline_record_bytes(tx.page_size());
-    if patch_bytes.is_empty() {
-        return store_collection_record(tx, fallback_compacted);
-    }
     let (&kind, body) = raw_existing.split_first().ok_or_else(|| {
         ErrorEnvelope::new(
             ErrorCategory::Corruption,
@@ -257,6 +276,21 @@ fn append_or_compact_record(
             "empty existing collection record",
         )
     })?;
+    if !matches!(
+        kind,
+        RECORD_KIND_INLINE | RECORD_KIND_DELTA_CHAIN | RECORD_KIND_OVERFLOW
+    ) {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::UnsupportedFeature,
+            MODULE_ID,
+            "write::append_or_compact_record",
+            format!("unsupported collection record storage_kind 0x{kind:02x}"),
+        ));
+    }
+    if patch_bytes.is_empty() {
+        free_record_overflow_if_any(tx, raw_existing)?;
+        return store_collection_record(tx, fallback_compacted);
+    }
 
     match kind {
         RECORD_KIND_INLINE => {
@@ -301,7 +335,7 @@ fn append_or_compact_record(
             free_record_overflow_if_any(tx, raw_existing)?;
             store_collection_record(tx, fallback_compacted)
         }
-        _ => store_collection_record(tx, fallback_compacted),
+        _ => unreachable!("storage_kind validated above"),
     }
 }
 

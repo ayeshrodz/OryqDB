@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use oryq_core::{Database, DatabaseConfig, SortOrder, Value};
-use oryq_engine::{BTree, EngineConfig, MemoryVfs, PageSize, StorageEngine, StorageIo, TreeKind};
+use oryq_engine::{
+    BTree, EngineConfig, MemoryVfs, PageSize, PageStoreMut, StorageEngine, StorageIo, TreeKind,
+};
 use oryq_types::ErrorCategory;
 
 #[test]
@@ -295,5 +297,101 @@ fn wal_autocheckpoint_and_presync_version_quota_prevent_outage_and_poisoning() {
     assert!(
         !engine.is_poisoned(),
         "VersionIndex quota exhaustion must never poison StorageEngine"
+    );
+}
+
+#[test]
+fn multi_trunk_freelist_under_pinned_reader_validates_and_unlinks_non_head_trunks() {
+    // PageSize::Size4096 holds 253 FreelistEntry items per trunk (`(4096 - 48) / 16 = 253`).
+    // Retiring > 550 pages across two transactions while pinning a reader between them creates
+    // >= 3 freelist trunks where the newest head trunk is above horizon and older non-head trunks
+    // are below horizon — exercising non-head trunk unlinking and `FreelistManager::validate_chain`.
+    let io: Arc<dyn StorageIo> = Arc::new(MemoryVfs::new());
+    let path = std::path::Path::new("multi_trunk.oryq");
+    let eng_cfg = EngineConfig {
+        page_size: PageSize::Size4096,
+        sync_mode: oryq_engine::SyncMode::Off,
+        auto_checkpoint_on_close: true,
+        ..EngineConfig::default()
+    };
+
+    {
+        let engine = StorageEngine::open(io.clone(), path, eng_cfg.clone(), [0x99; 16]).unwrap();
+
+        // Tx 1 & Tx 2: allocate and retire 300 pages in Tx 2 (`retired_tx_id = 2`, > 1 trunk).
+        let batch1: Vec<_> = {
+            let mut w = engine.begin_write().unwrap();
+            let mut pids = Vec::with_capacity(300);
+            for _ in 0..300 {
+                pids.push(w.allocate_page().unwrap());
+            }
+            w.commit().unwrap();
+            pids
+        };
+        {
+            let mut w = engine.begin_write().unwrap();
+            for pid in batch1 {
+                w.free_page(pid).unwrap();
+            }
+            w.commit().unwrap();
+        }
+
+        // Pin a reader at snapshot 2 (`horizon = 2`), so Tx 2's 300 retired pages ARE eligible
+        // (`2 <= 2`), then allocate + retire 300 MORE pages across Tx 3 & Tx 4 (`retired_tx_id = 4 > 2`),
+        // placing ineligible entries at the head trunk while older non-head trunks are eligible!
+        let pin_at_2 = engine.begin_read().unwrap();
+        let batch2: Vec<_> = {
+            let mut w = engine.begin_write().unwrap();
+            let mut pids = Vec::with_capacity(300);
+            for _ in 0..300 {
+                let p = w.allocate_page().unwrap();
+                // Write valid pages so we also exercise intra-tx dirty cleanup on retirement
+                let mut buf = vec![0u8; 4096];
+                oryq_engine::OverflowHeader::encode_page(&mut buf, p, w.tx_id(), None, b"tmp")
+                    .unwrap();
+                w.write_page(p, &buf).unwrap();
+                pids.push(p);
+            }
+            w.commit().unwrap();
+            pids
+        };
+        // Now allocate 300 NEW pages in Tx 4 so batch2 cannot reuse batch1 before retiring
+        let batch3: Vec<_> = {
+            let mut w = engine.begin_write().unwrap();
+            let mut pids = Vec::with_capacity(300);
+            for _ in 0..300 {
+                pids.push(w.allocate_page().unwrap());
+            }
+            w.commit().unwrap();
+            pids
+        };
+        // Retire batch2 (300 pages, retired_tx_id = 5) AND batch3 (300 pages, retired_tx_id = 5) -> >2 trunks at tx 5
+        {
+            let mut w = engine.begin_write().unwrap();
+            for pid in batch2.into_iter().chain(batch3) {
+                w.free_page(pid).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        drop(pin_at_2);
+
+        // Now all ~600 retired pages are `<= horizon`. Allocate 600 pages to drain ALL trunks,
+        // then checkpoint & seal on drop.
+        {
+            let mut w = engine.begin_write().unwrap();
+            for _ in 0..600 {
+                let _ = w.allocate_page().unwrap();
+            }
+            w.commit().unwrap();
+        }
+        engine.checkpoint(true).unwrap();
+    }
+
+    // Open directly via Pager and run strict `FreelistManager::validate_chain`!
+    let pager = oryq_engine::Pager::open_existing(io, path, &eng_cfg).unwrap();
+    let remaining = oryq_engine::FreelistManager::validate_chain(&pager).unwrap();
+    assert!(
+        remaining <= 4,
+        "expected emptied trunks to unlink and validate cleanly, remaining={remaining}"
     );
 }

@@ -40,6 +40,10 @@ pub fn copy_committed_pages_to_main(
         pager.write_page(pid, &buf)?;
     }
 
+    // Ensure `.oryq` physical length covers `meta_at_horizon.total_page_count` even if the
+    // highest allocated page was retired before commit without being written directly.
+    pager.ensure_min_page_count(meta_at_horizon.total_page_count)?;
+
     // Update header metadata to horizon and commit alternate shadow slot (syncs data first, then Page 0).
     let hdr = pager.header_mut();
     hdr.checkpointed_tx_id = horizon;

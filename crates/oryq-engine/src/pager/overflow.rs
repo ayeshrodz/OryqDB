@@ -12,6 +12,7 @@ use crate::pager::Pager;
 
 const MODULE_ID: &str = "engine";
 const INITIAL_OVERFLOW_VEC_CAP: usize = 64 * 1024;
+const MAX_EXACT_RESERVE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Manages `PageType::Overflow` page chains for payloads exceeding a single slotted page.
 #[derive(Debug, Default)]
@@ -108,6 +109,12 @@ impl OverflowStore {
 
             let guard = pager.read_page(pid, None)?;
             let (_, ohdr, chunk) = OverflowHeader::decode_page(guard.as_slice(), pid)?;
+            if out.is_empty()
+                && expected_len > out.capacity()
+                && expected_len <= MAX_EXACT_RESERVE_BYTES
+            {
+                out.reserve_exact(expected_len - out.len());
+            }
             if out.len().saturating_add(chunk.len()) > expected_len {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,
@@ -260,6 +267,12 @@ impl OverflowStore {
 
             let bytes = store.read_page(pid)?;
             let (_, ohdr, chunk) = OverflowHeader::decode_page(&bytes, pid)?;
+            if out.is_empty()
+                && expected_len > out.capacity()
+                && expected_len <= MAX_EXACT_RESERVE_BYTES
+            {
+                out.reserve_exact(expected_len - out.len());
+            }
             if out.len().saturating_add(chunk.len()) > expected_len {
                 return Err(ErrorEnvelope::new(
                     ErrorCategory::Corruption,

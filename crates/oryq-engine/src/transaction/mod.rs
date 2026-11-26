@@ -20,7 +20,7 @@ use crate::checkpoint::{
 };
 use crate::config::{EngineConfig, PageSize};
 use crate::coordinator::SingleProcessCoordinator;
-use crate::format::{PageHeader, WAL_HEADER_SIZE};
+use crate::format::{PageHeader, WAL_COMMIT_PAYLOAD_SIZE, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE};
 use crate::io::{OpenMode, StorageIo};
 use crate::pager::Pager;
 use crate::ports::{CheckpointOutcome, CommitReceipt};
@@ -465,6 +465,12 @@ impl StorageEngine {
                 st.meta_history.retain(|&tx, _| tx == latest);
                 Ok(())
             })();
+            // If `reset_intent_seq` was entered (`!= 0` in Page 0 / memory) and the multi-step
+            // WAL reset failed mid-protocol, poison the coordinator immediately so no subsequent
+            // WriteTxn can append to an uncertain/truncated WAL before reopen completes recovery.
+            if reset_res.is_err() && st.pager.header().reset_intent_seq != 0 {
+                self.coordinator.poison();
+            }
             self.coordinator.unblock_admission();
             reset_res?;
             wal_reset = true;
@@ -660,6 +666,33 @@ impl StorageEngine {
         meta: CommittedDbMeta,
     ) -> Result<CommitReceipt> {
         let mut st = self.lock_state()?;
+
+        // Opportunistic pre-commit checkpoint if a previous long-lived reader dropped and
+        // either VersionIndex or `.oryq-wal` would otherwise hit its hard cap.
+        if self.config.wal_autocheckpoint_bytes > 0 && st.pager.header().wal_required {
+            let frame_bytes = (WAL_FRAME_HEADER_SIZE + self.page_size.bytes()) as u64;
+            let commit_bytes = (WAL_FRAME_HEADER_SIZE + WAL_COMMIT_PAYLOAD_SIZE) as u64;
+            let projected_wal = st
+                .wal
+                .next_offset
+                .saturating_add((dirty_pages.len() as u64).saturating_mul(frame_bytes))
+                .saturating_add(commit_bytes);
+            if !st.versions.can_accommodate(dirty_pages.len())
+                || projected_wal > self.config.max_wal_hard_bytes
+            {
+                drop(st);
+                let _ = self.checkpoint_with_writer(true);
+                if self.is_poisoned() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::CommitOutcomeUnknown,
+                        MODULE_ID,
+                        "StorageEngine::commit_write_txn",
+                        "engine poisoned during pre-commit checkpoint reset",
+                    ));
+                }
+                st = self.lock_state()?;
+            }
+        }
 
         // Pre-check VersionIndex capacity BEFORE touching `.oryq-wal` so quota exhaustion
         // returns a clean `QuotaExceeded` error instead of poisoning the engine post-sync.

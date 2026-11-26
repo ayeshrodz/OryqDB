@@ -113,6 +113,11 @@ impl Database {
         Ok(ReadTransaction::new(tx))
     }
 
+    #[inline]
+    pub(crate) fn max_document_bytes(&self) -> usize {
+        self.inner.max_document_bytes
+    }
+
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>> {
         let tx = self.inner.engine.begin_write()?;
         Ok(WriteTransaction::new(

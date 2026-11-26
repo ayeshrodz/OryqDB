@@ -161,6 +161,8 @@ pub fn run_online_backup(
         let (collections_copied, documents_copied, sealed) = {
             let backup_cfg = DatabaseConfig {
                 page_size,
+                max_document_bytes: db.max_document_bytes(),
+                max_wal_hard_bytes: u64::MAX / 2,
                 ..DatabaseConfig::default()
             };
             let backup_db = Database::open(&tmp_path, backup_cfg)?;
@@ -330,6 +332,8 @@ fn build_in_memory_compacted_image(
     let res = (|| -> Result<(usize, usize)> {
         let backup_cfg = DatabaseConfig {
             page_size,
+            max_document_bytes: db.max_document_bytes(),
+            max_wal_hard_bytes: u64::MAX / 2,
             ..DatabaseConfig::default()
         };
         let target_db = Database::open_with_io(Arc::clone(io), tmp_path, backup_cfg)?;
