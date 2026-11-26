@@ -70,6 +70,9 @@ pub struct EngineConfig {
     /// checkpoints, seals, and removes the empty `.oryq-wal` sidecar so only the single `.oryq`
     /// file remains on disk.
     pub auto_checkpoint_on_close: bool,
+    /// Soft `.oryq-wal` byte threshold (`0` disables automatic checkpointing) above which a
+    /// committing writer automatically triggers a passive/reset checkpoint (`4 MiB` default).
+    pub wal_autocheckpoint_bytes: u64,
 }
 
 impl Default for EngineConfig {
@@ -84,6 +87,7 @@ impl Default for EngineConfig {
             max_wal_hard_bytes: 256 * 1024 * 1024,
             max_readers: 64,
             auto_checkpoint_on_close: false,
+            wal_autocheckpoint_bytes: 4 * 1024 * 1024,
         }
     }
 }

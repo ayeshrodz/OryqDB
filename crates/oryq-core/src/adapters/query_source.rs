@@ -16,7 +16,7 @@ use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, RecordId, Result};
 
 use crate::api::read::with_value_view;
 use crate::catalog::{load_collection_entry, CatalogEntry};
-use crate::write::decode_collection_record;
+use crate::write::decode_collection_record_from_store;
 
 const MODULE_ID: &str = "core";
 
@@ -99,7 +99,7 @@ impl<S: PageStore> QuerySource for CoreQuerySource<'_, S> {
         let mut out = Vec::with_capacity(pairs.len());
         for (raw_key, raw_val) in pairs {
             let rid = decode_record_id(&raw_key)?;
-            let doc = decode_collection_record(&raw_val)?;
+            let doc = decode_collection_record_from_store(self.store, &raw_val)?;
             out.push((rid, doc));
         }
         Ok(out)
@@ -114,7 +114,7 @@ impl<S: PageStore> QuerySource for CoreQuerySource<'_, S> {
         let tree = BTree::open(data_root, TreeKind::Collection);
         let key = encode_record_id(record_id);
         match tree.get(self.store, &key)? {
-            Some(raw) => Ok(Some(decode_collection_record(&raw)?)),
+            Some(raw) => Ok(Some(decode_collection_record_from_store(self.store, &raw)?)),
             None => Ok(None),
         }
     }

@@ -12,9 +12,10 @@ use oryq_document::{
     apply_update, encode_document, validate_replacement_doc, DocumentBuf, FieldPath, ObjectId,
     UpdateSpec, Value,
 };
-use oryq_engine::btree::read_internal_node;
+use oryq_engine::btree::{read_internal_node, read_leaf_entries};
 use oryq_engine::{
-    BTree, PageStore, PageStoreMut, RecordCompactor, SlottedPageView, TreeKind, WriteTxn,
+    BTree, OverflowRef, OverflowStore, PageSize, PageStore, PageStoreMut, RecordCompactor,
+    SlottedPageView, TreeKind, WriteTxn, OVERFLOW_REF_SIZE,
 };
 use oryq_index::{
     decode_record_id, encode_record_id, lookup_primary_id, IndexDescriptor, IndexFieldSpec,
@@ -36,8 +37,16 @@ use crate::composition::CoreRegistries;
 const MODULE_ID: &str = "core";
 const RECORD_KIND_INLINE: u8 = 0x00;
 const RECORD_KIND_DELTA_CHAIN: u8 = 0x01;
+const RECORD_KIND_OVERFLOW: u8 = 0x02;
 /// Maximum number of chained physical delta patches before automatic compaction (`docs/file-format.md` §4.2).
 pub const MAX_DELTA_CHAIN: u8 = 4;
+
+/// Maximum inline collection record envelope length before spilling into `PageType::Overflow` pages.
+#[inline]
+pub const fn max_inline_record_bytes(page_size: PageSize) -> usize {
+    // Leaves headroom for 32B PageHeader + 16B SlotEntry + 8B B+ tree KV lengths + 8B RecordId key.
+    page_size.bytes().saturating_sub(128)
+}
 
 /// Generates a 12-byte monotonically sortable [`ObjectId`] (`docs/document-model.md` §4.2):
 /// `[4-byte unix_seconds_be][5-byte process_tag][3-byte atomic_counter_be]`.
@@ -68,8 +77,62 @@ pub fn encode_collection_record(doc: &DocumentBuf) -> Vec<u8> {
     out
 }
 
-/// Decodes a collection B+ tree value (inline `0x00` or delta-chained `0x01`) into an
-/// immutable validated [`DocumentBuf`].
+/// Persists `doc` either inline (`0x00`) when it fits comfortably in a collection leaf page,
+/// or across chained `PageType::Overflow` pages (`0x02` + 16-byte [`OverflowRef`]).
+fn store_collection_record(tx: &mut WriteTxn<'_>, doc: &DocumentBuf) -> Result<Vec<u8>> {
+    let max_inline = max_inline_record_bytes(tx.page_size());
+    if doc.len() < max_inline {
+        return Ok(encode_collection_record(doc));
+    }
+    let oref = OverflowStore::write_in_store(tx, doc.as_bytes(), RECORD_KIND_INLINE)?;
+    let mut out = [0u8; 1 + OVERFLOW_REF_SIZE];
+    out[0] = RECORD_KIND_OVERFLOW;
+    let mut ref_buf = [0u8; OVERFLOW_REF_SIZE];
+    oref.encode(&mut ref_buf);
+    out[1..].copy_from_slice(&ref_buf);
+    Ok(out.to_vec())
+}
+
+/// Retires any chained `PageType::Overflow` pages referenced by an existing `0x02` record value.
+fn free_record_overflow_if_any(tx: &mut WriteTxn<'_>, raw: &[u8]) -> Result<()> {
+    if let Some((&RECORD_KIND_OVERFLOW, body)) = raw.split_first() {
+        let raw_ref: &[u8; OVERFLOW_REF_SIZE] = body.try_into().map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::free_record_overflow_if_any",
+                format!("invalid overflow record reference length {}", body.len()),
+            )
+        })?;
+        let oref = OverflowRef::decode(raw_ref)?;
+        OverflowStore::free_in_store(tx, &oref)?;
+    }
+    Ok(())
+}
+
+/// Decodes a collection B+ tree value (inline `0x00`, delta-chained `0x01`, or multi-page
+/// overflow `0x02` via `store`) into an immutable validated [`DocumentBuf`].
+pub fn decode_collection_record_from_store(
+    store: &impl PageStore,
+    raw: &[u8],
+) -> Result<DocumentBuf> {
+    if let Some((&RECORD_KIND_OVERFLOW, body)) = raw.split_first() {
+        let raw_ref: &[u8; OVERFLOW_REF_SIZE] = body.try_into().map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "write::decode_collection_record_from_store",
+                format!("invalid overflow record reference length {}", body.len()),
+            )
+        })?;
+        let oref = OverflowRef::decode(raw_ref)?;
+        let (blob, _) = OverflowStore::read_from_store(store, &oref, None)?;
+        return DocumentBuf::from_bytes(blob);
+    }
+    decode_collection_record(raw)
+}
+
+/// Decodes an inline (`0x00`) or delta-chained (`0x01`) collection record into a [`DocumentBuf`].
 pub fn decode_collection_record(raw: &[u8]) -> Result<DocumentBuf> {
     let (&kind, body) = raw.split_first().ok_or_else(|| {
         ErrorEnvelope::new(
@@ -173,15 +236,18 @@ fn parse_delta_chain_record(body: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>, u64)>
 }
 
 /// Appends a state-normalized physical patch to `raw_existing` if the chain stays within
-/// `MAX_DELTA_CHAIN` (4), or compacts automatically back to `RECORD_KIND_INLINE` on the 5th patch.
+/// `MAX_DELTA_CHAIN` (4) AND within `max_inline_bytes`, or compacts automatically back to
+/// `RECORD_KIND_INLINE` (or spills to `RECORD_KIND_OVERFLOW` if the compacted doc exceeds leaf size).
 fn append_or_compact_record(
+    tx: &mut WriteTxn<'_>,
     raw_existing: &[u8],
     patch_bytes: &[u8],
     patch_bloom: u64,
     fallback_compacted: &DocumentBuf,
 ) -> Result<Vec<u8>> {
+    let max_inline = max_inline_record_bytes(tx.page_size());
     if patch_bytes.is_empty() {
-        return Ok(encode_collection_record(fallback_compacted));
+        return store_collection_record(tx, fallback_compacted);
     }
     let (&kind, body) = raw_existing.split_first().ok_or_else(|| {
         ErrorEnvelope::new(
@@ -193,11 +259,18 @@ fn append_or_compact_record(
     })?;
 
     match kind {
-        RECORD_KIND_INLINE => Ok(encode_delta_chain_record(
-            body,
-            &[patch_bytes.to_vec()],
-            patch_bloom,
-        )),
+        RECORD_KIND_INLINE => {
+            let projected = 1 + 1 + 8 + 4 + body.len() + 4 + patch_bytes.len();
+            if projected > max_inline {
+                store_collection_record(tx, fallback_compacted)
+            } else {
+                Ok(encode_delta_chain_record(
+                    body,
+                    &[patch_bytes.to_vec()],
+                    patch_bloom,
+                ))
+            }
+        }
         RECORD_KIND_DELTA_CHAIN => {
             let (base, mut patches, existing_bloom) = parse_delta_chain_record(body)?;
             if patches.len() >= MAX_DELTA_CHAIN as usize {
@@ -208,17 +281,27 @@ fn append_or_compact_record(
                 let budget = BudgetHandle::new(BudgetDomain::Transaction, 16 * 1024 * 1024);
                 let compacted = DocumentRecordCompactor.compact(&base, &patch_slices, &budget)?;
                 let doc = DocumentBuf::from_bytes(compacted)?;
-                Ok(encode_collection_record(&doc))
+                store_collection_record(tx, &doc)
             } else {
                 patches.insert(0, patch_bytes.to_vec());
-                Ok(encode_delta_chain_record(
-                    &base,
-                    &patches,
-                    existing_bloom | patch_bloom,
-                ))
+                let total_patches: usize = patches.iter().map(|p| 4 + p.len()).sum();
+                let projected = 1 + 1 + 8 + 4 + base.len() + total_patches;
+                if projected > max_inline {
+                    store_collection_record(tx, fallback_compacted)
+                } else {
+                    Ok(encode_delta_chain_record(
+                        &base,
+                        &patches,
+                        existing_bloom | patch_bloom,
+                    ))
+                }
             }
         }
-        _ => Ok(encode_collection_record(fallback_compacted)),
+        RECORD_KIND_OVERFLOW => {
+            free_record_overflow_if_any(tx, raw_existing)?;
+            store_collection_record(tx, fallback_compacted)
+        }
+        _ => store_collection_record(tx, fallback_compacted),
     }
 }
 
@@ -312,7 +395,7 @@ pub fn drop_collection_stmt(
             let provider = registries.indexes.require(&desc.provider_id)?;
             provider.drop_index(tx, desc)?;
         }
-        free_btree_pages(tx, entry.data_root_page_id)?;
+        free_collection_tree_pages(tx, entry.data_root_page_id)?;
         tx.set_catalog_root_page_id(new_root);
         Ok(true)
     })();
@@ -385,7 +468,7 @@ pub(crate) fn insert_doc_with_entry(
 
         let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
-        let rec_val = encode_collection_record(&doc_with_id);
+        let rec_val = store_collection_record(tx, &doc_with_id)?;
         data_tree.insert(tx, &rec_key, &rec_val)?;
         next_entry.data_root_page_id = data_tree.root();
 
@@ -479,7 +562,7 @@ pub(crate) fn update_by_id_with_entry(
                 ),
             )
         })?;
-        let existing_doc = decode_collection_record(&raw)?;
+        let existing_doc = decode_collection_record_from_store(tx, &raw)?;
         let (mutated, _) =
             apply_update(&existing_doc.view(), update_spec, &registries.updates, None)?;
 
@@ -500,6 +583,7 @@ pub(crate) fn update_by_id_with_entry(
         }
 
         let new_rec_val = append_or_compact_record(
+            tx,
             &raw,
             &mutated.patch_bytes,
             mutated.bloom_mask,
@@ -612,10 +696,11 @@ pub(crate) fn replace_by_id_with_entry(
                 "primary index points to missing collection record",
             )
         })?;
-        let existing_doc = decode_collection_record(&raw)?;
+        let existing_doc = decode_collection_record_from_store(tx, &raw)?;
         validate_replacement_doc(&existing_doc.view(), &replacement.view())?;
 
-        let new_rec_val = encode_collection_record(replacement);
+        free_record_overflow_if_any(tx, &raw)?;
+        let new_rec_val = store_collection_record(tx, replacement)?;
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
         let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
         next_entry.data_root_page_id = data_tree.root();
@@ -698,7 +783,8 @@ pub(crate) fn delete_by_id_with_entry(
         let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
         next_entry.data_root_page_id = data_tree.root();
 
-        let existing_doc = decode_collection_record(&raw)?;
+        let existing_doc = decode_collection_record_from_store(tx, &raw)?;
+        free_record_overflow_if_any(tx, &raw)?;
         let view = existing_doc.view();
         for desc in &mut next_entry.indexes {
             let provider = registries.indexes.require(&desc.provider_id)?;
@@ -804,7 +890,7 @@ pub fn create_secondary_index_stmt(
         let existing = data_tree.scan_all(tx)?;
         for (raw_rid, raw_rec) in existing {
             let rid = decode_record_id(&raw_rid)?;
-            let doc = decode_collection_record(&raw_rec)?;
+            let doc = decode_collection_record_from_store(tx, &raw_rec)?;
             let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
             desc.root_page_id = maint.new_root_page_id;
         }
@@ -906,7 +992,7 @@ fn ensure_document_id(doc: &DocumentBuf) -> Result<DocumentBuf> {
     Ok(encoded)
 }
 
-fn free_btree_pages(tx: &mut WriteTxn<'_>, root: PageId) -> Result<()> {
+fn free_collection_tree_pages(tx: &mut WriteTxn<'_>, root: PageId) -> Result<()> {
     let mut stack = vec![root];
     let mut visited = HashSet::new();
     while let Some(pid) = stack.pop() {
@@ -915,11 +1001,16 @@ fn free_btree_pages(tx: &mut WriteTxn<'_>, root: PageId) -> Result<()> {
         }
         let bytes = tx.read_page(pid)?;
         let view = SlottedPageView::parse(&bytes, pid)?;
-        if TreeKind::is_internal(view.header().page_type) {
+        let ptype = view.header().page_type;
+        if TreeKind::is_internal(ptype) {
             let node = read_internal_node(&bytes, pid)?;
             stack.push(node.leftmost_child);
             for (_, child) in node.separators {
                 stack.push(child);
+            }
+        } else if TreeKind::is_leaf(ptype) {
+            for entry in read_leaf_entries(&bytes, pid)? {
+                free_record_overflow_if_any(tx, &entry.value)?;
             }
         }
         tx.free_page(pid)?;
@@ -1006,7 +1097,7 @@ pub fn create_compound_index_stmt(
         let existing = data_tree.scan_all(tx)?;
         for (raw_rid, raw_rec) in existing {
             let rid = decode_record_id(&raw_rid)?;
-            let doc = decode_collection_record(&raw_rec)?;
+            let doc = decode_collection_record_from_store(tx, &raw_rec)?;
             let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
             desc.root_page_id = maint.new_root_page_id;
         }
@@ -1100,7 +1191,7 @@ pub fn create_fts_index_stmt(
         let existing = data_tree.scan_all(tx)?;
         for (raw_rid, raw_rec) in existing {
             let rid = decode_record_id(&raw_rid)?;
-            let doc = decode_collection_record(&raw_rec)?;
+            let doc = decode_collection_record_from_store(tx, &raw_rec)?;
             let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
             desc.root_page_id = maint.new_root_page_id;
         }
@@ -1193,7 +1284,7 @@ pub fn create_vector_index_stmt(
         let existing = data_tree.scan_all(tx)?;
         for (raw_rid, raw_rec) in existing {
             let rid = decode_record_id(&raw_rid)?;
-            let doc = decode_collection_record(&raw_rec)?;
+            let doc = decode_collection_record_from_store(tx, &raw_rec)?;
             let maint = provider.on_insert(tx, &desc, rid, &doc.view())?;
             desc.root_page_id = maint.new_root_page_id;
         }

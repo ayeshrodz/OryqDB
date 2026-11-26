@@ -4,8 +4,8 @@
 * **Master Design:** [oryqdb.md](designs/oryqdb.md)
 
 ```text
-MILESTONE: v0.13.2 — Core/Query/FFI Hot-Path Optimizations & Updated Benchmark Report (Issue #40 — v0.13.x Sprint Complete)
-STATUS: `v0.13.x` Performance & Storage-Efficiency Sprint Complete — `743k ops/sec` Rust point lookups (4.84×), `3,671 scans/sec` secondary scans (5.56×), `31k docs/sec` batched inserts (2.48×), `118k ops/sec` Python C ABI `_id` lookups (3.29×), and -29–33% smaller single-file `.oryq` databases.
+MILESTONE: v0.14.0 — Multi-Page Overflow Documents (16 MiB), Freelist Reclamation & Auto-Checkpoint (Issue #44)
+STATUS: Active `v0.14.x` Pre-1.0 Correctness, Security & Subsystem Wiring Sprint — 16 MiB overflow docs, 1024-dim vectors, 0% deleted-page leak without VACUUM, and automatic 4 MiB WAL checkpointing.
 
 IMPLEMENTED:
 - `W00–W05` (`oryq-types`, `oryq-document`, `oryq-engine`): VFS/PAL, Page 0 dual shadow headers, slotted pages, overflow chains, freelist, pin-aware PageCache, VersionIndex, byte B+ tree, WAL, single-process MVCC transactions, savepoints, checkpointing & crash recovery.

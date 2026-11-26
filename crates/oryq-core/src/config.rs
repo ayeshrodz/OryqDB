@@ -18,6 +18,9 @@ pub struct DatabaseConfig {
     /// handle automatically checkpoints, seals, and removes the empty `.oryq-wal` sidecar so
     /// only the single `.oryq` file remains on disk.
     pub auto_checkpoint_on_close: bool,
+    /// Soft `.oryq-wal` byte threshold (`0` disables automatic checkpointing) above which a
+    /// committing writer automatically checkpoints (`4 MiB` default).
+    pub wal_autocheckpoint_bytes: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -34,6 +37,7 @@ impl Default for DatabaseConfig {
             max_document_bytes: 16 * 1024 * 1024,
             group_commit: GroupCommitConfig::default(),
             auto_checkpoint_on_close: true,
+            wal_autocheckpoint_bytes: eng.wal_autocheckpoint_bytes,
         }
     }
 }
@@ -49,6 +53,7 @@ impl DatabaseConfig {
             max_wal_hard_bytes: self.max_wal_hard_bytes,
             max_readers: self.max_readers,
             auto_checkpoint_on_close: self.auto_checkpoint_on_close,
+            wal_autocheckpoint_bytes: self.wal_autocheckpoint_bytes,
             ..EngineConfig::default()
         }
     }

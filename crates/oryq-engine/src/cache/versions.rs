@@ -51,6 +51,12 @@ impl VersionIndex {
         self.max_entries
     }
 
+    /// Returns `true` if recording `additional` page versions stays within `max_entries`.
+    #[inline]
+    pub fn can_accommodate(&self, additional: usize) -> bool {
+        self.total_entries.saturating_add(additional) <= self.max_entries
+    }
+
     /// Records a newly committed version for `page_id`.
     ///
     /// Enforces strictly monotonic `tx_id` per page and the `max_entries` quota.

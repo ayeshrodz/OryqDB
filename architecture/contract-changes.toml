@@ -469,3 +469,29 @@ evidence = [
     "cargo run -p xtask -- modules ffi",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0028"
+modules = ["engine", "core"]
+files = [
+    "crates/oryq-engine/src/lib.rs",
+    "crates/oryq-engine/src/config.rs",
+    "crates/oryq-engine/src/cache/versions.rs",
+    "crates/oryq-engine/src/pager/overflow.rs",
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-engine/src/transaction/write.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-core/src/adapters/query_source.rs",
+    "crates/oryq-core/src/api/read.rs",
+    "crates/oryq-core/src/write/mod.rs",
+    "crates/oryq-core/src/write/statement.rs",
+]
+reason = "Implement Issue #44 (v0.14.0): wire OverflowStore over PageStore/PageStoreMut + RECORD_KIND_OVERFLOW (16 MiB documents & 1024-dim vectors), early delta-chain compaction, MVCC horizon-gated FreelistManager reclamation in WriteTxn, wal_autocheckpoint_bytes, pre-sync VersionIndex capacity check, and passive meta_history pruning."
+compatibility = "api_change"
+evidence = [
+    "cargo test --workspace --all-features",
+    "cargo run -p xtask -- modules engine",
+    "cargo run -p xtask -- modules core",
+    "cargo run -p xtask -- architecture --base origin/main",
+]
