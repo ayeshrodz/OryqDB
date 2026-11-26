@@ -1,7 +1,7 @@
 //! Exclusive write transaction with private dirty page buffers, O(1) undo-log nested
 //! statement savepoints, and atomic WAL commit/rollback (`docs/transactions.md` §3 & §4.2).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, Result, TxId};
@@ -9,7 +9,7 @@ use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, Result, TxId};
 use crate::btree::{PageStore, PageStoreMut};
 use crate::config::PageSize;
 use crate::coordinator::WriterPermit;
-use crate::format::PageHeader;
+use crate::format::{FreelistEntry, FreelistTrunkHeader, PageHeader};
 use crate::ports::CommitReceipt;
 use crate::recovery::CommittedDbMeta;
 use crate::transaction::savepoint::{SavepointId, SavepointMark};
@@ -141,6 +141,7 @@ impl<'a> WriteTxn<'a> {
     /// Durably commits all buffered page mutations to `.oryq-wal`, syncs, and publishes
     /// the new snapshot atomically.
     pub fn commit(mut self) -> Result<CommitReceipt> {
+        self.flush_retired_pages_to_freelist()?;
         self.undo_log.clear();
         let ordered: BTreeMap<PageId, Arc<[u8]>> = self.dirty_pages.drain().collect();
         self.meta.latest_tx_id = self.tx_id;
@@ -149,6 +150,217 @@ impl<'a> WriteTxn<'a> {
             .commit_write_txn(self.tx_id, ordered, self.meta)?;
         self.committed = true;
         Ok(receipt)
+    }
+
+    /// Reclaims one retired page from the MVCC freelist whose `retired_tx_id <= horizon`
+    /// (meaning no active or future reader can ever reach its pre-retirement contents).
+    fn reclaim_from_freelist(&mut self) -> Result<Option<PageId>> {
+        if self.meta.freelist_trunk_page_id == 0 || self.meta.freelist_page_count == 0 {
+            return Ok(None);
+        }
+        let horizon = self.engine.retention_horizon()?;
+        let page_size = self.engine.page_size().bytes();
+        let mut visited = HashSet::new();
+        let mut prev_trunk: Option<(PageId, Vec<FreelistEntry>)> = None;
+        let mut current_raw = self.meta.freelist_trunk_page_id;
+
+        while current_raw != 0 {
+            let trunk_pid = PageId::new(current_raw);
+            if !visited.insert(trunk_pid) {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "WriteTxn::reclaim_from_freelist",
+                    format!(
+                        "cycle detected in freelist trunk chain at page {}",
+                        trunk_pid.raw()
+                    ),
+                ));
+            }
+            let bytes = self.read_page(trunk_pid)?;
+            let (_, trunk_hdr, mut entries) = FreelistTrunkHeader::decode_page(&bytes, trunk_pid)?;
+
+            if let Some(pos) = entries.iter().position(|e| e.retired_tx_id <= horizon) {
+                let reclaimed = entries.swap_remove(pos);
+                if entries.is_empty() {
+                    // Unlink emptied trunk (whether head or interior) so empty trunks never
+                    // accumulate or leak, and stage `trunk_pid` itself for retirement.
+                    match prev_trunk {
+                        None => {
+                            self.meta.freelist_trunk_page_id =
+                                trunk_hdr.next_trunk.map_or(0, PageId::raw);
+                        }
+                        Some((prev_pid, prev_entries)) => {
+                            let mut buf = vec![0u8; page_size];
+                            FreelistTrunkHeader::encode_page(
+                                &mut buf,
+                                prev_pid,
+                                self.tx_id,
+                                trunk_hdr.next_trunk,
+                                &prev_entries,
+                            )?;
+                            self.write_page(prev_pid, &buf)?;
+                        }
+                    }
+                    if let Some(prev_dirty) = self.dirty_pages.remove(&trunk_pid) {
+                        if !self.savepoints.is_empty() {
+                            self.undo_log.push((trunk_pid, Some(prev_dirty)));
+                        }
+                    }
+                    self.retired_pages.push(trunk_pid);
+                } else {
+                    let mut buf = vec![0u8; page_size];
+                    FreelistTrunkHeader::encode_page(
+                        &mut buf,
+                        trunk_pid,
+                        self.tx_id,
+                        trunk_hdr.next_trunk,
+                        &entries,
+                    )?;
+                    self.write_page(trunk_pid, &buf)?;
+                }
+                self.meta.freelist_page_count = self.meta.freelist_page_count.saturating_sub(1);
+                return Ok(Some(reclaimed.page_id));
+            }
+
+            prev_trunk = Some((trunk_pid, entries));
+            current_raw = trunk_hdr.next_trunk.map_or(0, PageId::raw);
+        }
+
+        Ok(None)
+    }
+
+    /// Collects all trunk and entry `PageId`s currently present in the freelist chain so
+    /// `flush_retired_pages_to_freelist` enforces global duplicate-freedom across all trunks.
+    fn collect_existing_freelist_pages(&self) -> Result<HashSet<PageId>> {
+        let mut all = HashSet::new();
+        let mut visited_trunks = HashSet::new();
+        let mut current_raw = self.meta.freelist_trunk_page_id;
+        while current_raw != 0 {
+            let trunk_pid = PageId::new(current_raw);
+            if !visited_trunks.insert(trunk_pid) {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "WriteTxn::collect_existing_freelist_pages",
+                    format!(
+                        "cycle detected in freelist trunk chain at page {}",
+                        trunk_pid.raw()
+                    ),
+                ));
+            }
+            all.insert(trunk_pid);
+            let bytes = self.read_page(trunk_pid)?;
+            let (_, trunk_hdr, entries) = FreelistTrunkHeader::decode_page(&bytes, trunk_pid)?;
+            for e in entries {
+                all.insert(e.page_id);
+            }
+            current_raw = trunk_hdr.next_trunk.map_or(0, PageId::raw);
+        }
+        Ok(all)
+    }
+
+    /// Flushes all pages retired during this `WriteTxn` into `PageType::Freelist` trunk pages
+    /// tagged with `retired_tx_id = self.tx_id` before committing to `.oryq-wal`.
+    fn flush_retired_pages_to_freelist(&mut self) -> Result<()> {
+        if self.retired_pages.is_empty() {
+            return Ok(());
+        }
+        let mut existing = self.collect_existing_freelist_pages()?;
+        let mut queue: VecDeque<PageId> = std::mem::take(&mut self.retired_pages).into();
+        let page_size = self.engine.page_size().bytes();
+        let max_entries = FreelistTrunkHeader::max_entries(page_size);
+        let mut buf = vec![0u8; page_size];
+
+        while let Some(page_id) = queue.pop_front() {
+            if page_id == PageId::HEADER
+                || page_id == self.meta.catalog_root_page_id
+                || page_id.raw() >= self.meta.total_page_count
+                || existing.contains(&page_id)
+            {
+                continue;
+            }
+            // Drop any intra-transaction dirty leaf/overflow image for a page retired before commit.
+            self.dirty_pages.remove(&page_id);
+
+            let head_raw = self.meta.freelist_trunk_page_id;
+            if head_raw != 0 {
+                let head_pid = PageId::new(head_raw);
+                let bytes = self.read_page(head_pid)?;
+                let (_, trunk_hdr, mut entries) =
+                    FreelistTrunkHeader::decode_page(&bytes, head_pid)?;
+                if entries.len() < max_entries {
+                    entries.push(FreelistEntry {
+                        page_id,
+                        retired_tx_id: self.tx_id,
+                    });
+                    FreelistTrunkHeader::encode_page(
+                        &mut buf,
+                        head_pid,
+                        self.tx_id,
+                        trunk_hdr.next_trunk,
+                        &entries,
+                    )?;
+                    self.write_page(head_pid, &buf)?;
+                    self.meta.freelist_page_count += 1;
+                    existing.insert(page_id);
+                    continue;
+                }
+            }
+
+            // Allocate a fresh trunk page (reusing an older horizon-safe freelist page if available,
+            // otherwise extending `total_page_count`). If unlinking an emptied trunk staged new
+            // retired pages, enqueue them into the same worklist so none are ever dropped.
+            let new_trunk_pid = self.allocate_page_raw_or_reclaim()?;
+            debug_assert_ne!(new_trunk_pid, page_id);
+            existing.remove(&new_trunk_pid);
+            if !self.retired_pages.is_empty() {
+                for extra in self.retired_pages.drain(..) {
+                    existing.remove(&extra);
+                    queue.push_back(extra);
+                }
+            }
+
+            let prev_head = if self.meta.freelist_trunk_page_id == 0 {
+                None
+            } else {
+                Some(PageId::new(self.meta.freelist_trunk_page_id))
+            };
+            let entries = [FreelistEntry {
+                page_id,
+                retired_tx_id: self.tx_id,
+            }];
+            FreelistTrunkHeader::encode_page(
+                &mut buf,
+                new_trunk_pid,
+                self.tx_id,
+                prev_head,
+                &entries,
+            )?;
+            self.write_page(new_trunk_pid, &buf)?;
+            self.meta.freelist_trunk_page_id = new_trunk_pid.raw();
+            self.meta.freelist_page_count += 1;
+            existing.insert(new_trunk_pid);
+            existing.insert(page_id);
+        }
+
+        Ok(())
+    }
+
+    fn allocate_page_raw_or_reclaim(&mut self) -> Result<PageId> {
+        if let Some(reused) = self.reclaim_from_freelist()? {
+            return Ok(reused);
+        }
+        let next_raw = self.meta.total_page_count;
+        self.meta.total_page_count = next_raw.checked_add(1).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "WriteTxn::allocate_page",
+                "total_page_count overflow",
+            )
+        })?;
+        Ok(PageId::new(next_raw))
     }
 
     /// Explicitly discards all uncommitted changes and releases writer ownership.
@@ -227,16 +439,7 @@ impl PageStoreMut for WriteTxn<'_> {
     }
 
     fn allocate_page(&mut self) -> Result<PageId> {
-        let next_raw = self.meta.total_page_count;
-        self.meta.total_page_count = next_raw.checked_add(1).ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCategory::Overflow,
-                MODULE_ID,
-                "WriteTxn::allocate_page",
-                "total_page_count overflow",
-            )
-        })?;
-        Ok(PageId::new(next_raw))
+        self.allocate_page_raw_or_reclaim()
     }
 
     fn free_page(&mut self, page_id: PageId) -> Result<()> {
@@ -246,6 +449,18 @@ impl PageStoreMut for WriteTxn<'_> {
                 MODULE_ID,
                 "WriteTxn::free_page",
                 "cannot free Page 0",
+            ));
+        }
+        if page_id.raw() >= self.meta.total_page_count {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "WriteTxn::free_page",
+                format!(
+                    "page_id {} out of bounds (total_page_count={})",
+                    page_id.raw(),
+                    self.meta.total_page_count
+                ),
             ));
         }
         self.retired_pages.push(page_id);

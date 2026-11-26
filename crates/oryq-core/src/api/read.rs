@@ -15,7 +15,7 @@ use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId};
 
 use crate::adapters::CoreQuerySource;
 use crate::catalog::{list_collection_names, load_collection_entry, CatalogEntry};
-use crate::write::decode_collection_record;
+use crate::write::decode_collection_record_from_store;
 
 const DEFAULT_QUERY_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
@@ -227,7 +227,10 @@ impl ReadCollection<'_, '_> {
         for hit in hits {
             let rec_key = encode_record_id(hit.record_id);
             if let Some(raw) = data_tree.get(self.tx, &rec_key)? {
-                results.push((decode_collection_record(&raw)?, hit.score));
+                results.push((
+                    decode_collection_record_from_store(self.tx, &raw)?,
+                    hit.score,
+                ));
             }
         }
         Ok(results)
@@ -265,7 +268,10 @@ impl ReadCollection<'_, '_> {
         for hit in hits {
             let rec_key = encode_record_id(hit.record_id);
             if let Some(raw) = data_tree.get(self.tx, &rec_key)? {
-                results.push((decode_collection_record(&raw)?, hit.distance));
+                results.push((
+                    decode_collection_record_from_store(self.tx, &raw)?,
+                    hit.distance,
+                ));
             }
         }
         Ok(results)
@@ -315,7 +321,7 @@ pub(crate) fn find_by_id_in_store(
     let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
     let rec_key = encode_record_id(record_id);
     match data_tree.get(store, &rec_key)? {
-        Some(raw) => Ok(Some(decode_collection_record(&raw)?)),
+        Some(raw) => Ok(Some(decode_collection_record_from_store(store, &raw)?)),
         None => Err(ErrorEnvelope::new(
             ErrorCategory::Corruption,
             MODULE_ID,
@@ -336,7 +342,7 @@ pub(crate) fn find_all_in_store(
     let pairs = data_tree.scan_all(store)?;
     let mut docs = Vec::with_capacity(pairs.len());
     for (_, raw) in pairs {
-        docs.push(decode_collection_record(&raw)?);
+        docs.push(decode_collection_record_from_store(store, &raw)?);
     }
     Ok(docs)
 }

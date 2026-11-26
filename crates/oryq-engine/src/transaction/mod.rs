@@ -20,7 +20,7 @@ use crate::checkpoint::{
 };
 use crate::config::{EngineConfig, PageSize};
 use crate::coordinator::SingleProcessCoordinator;
-use crate::format::{PageHeader, WAL_HEADER_SIZE};
+use crate::format::{PageHeader, WAL_COMMIT_PAYLOAD_SIZE, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE};
 use crate::io::{OpenMode, StorageIo};
 use crate::pager::Pager;
 use crate::ports::{CheckpointOutcome, CommitReceipt};
@@ -282,6 +282,10 @@ impl StorageEngine {
         self.coordinator.latest_committed()
     }
 
+    pub(crate) fn retention_horizon(&self) -> Result<SnapshotId> {
+        self.coordinator.retention_horizon()
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.coordinator.is_poisoned()
     }
@@ -371,6 +375,10 @@ impl StorageEngine {
             ));
         }
         let _writer_permit = self.coordinator.acquire_writer()?;
+        self.checkpoint_with_writer(allow_reset)
+    }
+
+    fn checkpoint_with_writer(&self, allow_reset: bool) -> Result<CheckpointOutcome> {
         let horizon = self.coordinator.retention_horizon()?;
         let latest = self.coordinator.latest_committed()?;
 
@@ -416,8 +424,11 @@ impl StorageEngine {
             0
         };
 
-        // Prune superseded versions below horizon.
+        // Prune superseded versions and unreachable metadata history below horizon.
         st.versions.prune_below(horizon);
+        if let Some((&anchor_tx, _)) = st.meta_history.range(..=horizon).next_back() {
+            st.meta_history.retain(|&tx, _| tx >= anchor_tx);
+        }
 
         // Attempt full WAL reset if requested, checkpointed through latest, and zero active readers.
         let mut wal_reset = false;
@@ -454,6 +465,12 @@ impl StorageEngine {
                 st.meta_history.retain(|&tx, _| tx == latest);
                 Ok(())
             })();
+            // If `reset_intent_seq` was entered (`!= 0` in Page 0 / memory) and the multi-step
+            // WAL reset failed mid-protocol, poison the coordinator immediately so no subsequent
+            // WriteTxn can append to an uncertain/truncated WAL before reopen completes recovery.
+            if reset_res.is_err() && st.pager.header().reset_intent_seq != 0 {
+                self.coordinator.poison();
+            }
             self.coordinator.unblock_admission();
             reset_res?;
             wal_reset = true;
@@ -650,6 +667,49 @@ impl StorageEngine {
     ) -> Result<CommitReceipt> {
         let mut st = self.lock_state()?;
 
+        // Opportunistic pre-commit checkpoint if a previous long-lived reader dropped and
+        // either VersionIndex or `.oryq-wal` would otherwise hit its hard cap.
+        if self.config.wal_autocheckpoint_bytes > 0 && st.pager.header().wal_required {
+            let frame_bytes = (WAL_FRAME_HEADER_SIZE + self.page_size.bytes()) as u64;
+            let commit_bytes = (WAL_FRAME_HEADER_SIZE + WAL_COMMIT_PAYLOAD_SIZE) as u64;
+            let projected_wal = st
+                .wal
+                .next_offset
+                .saturating_add((dirty_pages.len() as u64).saturating_mul(frame_bytes))
+                .saturating_add(commit_bytes);
+            if !st.versions.can_accommodate(dirty_pages.len())
+                || projected_wal > self.config.max_wal_hard_bytes
+            {
+                drop(st);
+                let _ = self.checkpoint_with_writer(true);
+                if self.is_poisoned() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::CommitOutcomeUnknown,
+                        MODULE_ID,
+                        "StorageEngine::commit_write_txn",
+                        "engine poisoned during pre-commit checkpoint reset",
+                    ));
+                }
+                st = self.lock_state()?;
+            }
+        }
+
+        // Pre-check VersionIndex capacity BEFORE touching `.oryq-wal` so quota exhaustion
+        // returns a clean `QuotaExceeded` error instead of poisoning the engine post-sync.
+        if !st.versions.can_accommodate(dirty_pages.len()) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::QuotaExceeded,
+                MODULE_ID,
+                "StorageEngine::commit_write_txn",
+                format!(
+                    "version metadata index capacity ({}/{}) would be exceeded by {} dirty pages; run checkpoint",
+                    st.versions.total_entries(),
+                    st.versions.max_entries(),
+                    dirty_pages.len()
+                ),
+            ));
+        }
+
         // Unseal first if currently sealed (`wal_required == false`).
         if !st.pager.header().wal_required {
             let salt1 = st.salt_counter;
@@ -714,6 +774,19 @@ impl StorageEngine {
         if let Err(err) = self.coordinator.publish_commit(tx_id) {
             self.coordinator.poison();
             return Err(err);
+        }
+
+        let wal_bytes = st.wal.next_offset;
+        let ver_entries = st.versions.total_entries();
+        let ver_half = (self.config.max_version_entries / 2).max(1);
+        let should_auto_ckpt = self.config.wal_autocheckpoint_bytes > 0
+            && (wal_bytes >= self.config.wal_autocheckpoint_bytes || ver_entries >= ver_half);
+        drop(st);
+
+        if should_auto_ckpt {
+            // Caller (`WriteTxn::commit`) already holds `WriterPermit`, so run best-effort
+            // checkpoint directly without re-acquiring `WriterPermit`.
+            let _ = self.checkpoint_with_writer(true);
         }
 
         Ok(receipt)

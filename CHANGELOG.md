@@ -6,6 +6,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 
 ## [Unreleased]
 
+### Planned
+- `0.14.1` (#45): Index, query, projection, aggregation & DoS bug/security fixes.
+- `0.14.2` (#46): FFI, C ABI, CLI & multi-language bindings security hardening + shared read-only locks.
+- `0.15.0` (#47): O(1)-memory streaming cursors, k-way spill sort, chunked VACUUM/backup, batch CRUD & C ABI options.
+- `0.15.1` (#48): Deferred commit checksums & transparent LZ4 document compression.
+- `1.0.0` (#49): Differential planner fuzzing, full Miri/audit sign-off & cross-platform release CI.
+
+## [0.14.0] - 2026-11-26
+
+### Fixed & Wired (#44 — Multi-Page `OverflowStore` 16 MiB Documents, `FreelistManager` Page Reclamation & Auto-Checkpoint)
+- Wired multi-page `OverflowStore` (`write_in_store`, `read_from_store`, `free_in_store`) and `RECORD_KIND_OVERFLOW` (`0x02`) across `oryq-engine` and `oryq-core`, lifting the ~8 KiB single-leaf document ceiling up to the full `max_document_bytes` (`16 MiB` default) and enabling 1024+ dimension vector documents on default 8 KiB pages.
+- Fixed delta-chain updates near leaf capacity (`append_or_compact_record`) to compact early or spill to overflow pages instead of failing with leaf capacity errors.
+- Wired MVCC horizon-gated `FreelistManager` page reclamation and retirement into `WriteTxn` (`reclaim_from_freelist`, `flush_retired_pages_to_freelist`) and `free_collection_tree_pages`, eliminating deleted/dropped page leaks on disk and in `:memory:` without requiring offline `VACUUM`.
+- Added automatic WAL checkpointing (`wal_autocheckpoint_bytes = 4 MiB` default on `EngineConfig` and `DatabaseConfig`), pre-WAL-sync `VersionIndex::can_accommodate` quota checks (preventing post-sync engine poisoning), and passive-checkpoint `meta_history` pruning.
+- Recorded `CC-0028` in `architecture/contract-changes.toml`.
+
 ## [0.13.2] - 2026-11-26
 
 ### Performance (#40 — Core/Query/FFI Hot-Path Optimizations & Updated SQLite Benchmark Report)

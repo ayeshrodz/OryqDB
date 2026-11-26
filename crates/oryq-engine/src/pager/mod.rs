@@ -410,6 +410,25 @@ impl Pager {
         Ok(())
     }
 
+    /// Ensures the backing `.oryq` file is at least `min_pages * page_size` bytes long so
+    /// checkpointed `total_page_count` never exceeds physical file length.
+    pub(crate) fn ensure_min_page_count(&mut self, min_pages: u64) -> Result<()> {
+        let min_bytes = min_pages
+            .checked_mul(self.header.page_size.bytes() as u64)
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Overflow,
+                    MODULE_ID,
+                    "Pager::ensure_min_page_count",
+                    "total_page_count * page_size overflow",
+                )
+            })?;
+        if self.file.len()? < min_bytes {
+            self.file.set_len(min_bytes)?;
+        }
+        Ok(())
+    }
+
     /// Flushes data pages according to [`SyncMode`].
     pub fn sync_data(&self) -> Result<()> {
         match self.sync_mode {

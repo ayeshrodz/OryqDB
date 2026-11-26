@@ -34,8 +34,8 @@ pub use format::{
     CommitPayload, FreelistEntry, FreelistTrunkHeader, HeaderSlot, OverflowHeader, OverflowRef,
     PageFlags, PageHeader, PageType, SlotEntry, SlotFlags, SlottedPageMut, SlottedPageView,
     StorageHeader, WalFrameHeader, WalFrameKind, WalHeader, FORMAT_VERSION, ORYQ_MAGIC,
-    PAGE_HEADER_SIZE, SLOT_ENTRY_SIZE, STORAGE_HEADER_SIZE, WAL_COMMIT_PAYLOAD_SIZE,
-    WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE, WAL_MAGIC,
+    OVERFLOW_REF_SIZE, PAGE_HEADER_SIZE, SLOT_ENTRY_SIZE, STORAGE_HEADER_SIZE,
+    WAL_COMMIT_PAYLOAD_SIZE, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE, WAL_MAGIC,
 };
 pub use inspect::{
     inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, LockInspectionReport,

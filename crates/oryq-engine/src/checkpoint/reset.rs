@@ -29,6 +29,10 @@ pub fn reset_wal_after_full_checkpoint(
 ) -> Result<WalHeader> {
     let next_seq = pager.header().checkpointed_wal_seq + 1;
 
+    // Pre-flight data sync BEFORE mutating `reset_intent_seq` in memory so a pre-header sync
+    // fault leaves `pager.header()` completely untouched.
+    pager.sync_data()?;
+
     // Step 1: Durably publish reset_intent_seq in both shadow slots.
     pager.header_mut().reset_intent_seq = next_seq;
     pager.commit_header()?;
