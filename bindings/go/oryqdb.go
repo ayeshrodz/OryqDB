@@ -312,40 +312,70 @@ func (tx *WriteTxn) requireOpen() (*C.OryqWriteTxn, error) {
 
 // CreateCollection creates a new collection.
 func (tx *WriteTxn) CreateCollection(name string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cName, err := cStringChecked(name)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cName))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
 	return callStatus(func() C.oryq_status { return C.oryq_create_collection(ptr, cName) })
 }
 
 // DropCollection drops an existing collection.
 func (tx *WriteTxn) DropCollection(name string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cName, err := cStringChecked(name)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cName))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
 	return callStatus(func() C.oryq_status { return C.oryq_drop_collection(ptr, cName) })
 }
 
 // CreateIndex creates a secondary index on fieldPath (sortOrder: 1 for asc, -1 for desc).
 func (tx *WriteTxn) CreateIndex(collection, fieldPath string, sortOrder int32, unique, sparse bool, name string) error {
-	ptr, err := tx.requireOpen()
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
 	defer C.free(unsafe.Pointer(cCol))
-	cField := C.CString(fieldPath)
+	cField, err := cStringChecked(fieldPath)
+	if err != nil {
+		return err
+	}
 	defer C.free(unsafe.Pointer(cField))
 	var cName *C.char
 	if name != "" {
-		cName = C.CString(name)
+		cName, err = cStringChecked(name)
+		if err != nil {
+			return err
+		}
 		defer C.free(unsafe.Pointer(cName))
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return err
 	}
 	return callStatus(func() C.oryq_status {
 		return C.oryq_create_index(ptr, cCol, cField, C.int32_t(sortOrder), C.bool(unique), C.bool(sparse), cName)
@@ -354,49 +384,88 @@ func (tx *WriteTxn) CreateIndex(collection, fieldPath string, sortOrder int32, u
 
 // DropIndex drops a non-primary index by name.
 func (tx *WriteTxn) DropIndex(collection, indexName string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cCol))
+	cIdx, err := cStringChecked(indexName)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cIdx))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
-	defer C.free(unsafe.Pointer(cCol))
-	cIdx := C.CString(indexName)
-	defer C.free(unsafe.Pointer(cIdx))
 	return callStatus(func() C.oryq_status { return C.oryq_drop_index(ptr, cCol, cIdx) })
 }
 
 // CreateFtsIndex creates a BM25 full-text index (requires liboryq built with --features fts).
 func (tx *WriteTxn) CreateFtsIndex(collection string, fields []string, name string) error {
-	ptr, err := tx.requireOpen()
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
 	defer C.free(unsafe.Pointer(cCol))
-	cFields := C.CString(strings.Join(fields, ","))
+	cFields, err := cStringChecked(strings.Join(fields, ","))
+	if err != nil {
+		return err
+	}
 	defer C.free(unsafe.Pointer(cFields))
 	var cName *C.char
 	if name != "" {
-		cName = C.CString(name)
+		cName, err = cStringChecked(name)
+		if err != nil {
+			return err
+		}
 		defer C.free(unsafe.Pointer(cName))
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return err
 	}
 	return callStatus(func() C.oryq_status { return C.oryq_create_fts_index(ptr, cCol, cFields, cName) })
 }
 
 // CreateVectorIndex creates a vector similarity index (requires liboryq built with --features vec).
 func (tx *WriteTxn) CreateVectorIndex(collection, fieldPath string, dimensions uint32, metric VectorMetric, quant VectorQuantization, name string) error {
-	ptr, err := tx.requireOpen()
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
 	defer C.free(unsafe.Pointer(cCol))
-	cField := C.CString(fieldPath)
+	cField, err := cStringChecked(fieldPath)
+	if err != nil {
+		return err
+	}
 	defer C.free(unsafe.Pointer(cField))
 	var cName *C.char
 	if name != "" {
-		cName = C.CString(name)
+		cName, err = cStringChecked(name)
+		if err != nil {
+			return err
+		}
 		defer C.free(unsafe.Pointer(cName))
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return err
 	}
 	return callStatus(func() C.oryq_status {
 		return C.oryq_create_vector_index(ptr, cCol, cField, C.uint32_t(dimensions), C.int32_t(metric), C.int32_t(quant), cName)
@@ -405,42 +474,78 @@ func (tx *WriteTxn) CreateVectorIndex(collection, fieldPath string, dimensions u
 
 // InsertJSON inserts a JSON document into collection.
 func (tx *WriteTxn) InsertJSON(collection, docJSON string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cCol))
+	cDoc, err := cStringChecked(docJSON)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cDoc))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
-	defer C.free(unsafe.Pointer(cCol))
-	cDoc := C.CString(docJSON)
-	defer C.free(unsafe.Pointer(cDoc))
 	return callStatus(func() C.oryq_status { return C.oryq_insert_json(ptr, cCol, cDoc) })
 }
 
 // UpdateByIDJSON applies a MongoDB-style update operator JSON to the document with _id=idJSON.
 func (tx *WriteTxn) UpdateByIDJSON(collection, idJSON, updateJSON string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cCol))
+	cID, err := cStringChecked(idJSON)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cID))
+	cUpd, err := cStringChecked(updateJSON)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cUpd))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
-	defer C.free(unsafe.Pointer(cCol))
-	cID := C.CString(idJSON)
-	defer C.free(unsafe.Pointer(cID))
-	cUpd := C.CString(updateJSON)
-	defer C.free(unsafe.Pointer(cUpd))
 	return callStatus(func() C.oryq_status { return C.oryq_update_by_id_json(ptr, cCol, cID, cUpd) })
 }
 
 // DeleteByIDJSON deletes the document with _id=idJSON.
 func (tx *WriteTxn) DeleteByIDJSON(collection, idJSON string) error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cCol))
+	cID, err := cStringChecked(idJSON)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cID))
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
-	cCol := C.CString(collection)
-	defer C.free(unsafe.Pointer(cCol))
-	cID := C.CString(idJSON)
-	defer C.free(unsafe.Pointer(cID))
 	return callStatus(func() C.oryq_status { return C.oryq_delete_by_id_json(ptr, cCol, cID) })
 }
 
@@ -508,70 +613,105 @@ func (tx *ReadTxn) Close() error {
 
 // FindJSON queries collection with an optional JSON filter (empty string matches all documents).
 func (tx *ReadTxn) FindJSON(collection, filterJSON string) (*Cursor, error) {
-	ptr, err := tx.requireOpen()
+	if tx == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "read transaction is closed"}
+	}
+	cCol, err := cStringChecked(collection)
 	if err != nil {
 		return nil, err
 	}
-	cCol := C.CString(collection)
 	defer C.free(unsafe.Pointer(cCol))
 	var cFilter *C.char
 	if filterJSON != "" {
-		cFilter = C.CString(filterJSON)
+		cFilter, err = cStringChecked(filterJSON)
+		if err != nil {
+			return nil, err
+		}
 		defer C.free(unsafe.Pointer(cFilter))
+	}
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return nil, err
 	}
 	var out *C.OryqCursor
 	if err := callStatus(func() C.oryq_status { return C.oryq_find_json(ptr, cCol, cFilter, &out) }); err != nil {
 		return nil, err
 	}
-	return &Cursor{ptr: out}, nil
+	return &Cursor{ptr: out, parent: tx}, nil
 }
 
 // AggregateJSON executes a JSON aggregation pipeline on collection.
 func (tx *ReadTxn) AggregateJSON(collection, pipelineJSON string) (*Cursor, error) {
+	if tx == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "read transaction is closed"}
+	}
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cCol))
+	cPipe, err := cStringChecked(pipelineJSON)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cPipe))
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return nil, err
 	}
-	cCol := C.CString(collection)
-	defer C.free(unsafe.Pointer(cCol))
-	cPipe := C.CString(pipelineJSON)
-	defer C.free(unsafe.Pointer(cPipe))
 	var out *C.OryqCursor
 	if err := callStatus(func() C.oryq_status { return C.oryq_aggregate_json(ptr, cCol, cPipe, &out) }); err != nil {
 		return nil, err
 	}
-	return &Cursor{ptr: out}, nil
+	return &Cursor{ptr: out, parent: tx}, nil
 }
 
 // SearchFts executes a BM25 full-text search (requires liboryq built with --features fts).
 func (tx *ReadTxn) SearchFts(collection, indexName, queryText string, limit int) (*Cursor, error) {
-	ptr, err := tx.requireOpen()
-	if err != nil {
-		return nil, err
+	if tx == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "read transaction is closed"}
 	}
 	if limit < 0 {
 		return nil, &Error{Status: StatusErrInvalidArgument, Message: "limit must be >= 0"}
 	}
-	cCol := C.CString(collection)
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cCol))
-	cIdx := C.CString(indexName)
+	cIdx, err := cStringChecked(indexName)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cIdx))
-	cQuery := C.CString(queryText)
+	cQuery, err := cStringChecked(queryText)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cQuery))
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return nil, err
+	}
 	var out *C.OryqCursor
 	if err := callStatus(func() C.oryq_status {
 		return C.oryq_search_fts(ptr, cCol, cIdx, cQuery, C.size_t(limit), &out)
 	}); err != nil {
 		return nil, err
 	}
-	return &Cursor{ptr: out}, nil
+	return &Cursor{ptr: out, parent: tx}, nil
 }
 
 // SearchVector executes a top-k vector similarity search (requires liboryq built with --features vec).
 func (tx *ReadTxn) SearchVector(collection, indexName string, queryVec []float32, topK int) (*Cursor, error) {
-	ptr, err := tx.requireOpen()
-	if err != nil {
-		return nil, err
+	if tx == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "read transaction is closed"}
 	}
 	if len(queryVec) == 0 {
 		return nil, &Error{Status: StatusErrInvalidArgument, Message: "queryVec must not be empty"}
@@ -579,10 +719,22 @@ func (tx *ReadTxn) SearchVector(collection, indexName string, queryVec []float32
 	if topK < 0 {
 		return nil, &Error{Status: StatusErrInvalidArgument, Message: "topK must be >= 0"}
 	}
-	cCol := C.CString(collection)
+	cCol, err := cStringChecked(collection)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cCol))
-	cIdx := C.CString(indexName)
+	cIdx, err := cStringChecked(indexName)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cIdx))
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	ptr, err := tx.requireOpen()
+	if err != nil {
+		return nil, err
+	}
 	var out *C.OryqCursor
 	if err := callStatus(func() C.oryq_status {
 		return C.oryq_search_vector(
@@ -597,7 +749,7 @@ func (tx *ReadTxn) SearchVector(collection, indexName string, queryVec []float32
 	}); err != nil {
 		return nil, err
 	}
-	return &Cursor{ptr: out}, nil
+	return &Cursor{ptr: out, parent: tx}, nil
 }
 
 // Cursor wraps a streaming OryqCursor* result handle with mutex synchronization.
@@ -633,6 +785,11 @@ func (c *Cursor) Close() error {
 // Next advances the cursor without JSON serialization (use with Get* accessors).
 // Returns (false, nil) when exhausted.
 func (c *Cursor) Next() (bool, error) {
+	if c == nil {
+		return false, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return false, err
@@ -643,6 +800,11 @@ func (c *Cursor) Next() (bool, error) {
 // NextJSON advances the cursor and returns the next document as a JSON string.
 // Returns ("", false, nil) when exhausted.
 func (c *Cursor) NextJSON() (string, bool, error) {
+	if c == nil {
+		return "", false, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return "", false, err
@@ -658,12 +820,20 @@ func (c *Cursor) NextJSON() (string, bool, error) {
 
 // GetI64 reads a top-level int64 field from the current cursor document.
 func (c *Cursor) GetI64(field string) (int64, error) {
+	if c == nil {
+		return 0, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	cField, err := cStringChecked(field)
+	if err != nil {
+		return 0, err
+	}
+	defer C.free(unsafe.Pointer(cField))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return 0, err
 	}
-	cField := C.CString(field)
-	defer C.free(unsafe.Pointer(cField))
 	var out C.int64_t
 	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_i64(ptr, cField, &out) }); err != nil {
 		return 0, err
@@ -673,12 +843,20 @@ func (c *Cursor) GetI64(field string) (int64, error) {
 
 // GetF64 reads a top-level float64 field from the current cursor document.
 func (c *Cursor) GetF64(field string) (float64, error) {
+	if c == nil {
+		return 0, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	cField, err := cStringChecked(field)
+	if err != nil {
+		return 0, err
+	}
+	defer C.free(unsafe.Pointer(cField))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return 0, err
 	}
-	cField := C.CString(field)
-	defer C.free(unsafe.Pointer(cField))
 	var out C.double
 	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_f64(ptr, cField, &out) }); err != nil {
 		return 0, err
@@ -688,12 +866,20 @@ func (c *Cursor) GetF64(field string) (float64, error) {
 
 // GetBool reads a top-level bool field from the current cursor document.
 func (c *Cursor) GetBool(field string) (bool, error) {
+	if c == nil {
+		return false, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	cField, err := cStringChecked(field)
+	if err != nil {
+		return false, err
+	}
+	defer C.free(unsafe.Pointer(cField))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return false, err
 	}
-	cField := C.CString(field)
-	defer C.free(unsafe.Pointer(cField))
 	var out C.bool
 	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_bool(ptr, cField, &out) }); err != nil {
 		return false, err
@@ -703,12 +889,20 @@ func (c *Cursor) GetBool(field string) (bool, error) {
 
 // GetUTF8 reads a top-level UTF-8 string field from the current cursor document.
 func (c *Cursor) GetUTF8(field string) (string, error) {
+	if c == nil {
+		return "", &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	cField, err := cStringChecked(field)
+	if err != nil {
+		return "", err
+	}
+	defer C.free(unsafe.Pointer(cField))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return "", err
 	}
-	cField := C.CString(field)
-	defer C.free(unsafe.Pointer(cField))
 	var raw *C.char
 	var length C.size_t
 	if err := callStatus(func() C.oryq_status { return C.oryq_cursor_get_utf8(ptr, cField, &raw, &length) }); err != nil {
@@ -725,6 +919,11 @@ func (c *Cursor) GetUTF8(field string) (string, error) {
 
 // GetScore returns the BM25 score (FTS) or distance (Vector) for the current scored row.
 func (c *Cursor) GetScore() (float64, error) {
+	if c == nil {
+		return 0, &Error{Status: StatusErrInvalidArgument, Message: "cursor is closed"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ptr, err := c.requireOpen()
 	if err != nil {
 		return 0, err

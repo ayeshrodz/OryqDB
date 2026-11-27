@@ -289,11 +289,14 @@ def _cstr(value: str, name: str = "string") -> bytes:
     return value.encode("utf-8")
 
 
+_MAX_SIZE_T = (1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1
+
+
 def _require_nonneg_int(value: int, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _MAX_SIZE_T:
         raise OryqError(
             OryqStatus.ERR_INVALID_ARGUMENT,
-            f"{name} must be a non-negative integer",
+            f"{name} must be an integer in range 0..={_MAX_SIZE_T}",
         )
     return value
 
@@ -380,19 +383,19 @@ class Cursor:
     def get_i64(self, field: str) -> int:
         h = self._require_open()
         out = ctypes.c_int64()
-        _check(self._lib, self._lib.oryq_cursor_get_i64(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_i64(h, _cstr(field, "field"), ctypes.byref(out)))
         return int(out.value)
 
     def get_f64(self, field: str) -> float:
         h = self._require_open()
         out = ctypes.c_double()
-        _check(self._lib, self._lib.oryq_cursor_get_f64(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_f64(h, _cstr(field, "field"), ctypes.byref(out)))
         return float(out.value)
 
     def get_bool(self, field: str) -> bool:
         h = self._require_open()
         out = ctypes.c_bool()
-        _check(self._lib, self._lib.oryq_cursor_get_bool(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_bool(h, _cstr(field, "field"), ctypes.byref(out)))
         return bool(out.value)
 
     def get_utf8(self, field: str) -> str:
@@ -403,7 +406,7 @@ class Cursor:
         _check(
             self._lib,
             self._lib.oryq_cursor_get_utf8(
-                h, field.encode("utf-8"), ctypes.byref(ptr), ctypes.byref(length)
+                h, _cstr(field, "field"), ctypes.byref(ptr), ctypes.byref(length)
             ),
         )
         if length.value == 0:
@@ -561,10 +564,10 @@ class WriteTxn:
         return self._handle
 
     def create_collection(self, name: str) -> None:
-        _check(self._lib, self._lib.oryq_create_collection(self._require_open(), name.encode("utf-8")))
+        _check(self._lib, self._lib.oryq_create_collection(self._require_open(), _cstr(name, "name")))
 
     def drop_collection(self, name: str) -> None:
-        _check(self._lib, self._lib.oryq_drop_collection(self._require_open(), name.encode("utf-8")))
+        _check(self._lib, self._lib.oryq_drop_collection(self._require_open(), _cstr(name, "name")))
 
     def create_index(
         self,
@@ -580,12 +583,12 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_create_index(
                 self._require_open(),
-                collection.encode("utf-8"),
-                field_path.encode("utf-8"),
+                _cstr(collection, "collection"),
+                _cstr(field_path, "field_path"),
                 int(sort_order),
                 bool(unique),
                 bool(sparse),
-                name.encode("utf-8") if name is not None else None,
+                _cstr(name, "name") if name is not None else None,
             ),
         )
 
@@ -593,7 +596,9 @@ class WriteTxn:
         _check(
             self._lib,
             self._lib.oryq_drop_index(
-                self._require_open(), collection.encode("utf-8"), index_name.encode("utf-8")
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _cstr(index_name, "index_name"),
             ),
         )
 
@@ -610,9 +615,9 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_create_fts_index(
                 self._require_open(),
-                collection.encode("utf-8"),
-                fields_csv.encode("utf-8"),
-                name.encode("utf-8") if name is not None else None,
+                _cstr(collection, "collection"),
+                _cstr(fields_csv, "fields"),
+                _cstr(name, "name") if name is not None else None,
             ),
         )
 
@@ -725,7 +730,7 @@ class Database:
         """Opens or creates an OryqDB database (pass `":memory:"` for an ephemeral in-memory DB)."""
         lib = load_library(lib_path)
         out_db = ctypes.c_void_p()
-        _check(lib, lib.oryq_db_open(str(path).encode("utf-8"), ctypes.byref(out_db)))
+        _check(lib, lib.oryq_db_open(_cstr(str(path), "path"), ctypes.byref(out_db)))
         return cls(lib, out_db)
 
     @classmethod
@@ -768,7 +773,10 @@ class Database:
         _check(self._lib, self._lib.oryq_db_vacuum(self._require_open()))
 
     def backup_to(self, dest_path: Union[str, os.PathLike[str]]) -> None:
-        _check(self._lib, self._lib.oryq_db_backup_to(self._require_open(), str(dest_path).encode("utf-8")))
+        _check(
+            self._lib,
+            self._lib.oryq_db_backup_to(self._require_open(), _cstr(str(dest_path), "dest_path")),
+        )
 
     def integrity_check(self) -> bool:
         out_ok = ctypes.c_bool()

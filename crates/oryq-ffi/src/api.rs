@@ -1361,4 +1361,68 @@ mod tests {
         assert!(parse_id_json(r#"1, "injected": 2"#).is_err());
         assert!(parse_id_json(r#"1},{"_id":2"#).is_err());
     }
+
+    #[test]
+    fn status_mappings_and_destructor_last_error_preservation() {
+        use oryq_core::{ErrorCategory, ErrorEnvelope};
+
+        let doc_large = ErrorEnvelope::new(
+            ErrorCategory::Overflow,
+            "core",
+            "insert",
+            "document exceeds max_document_bytes",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&doc_large),
+            OryqStatus::ErrDocumentTooLarge
+        );
+
+        let prec = ErrorEnvelope::new(
+            ErrorCategory::Overflow,
+            "document",
+            "inc",
+            "lossless i64-to-f64 conversion failed for 9007199254740993 (exceeds 2^53)",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&prec),
+            OryqStatus::ErrNumericPrecision
+        );
+
+        let col_named_index = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "collection",
+            "collection 'user_index' does not exist",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&col_named_index),
+            OryqStatus::ErrNotFound
+        );
+
+        let idx_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search",
+            "index 'idx_foo' not found",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&idx_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
+        // Destructors must preserve prior LAST_ERROR on entry.
+        // SAFETY: Passing null pointers is explicitly defined and safe for these C ABI entry points.
+        unsafe {
+            let st = oryq_db_open(std::ptr::null(), std::ptr::null_mut());
+            assert_eq!(st, OryqStatus::ErrInvalidArgument);
+            assert!(!oryq_last_error_message().is_null());
+            assert_eq!(oryq_cursor_close(std::ptr::null_mut()), OryqStatus::Ok);
+            assert_eq!(oryq_read_txn_close(std::ptr::null_mut()), OryqStatus::Ok);
+            assert_eq!(
+                oryq_write_txn_rollback(std::ptr::null_mut()),
+                OryqStatus::Ok
+            );
+            assert!(!oryq_last_error_message().is_null());
+        }
+    }
 }

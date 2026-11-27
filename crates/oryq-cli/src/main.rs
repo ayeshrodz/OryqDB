@@ -891,3 +891,65 @@ fn print_usage() -> Result<(), CliError> {
         oryq_core::version()
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|x| (*x).to_owned()).collect()
+    }
+
+    #[test]
+    fn cli_help_trailing_args_readonly_and_index_count_explain() {
+        let dir = std::env::temp_dir().join(format!(
+            "oryq_cli_hardening_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does_not_exist.oryq");
+        let missing_s = missing.to_string_lossy().to_string();
+
+        // Global --help must succeed and never create `./--help` or touch a DB.
+        assert!(run(&s(&["drop-collection", "--help"])).is_ok());
+        assert!(!Path::new("--help").exists());
+
+        // Read-only `info` on missing path must fail and NOT create an empty DB file.
+        assert!(run(&s(&["info", &missing_s])).is_err());
+        assert!(!missing.exists());
+
+        // Unexpected trailing arg on fixed-arity command must fail.
+        assert!(run(&s(&["info", &missing_s, "--bogus"])).is_err());
+
+        // End-to-end create-index, indexes, count, explain, drop-index.
+        let db_path = dir.join("cli.oryq");
+        let db_s = db_path.to_string_lossy().to_string();
+        assert!(run(&s(&["insert", &db_s, "users", r#"{"_id": 1, "age": 30}"#])).is_ok());
+        assert!(run(&s(&[
+            "create-index",
+            &db_s,
+            "users",
+            "age",
+            "--name",
+            "idx_age"
+        ]))
+        .is_ok());
+        assert!(run(&s(&["indexes", &db_s, "users"])).is_ok());
+        assert!(run(&s(&["count", &db_s, "users", "--filter", r#"{"age": 30}"#])).is_ok());
+        assert!(run(&s(&[
+            "explain",
+            &db_s,
+            "users",
+            "--filter",
+            r#"{"age": 30}"#
+        ]))
+        .is_ok());
+        assert!(run(&s(&["drop-index", &db_s, "users", "idx_age"])).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

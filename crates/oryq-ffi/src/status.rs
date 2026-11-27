@@ -52,7 +52,9 @@ impl OryqStatus {
             }
             ErrorCategory::InvalidQuery => Self::ErrInvalidQuery,
             ErrorCategory::NotFound => {
-                if msg.contains("index") {
+                if msg.starts_with("index ")
+                    || (msg.contains("index '") && !msg.contains("collection '"))
+                {
                     Self::ErrIndexNotFound
                 } else {
                     Self::ErrNotFound
@@ -61,16 +63,20 @@ impl OryqStatus {
             ErrorCategory::DuplicateKey => Self::ErrDuplicateKey,
             ErrorCategory::TypeMismatch => Self::ErrTypeMismatch,
             ErrorCategory::Overflow => {
-                if msg.contains("index key") || msg.contains("max_index_key") {
+                if msg.contains("max_document_bytes")
+                    || (msg.contains("document") && msg.contains("limit"))
+                {
+                    Self::ErrDocumentTooLarge
+                } else if msg.contains("index key") || msg.contains("max_index_key") {
                     Self::ErrIndexKeyTooLarge
-                } else if msg.contains("precision") {
+                } else if msg.contains("precision") || msg.contains("lossless i64-to-f64") {
                     Self::ErrNumericPrecision
                 } else {
                     Self::ErrNumericOverflow
                 }
             }
             ErrorCategory::QuotaExceeded => {
-                if msg.contains("document") && msg.contains("max_document_bytes") {
+                if msg.contains("max_document_bytes") {
                     Self::ErrDocumentTooLarge
                 } else if msg.contains("wal") || msg.contains("WAL") || msg.contains("version") {
                     Self::ErrWalLimit

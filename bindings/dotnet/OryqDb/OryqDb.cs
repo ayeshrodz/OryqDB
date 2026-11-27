@@ -225,9 +225,9 @@ public sealed class OryqWriteTxn : IDisposable
 {
     private readonly OryqWriteTxnHandle _handle;
     private readonly object _lifecycleLock = new();
-    private OryqDb? _parent;
+    private OryqDatabase? _parent;
 
-    internal OryqWriteTxn(OryqWriteTxnHandle handle, OryqDb? parent = null)
+    internal OryqWriteTxn(OryqWriteTxnHandle handle, OryqDatabase? parent = null)
     {
         _handle = handle;
         _parent = parent;
@@ -351,9 +351,9 @@ public sealed class OryqReadTxn : IDisposable
 {
     private readonly OryqReadTxnHandle _handle;
     private readonly object _lifecycleLock = new();
-    private OryqDb? _parent;
+    private OryqDatabase? _parent;
 
-    internal OryqReadTxn(OryqReadTxnHandle handle, OryqDb? parent = null)
+    internal OryqReadTxn(OryqReadTxnHandle handle, OryqDatabase? parent = null)
     {
         _handle = handle;
         _parent = parent;
