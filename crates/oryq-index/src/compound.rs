@@ -2,11 +2,10 @@
 //! with `R=16` prefix-restart compression codec, parallel-array prohibition, and exact
 //! `RecordId` deduplication (`docs/indexing.md` §4.2–§4.4).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use oryq_document::{DocumentView, ValueView};
-use oryq_engine::btree::read_internal_node;
-use oryq_engine::{BTree, PageSize, PageStore, PageStoreMut, SlottedPageView, TreeKind, WriteTxn};
+use oryq_engine::{BTree, PageSize, PageStore, TreeKind, WriteTxn};
 use oryq_types::{
     CapabilityId, ErrorCategory, ErrorEnvelope, PageId, RecordId, Result, VersionRange,
 };
@@ -459,23 +458,6 @@ impl IndexProvider for CompoundIndexProvider {
     }
 
     fn drop_index(&self, tx: &mut WriteTxn<'_>, desc: &IndexDescriptor) -> Result<()> {
-        let mut stack = vec![desc.root_page_id];
-        let mut visited = HashSet::new();
-        while let Some(pid) = stack.pop() {
-            if !visited.insert(pid) {
-                continue;
-            }
-            let bytes = tx.read_page(pid)?;
-            let view = SlottedPageView::parse(&bytes, pid)?;
-            if TreeKind::is_internal(view.header().page_type) {
-                let node = read_internal_node(&bytes, pid)?;
-                stack.push(node.leftmost_child);
-                for (_, child) in node.separators {
-                    stack.push(child);
-                }
-            }
-            tx.free_page(pid)?;
-        }
-        Ok(())
+        BTree::open(desc.root_page_id, TreeKind::Index).free_all_pages(tx)
     }
 }

@@ -21,6 +21,9 @@ pub struct DatabaseConfig {
     /// Soft `.oryq-wal` byte threshold (`0` disables automatic checkpointing) above which a
     /// committing writer automatically checkpoints (`4 MiB` default).
     pub wal_autocheckpoint_bytes: u64,
+    /// Maximum milliseconds `begin_write()` waits for an active writer before returning
+    /// `ErrorCategory::Busy` (`5_000` ms default; `0` waits indefinitely).
+    pub busy_timeout_ms: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -38,6 +41,7 @@ impl Default for DatabaseConfig {
             group_commit: GroupCommitConfig::default(),
             auto_checkpoint_on_close: true,
             wal_autocheckpoint_bytes: eng.wal_autocheckpoint_bytes,
+            busy_timeout_ms: eng.busy_timeout_ms,
         }
     }
 }
@@ -54,6 +58,7 @@ impl DatabaseConfig {
             max_readers: self.max_readers,
             auto_checkpoint_on_close: self.auto_checkpoint_on_close,
             wal_autocheckpoint_bytes: self.wal_autocheckpoint_bytes,
+            busy_timeout_ms: self.busy_timeout_ms,
             ..EngineConfig::default()
         }
     }

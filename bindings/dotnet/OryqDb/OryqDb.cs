@@ -156,32 +156,58 @@ public sealed class OryqDatabase : IDisposable
         return _handle;
     }
 
+    private readonly object _lifecycleLock = new();
+
     public OryqReadTxn BeginRead()
     {
-        OryqException.Check(OryqNative.oryq_read_txn_begin(RequireOpen(), out var ptr));
-        return new OryqReadTxn(new OryqReadTxnHandle(ptr), this);
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_read_txn_begin(RequireOpen(), out var ptr));
+            return new OryqReadTxn(new OryqReadTxnHandle(ptr), this);
+        }
     }
 
     public OryqWriteTxn BeginWrite()
     {
-        OryqException.Check(OryqNative.oryq_write_txn_begin(RequireOpen(), out var ptr));
-        return new OryqWriteTxn(new OryqWriteTxnHandle(ptr), this);
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_write_txn_begin(RequireOpen(), out var ptr));
+            return new OryqWriteTxn(new OryqWriteTxnHandle(ptr), this);
+        }
     }
 
-    public void Checkpoint() => OryqException.Check(OryqNative.oryq_db_checkpoint(RequireOpen()));
+    public void Checkpoint()
+    {
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_db_checkpoint(RequireOpen()));
+        }
+    }
 
-    public void Vacuum() => OryqException.Check(OryqNative.oryq_db_vacuum(RequireOpen()));
+    public void Vacuum()
+    {
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_db_vacuum(RequireOpen()));
+        }
+    }
 
-    public void BackupTo(string destPath) =>
-        OryqException.Check(OryqNative.oryq_db_backup_to(RequireOpen(), destPath));
+    public void BackupTo(string destPath)
+    {
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_db_backup_to(RequireOpen(), destPath));
+        }
+    }
 
     public bool IntegrityCheck()
     {
-        OryqException.Check(OryqNative.oryq_db_integrity_check(RequireOpen(), out bool ok));
-        return ok;
+        lock (_lifecycleLock)
+        {
+            OryqException.Check(OryqNative.oryq_db_integrity_check(RequireOpen(), out bool ok));
+            return ok;
+        }
     }
-
-    private readonly object _lifecycleLock = new();
 
     public void Close()
     {

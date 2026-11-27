@@ -119,3 +119,32 @@ fn concurrent_readonly_opens_share_locks_and_block_exclusive_writer() {
     drop(rw);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cross_thread_begin_write_respects_busy_timeout_ms() {
+    let dir = std::env::temp_dir().join(format!(
+        "oryq_busy_timeout_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("busy.oryq");
+
+    let cfg = DatabaseConfig {
+        busy_timeout_ms: 50,
+        ..DatabaseConfig::default()
+    };
+    let db = Arc::new(Database::open(&db_path, cfg).unwrap());
+    let _wtx = db.begin_write().unwrap();
+
+    let db2 = Arc::clone(&db);
+    let handle = thread::spawn(move || db2.begin_write().unwrap_err().category());
+    assert_eq!(handle.join().unwrap(), ErrorCategory::Busy);
+
+    drop(_wtx);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -73,6 +73,9 @@ pub struct EngineConfig {
     /// Soft `.oryq-wal` byte threshold (`0` disables automatic checkpointing) above which a
     /// committing writer automatically triggers a passive/reset checkpoint (`4 MiB` default).
     pub wal_autocheckpoint_bytes: u64,
+    /// Maximum milliseconds `begin_write()` waits for an active writer before returning
+    /// `ErrorCategory::Busy` (`5_000` ms default; `0` waits indefinitely).
+    pub busy_timeout_ms: u64,
 }
 
 impl Default for EngineConfig {
@@ -88,6 +91,7 @@ impl Default for EngineConfig {
             max_readers: 64,
             auto_checkpoint_on_close: false,
             wal_autocheckpoint_bytes: 4 * 1024 * 1024,
+            busy_timeout_ms: 5_000,
         }
     }
 }

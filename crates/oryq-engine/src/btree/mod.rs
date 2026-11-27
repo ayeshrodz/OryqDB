@@ -116,4 +116,26 @@ impl BTree {
         }
         Ok(out)
     }
+
+    /// Walks this B+ tree from its root and frees every reachable internal and leaf page.
+    pub fn free_all_pages(&self, store: &mut impl PageStoreMut) -> Result<()> {
+        let mut stack = vec![self.root];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(pid) = stack.pop() {
+            if !visited.insert(pid) {
+                continue;
+            }
+            let bytes = store.read_page(pid)?;
+            let view = crate::format::SlottedPageView::parse(&bytes, pid)?;
+            if TreeKind::is_internal(view.header().page_type) {
+                let node = read_internal_node(&bytes, pid)?;
+                stack.push(node.leftmost_child);
+                for (_, child) in node.separators {
+                    stack.push(child);
+                }
+            }
+            store.free_page(pid)?;
+        }
+        Ok(())
+    }
 }

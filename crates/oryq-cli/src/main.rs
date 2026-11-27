@@ -48,9 +48,10 @@ fn run(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     };
 
-    // Handle `-h` / `--help` globally so subcommands never mistake `--help` for a DB path.
+    // Handle `-h` / `--help` at top level or immediately after a subcommand name (args[1]),
+    // avoiding accidental interception of literal "--help" values in query/search arguments.
     if matches!(cmd, "-h" | "--help" | "help")
-        || args[1..].iter().any(|a| a == "-h" || a == "--help")
+        || matches!(args.get(1).map(String::as_str), Some("-h" | "--help"))
     {
         print_usage()?;
         return Ok(());
@@ -198,12 +199,11 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let rtx = db.begin_read().map_err(fmt_err)?;
             let col = rtx.collection(col_name).map_err(fmt_err)?;
             let cnt = match filter {
-                Some(f) => col
-                    .find_json(Some(f), None, None, 0, None)
-                    .map_err(fmt_err)?
-                    .collect_all()
-                    .len(),
-                None => col.count().map_err(fmt_err)?,
+                Some(f) => {
+                    let expr = oryq_core::parse_filter_json(f).map_err(fmt_err)?;
+                    col.count_matching(Some(&expr)).map_err(fmt_err)?
+                }
+                None => col.count().map_err(fmt_err)? as u64,
             };
             out_line(&cnt.to_string())?;
             Ok(())
