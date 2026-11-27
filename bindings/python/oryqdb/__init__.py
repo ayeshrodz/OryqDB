@@ -99,20 +99,20 @@ def _discover_library_path() -> Optional[Path]:
     if env_path:
         return Path(env_path)
 
-    # Check workspace target/release and target/debug relative to bindings/python/oryqdb/__init__.py,
-    # preferring whichever library artifact was built most recently.
+    # Only probe workspace target/{release,debug} when running inside an actual OryqDB checkout.
     parents = Path(__file__).resolve().parents
     if len(parents) > 3:
         repo_root = parents[3]
-        candidates = []
-        for profile in ("release", "debug"):
-            for name in _platform_lib_names():
-                candidate = repo_root / "target" / profile / name
-                if candidate.is_file():
-                    candidates.append(candidate)
-        if candidates:
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return candidates[0]
+        if (repo_root / "crates" / "oryq-ffi" / "Cargo.toml").is_file():
+            candidates = []
+            for profile in ("release", "debug"):
+                for name in _platform_lib_names():
+                    candidate = repo_root / "target" / profile / name
+                    if candidate.is_file():
+                        candidates.append(candidate)
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return candidates[0]
     return None
 
 
@@ -280,18 +280,46 @@ def _check(lib: ctypes.CDLL, status: int) -> None:
         raise OryqError(status, msg)
 
 
+def _cstr(value: str, name: str = "string") -> bytes:
+    if "\x00" in value:
+        raise OryqError(
+            OryqStatus.ERR_INVALID_ARGUMENT,
+            f"{name} must not contain interior NUL bytes",
+        )
+    return value.encode("utf-8")
+
+
+_MAX_SIZE_T = (1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1
+
+
+def _require_nonneg_int(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _MAX_SIZE_T:
+        raise OryqError(
+            OryqStatus.ERR_INVALID_ARGUMENT,
+            f"{name} must be an integer in range 0..={_MAX_SIZE_T}",
+        )
+    return value
+
+
 def _to_json_bytes(value: Any) -> bytes:
     if isinstance(value, str):
-        return value.encode("utf-8")
-    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return _cstr(value, "json")
+    raw = json.dumps(value, separators=(",", ":"))
+    return _cstr(raw, "json")
 
 
 class Cursor:
     """Streaming query or aggregation cursor backed by `OryqCursor*`."""
 
-    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p) -> None:
+    def __init__(
+        self,
+        lib: ctypes.CDLL,
+        handle: ctypes.c_void_p,
+        parent: Optional[ReadTxn] = None,
+    ) -> None:
         self._lib = lib
         self._handle: Optional[ctypes.c_void_p] = handle
+        self._parent = parent
 
     def _require_open(self) -> ctypes.c_void_p:
         if self._handle is None:
@@ -302,6 +330,7 @@ class Cursor:
         if self._handle is not None:
             h = self._handle
             self._handle = None
+            self._parent = None
             _check(self._lib, self._lib.oryq_cursor_close(h))
 
     def __enter__(self) -> Cursor:
@@ -354,19 +383,19 @@ class Cursor:
     def get_i64(self, field: str) -> int:
         h = self._require_open()
         out = ctypes.c_int64()
-        _check(self._lib, self._lib.oryq_cursor_get_i64(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_i64(h, _cstr(field, "field"), ctypes.byref(out)))
         return int(out.value)
 
     def get_f64(self, field: str) -> float:
         h = self._require_open()
         out = ctypes.c_double()
-        _check(self._lib, self._lib.oryq_cursor_get_f64(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_f64(h, _cstr(field, "field"), ctypes.byref(out)))
         return float(out.value)
 
     def get_bool(self, field: str) -> bool:
         h = self._require_open()
         out = ctypes.c_bool()
-        _check(self._lib, self._lib.oryq_cursor_get_bool(h, field.encode("utf-8"), ctypes.byref(out)))
+        _check(self._lib, self._lib.oryq_cursor_get_bool(h, _cstr(field, "field"), ctypes.byref(out)))
         return bool(out.value)
 
     def get_utf8(self, field: str) -> str:
@@ -377,7 +406,7 @@ class Cursor:
         _check(
             self._lib,
             self._lib.oryq_cursor_get_utf8(
-                h, field.encode("utf-8"), ctypes.byref(ptr), ctypes.byref(length)
+                h, _cstr(field, "field"), ctypes.byref(ptr), ctypes.byref(length)
             ),
         )
         if length.value == 0:
@@ -395,9 +424,15 @@ class Cursor:
 class ReadTxn:
     """Snapshot-isolated read transaction backed by `OryqReadTxn*`."""
 
-    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p) -> None:
+    def __init__(
+        self,
+        lib: ctypes.CDLL,
+        handle: ctypes.c_void_p,
+        parent: Optional[Database] = None,
+    ) -> None:
         self._lib = lib
         self._handle: Optional[ctypes.c_void_p] = handle
+        self._parent = parent
 
     def _require_open(self) -> ctypes.c_void_p:
         if self._handle is None:
@@ -411,10 +446,10 @@ class ReadTxn:
         _check(
             self._lib,
             self._lib.oryq_find_json(
-                h, collection.encode("utf-8"), filter_bytes, ctypes.byref(out_cursor)
+                h, _cstr(collection, "collection"), filter_bytes, ctypes.byref(out_cursor)
             ),
         )
-        return Cursor(self._lib, out_cursor)
+        return Cursor(self._lib, out_cursor, parent=self)
 
     def aggregate(self, collection: str, pipeline: Any) -> Cursor:
         h = self._require_open()
@@ -423,12 +458,12 @@ class ReadTxn:
             self._lib,
             self._lib.oryq_aggregate_json(
                 h,
-                collection.encode("utf-8"),
+                _cstr(collection, "collection"),
                 _to_json_bytes(pipeline),
                 ctypes.byref(out_cursor),
             ),
         )
-        return Cursor(self._lib, out_cursor)
+        return Cursor(self._lib, out_cursor, parent=self)
 
     def search_fts(
         self,
@@ -439,22 +474,21 @@ class ReadTxn:
         limit: int = 10,
     ) -> Cursor:
         """Executes an Okapi BM25 full-text search (requires `oryq-ffi --features fts`)."""
-        if limit < 0:
-            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "limit must be >= 0")
+        limit = _require_nonneg_int(limit, "limit")
         h = self._require_open()
         out_cursor = ctypes.c_void_p()
         _check(
             self._lib,
             self._lib.oryq_search_fts(
                 h,
-                collection.encode("utf-8"),
-                index_name.encode("utf-8"),
-                query_text.encode("utf-8"),
-                int(limit),
+                _cstr(collection, "collection"),
+                _cstr(index_name, "index_name"),
+                _cstr(query_text, "query_text"),
+                limit,
                 ctypes.byref(out_cursor),
             ),
         )
-        return Cursor(self._lib, out_cursor)
+        return Cursor(self._lib, out_cursor, parent=self)
 
     def search_vector(
         self,
@@ -465,8 +499,7 @@ class ReadTxn:
         top_k: int = 10,
     ) -> Cursor:
         """Executes a top-k vector similarity search (requires `oryq-ffi --features vec`)."""
-        if top_k < 0:
-            raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "top_k must be >= 0")
+        top_k = _require_nonneg_int(top_k, "top_k")
         h = self._require_open()
         n = len(query_vector)
         if n == 0:
@@ -478,20 +511,22 @@ class ReadTxn:
             self._lib,
             self._lib.oryq_search_vector(
                 h,
-                collection.encode("utf-8"),
-                index_name.encode("utf-8"),
+                _cstr(collection, "collection"),
+                _cstr(index_name, "index_name"),
                 arr,
                 n,
-                int(top_k),
+                top_k,
                 ctypes.byref(out_cursor),
             ),
         )
-        return Cursor(self._lib, out_cursor)
+        return Cursor(self._lib, out_cursor, parent=self)
 
     def close(self) -> None:
         if self._handle is not None:
-            _check(self._lib, self._lib.oryq_read_txn_close(self._handle))
+            h = self._handle
             self._handle = None
+            self._parent = None
+            _check(self._lib, self._lib.oryq_read_txn_close(h))
 
     def __enter__(self) -> ReadTxn:
         return self
@@ -513,9 +548,15 @@ class WriteTxn:
     Exiting the context manager without calling `commit()` automatically rolls back.
     """
 
-    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p) -> None:
+    def __init__(
+        self,
+        lib: ctypes.CDLL,
+        handle: ctypes.c_void_p,
+        parent: Optional[Database] = None,
+    ) -> None:
         self._lib = lib
         self._handle: Optional[ctypes.c_void_p] = handle
+        self._parent = parent
 
     def _require_open(self) -> ctypes.c_void_p:
         if self._handle is None:
@@ -523,10 +564,10 @@ class WriteTxn:
         return self._handle
 
     def create_collection(self, name: str) -> None:
-        _check(self._lib, self._lib.oryq_create_collection(self._require_open(), name.encode("utf-8")))
+        _check(self._lib, self._lib.oryq_create_collection(self._require_open(), _cstr(name, "name")))
 
     def drop_collection(self, name: str) -> None:
-        _check(self._lib, self._lib.oryq_drop_collection(self._require_open(), name.encode("utf-8")))
+        _check(self._lib, self._lib.oryq_drop_collection(self._require_open(), _cstr(name, "name")))
 
     def create_index(
         self,
@@ -542,12 +583,12 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_create_index(
                 self._require_open(),
-                collection.encode("utf-8"),
-                field_path.encode("utf-8"),
+                _cstr(collection, "collection"),
+                _cstr(field_path, "field_path"),
                 int(sort_order),
                 bool(unique),
                 bool(sparse),
-                name.encode("utf-8") if name is not None else None,
+                _cstr(name, "name") if name is not None else None,
             ),
         )
 
@@ -555,7 +596,9 @@ class WriteTxn:
         _check(
             self._lib,
             self._lib.oryq_drop_index(
-                self._require_open(), collection.encode("utf-8"), index_name.encode("utf-8")
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _cstr(index_name, "index_name"),
             ),
         )
 
@@ -572,9 +615,9 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_create_fts_index(
                 self._require_open(),
-                collection.encode("utf-8"),
-                fields_csv.encode("utf-8"),
-                name.encode("utf-8") if name is not None else None,
+                _cstr(collection, "collection"),
+                _cstr(fields_csv, "fields"),
+                _cstr(name, "name") if name is not None else None,
             ),
         )
 
@@ -589,21 +632,21 @@ class WriteTxn:
         name: Optional[str] = None,
     ) -> None:
         """Creates a dense vector similarity index (requires `oryq-ffi --features vec`)."""
-        if not (0 < dimensions <= 0xFFFF_FFFF):
+        if isinstance(dimensions, bool) or not isinstance(dimensions, int) or not (0 < dimensions <= 0xFFFF_FFFF):
             raise OryqError(
                 OryqStatus.ERR_INVALID_ARGUMENT,
-                "dimensions must be in range 1..=4294967295",
+                "dimensions must be an integer in range 1..=4294967295",
             )
         _check(
             self._lib,
             self._lib.oryq_create_vector_index(
                 self._require_open(),
-                collection.encode("utf-8"),
-                field_path.encode("utf-8"),
-                int(dimensions),
+                _cstr(collection, "collection"),
+                _cstr(field_path, "field_path"),
+                dimensions,
                 int(metric),
                 int(quantization),
-                name.encode("utf-8") if name is not None else None,
+                _cstr(name, "name") if name is not None else None,
             ),
         )
 
@@ -611,7 +654,7 @@ class WriteTxn:
         _check(
             self._lib,
             self._lib.oryq_insert_json(
-                self._require_open(), collection.encode("utf-8"), _to_json_bytes(doc)
+                self._require_open(), _cstr(collection, "collection"), _to_json_bytes(doc)
             ),
         )
 
@@ -620,8 +663,8 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_update_by_id_json(
                 self._require_open(),
-                collection.encode("utf-8"),
-                json.dumps(doc_id, separators=(",", ":")).encode("utf-8"),
+                _cstr(collection, "collection"),
+                _cstr(json.dumps(doc_id, separators=(",", ":")), "doc_id"),
                 _to_json_bytes(update),
             ),
         )
@@ -631,20 +674,22 @@ class WriteTxn:
             self._lib,
             self._lib.oryq_delete_by_id_json(
                 self._require_open(),
-                collection.encode("utf-8"),
-                json.dumps(doc_id, separators=(",", ":")).encode("utf-8"),
+                _cstr(collection, "collection"),
+                _cstr(json.dumps(doc_id, separators=(",", ":")), "doc_id"),
             ),
         )
 
     def commit(self) -> None:
         h = self._require_open()
         self._handle = None
+        self._parent = None
         _check(self._lib, self._lib.oryq_write_txn_commit(h))
 
     def rollback(self) -> None:
         if self._handle is not None:
             h = self._handle
             self._handle = None
+            self._parent = None
             _check(self._lib, self._lib.oryq_write_txn_rollback(h))
 
     def __enter__(self) -> WriteTxn:
@@ -665,9 +710,15 @@ class WriteTxn:
 class Database:
     """Embedded OryqDB database handle backed by `OryqDb*`."""
 
-    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p) -> None:
+    def __init__(
+        self,
+        lib: ctypes.CDLL,
+        handle: ctypes.c_void_p,
+        parent: Optional[Database] = None,
+    ) -> None:
         self._lib = lib
         self._handle: Optional[ctypes.c_void_p] = handle
+        self._parent = parent
 
     @classmethod
     def open(
@@ -679,7 +730,7 @@ class Database:
         """Opens or creates an OryqDB database (pass `":memory:"` for an ephemeral in-memory DB)."""
         lib = load_library(lib_path)
         out_db = ctypes.c_void_p()
-        _check(lib, lib.oryq_db_open(str(path).encode("utf-8"), ctypes.byref(out_db)))
+        _check(lib, lib.oryq_db_open(_cstr(str(path), "path"), ctypes.byref(out_db)))
         return cls(lib, out_db)
 
     @classmethod
@@ -707,12 +758,12 @@ class Database:
     def read_txn(self) -> ReadTxn:
         out_txn = ctypes.c_void_p()
         _check(self._lib, self._lib.oryq_read_txn_begin(self._require_open(), ctypes.byref(out_txn)))
-        return ReadTxn(self._lib, out_txn)
+        return ReadTxn(self._lib, out_txn, parent=self)
 
     def write_txn(self) -> WriteTxn:
         out_txn = ctypes.c_void_p()
         _check(self._lib, self._lib.oryq_write_txn_begin(self._require_open(), ctypes.byref(out_txn)))
-        return WriteTxn(self._lib, out_txn)
+        return WriteTxn(self._lib, out_txn, parent=self)
 
     def checkpoint(self) -> None:
         _check(self._lib, self._lib.oryq_db_checkpoint(self._require_open()))
@@ -722,7 +773,10 @@ class Database:
         _check(self._lib, self._lib.oryq_db_vacuum(self._require_open()))
 
     def backup_to(self, dest_path: Union[str, os.PathLike[str]]) -> None:
-        _check(self._lib, self._lib.oryq_db_backup_to(self._require_open(), str(dest_path).encode("utf-8")))
+        _check(
+            self._lib,
+            self._lib.oryq_db_backup_to(self._require_open(), _cstr(str(dest_path), "dest_path")),
+        )
 
     def integrity_check(self) -> bool:
         out_ok = ctypes.c_bool()

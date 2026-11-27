@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId, TxId};
 
@@ -17,6 +18,7 @@ struct CoordState {
     active_snapshots: HashMap<u64, SnapshotId>,
     max_readers: usize,
     writer_active: bool,
+    writer_thread: Option<ThreadId>,
     admission_blocked: bool,
     poisoned: bool,
 }
@@ -38,6 +40,7 @@ impl SingleProcessCoordinator {
                 active_snapshots: HashMap::new(),
                 max_readers: max_readers.max(1),
                 writer_active: false,
+                writer_thread: None,
                 admission_blocked: false,
                 poisoned: false,
             })),
@@ -81,8 +84,20 @@ impl SingleProcessCoordinator {
     }
 
     /// Acquires exclusive logical writer ownership, blocking until any in-flight writer completes.
+    ///
+    /// Returns [`ErrorCategory::Busy`] immediately if the calling thread already holds the active
+    /// writer permit, preventing single-thread re-entrant self-deadlock.
     pub fn acquire_writer(&self) -> Result<WriterPermit> {
+        let current_tid = std::thread::current().id();
         let mut st = self.state.lock().map_err(|_| poisoned_lock())?;
+        if st.writer_active && st.writer_thread == Some(current_tid) {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Busy,
+                MODULE_ID,
+                "SingleProcessCoordinator::acquire_writer",
+                "a write transaction is already active on this thread (re-entrant begin_write would deadlock)",
+            ));
+        }
         while st.writer_active && !st.poisoned {
             st = self.writer_cv.wait(st).map_err(|_| poisoned_lock())?;
         }
@@ -90,6 +105,7 @@ impl SingleProcessCoordinator {
             return Err(engine_poisoned("SingleProcessCoordinator::acquire_writer"));
         }
         st.writer_active = true;
+        st.writer_thread = Some(current_tid);
         let base_tx_id = st.latest_committed;
         Ok(WriterPermit {
             state: Arc::clone(&self.state),
@@ -100,6 +116,7 @@ impl SingleProcessCoordinator {
 
     /// Attempts to acquire exclusive logical writer ownership without blocking.
     pub fn try_acquire_writer(&self) -> Result<WriterPermit> {
+        let current_tid = std::thread::current().id();
         let mut st = self.state.lock().map_err(|_| poisoned_lock())?;
         if st.poisoned {
             return Err(engine_poisoned(
@@ -115,6 +132,7 @@ impl SingleProcessCoordinator {
             ));
         }
         st.writer_active = true;
+        st.writer_thread = Some(current_tid);
         let base_tx_id = st.latest_committed;
         Ok(WriterPermit {
             state: Arc::clone(&self.state),
@@ -234,6 +252,7 @@ impl Drop for WriterPermit {
     fn drop(&mut self) {
         if let Ok(mut st) = self.state.lock() {
             st.writer_active = false;
+            st.writer_thread = None;
             self.writer_cv.notify_one();
         }
     }

@@ -34,6 +34,11 @@ internal static class OryqNative
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (int depth = 0; depth < 10 && dir != null; depth++, dir = dir.Parent)
         {
+            // Only probe workspace target/ when anchored inside an actual OryqDB checkout.
+            if (!File.Exists(Path.Combine(dir.FullName, "crates", "oryq-ffi", "Cargo.toml")))
+            {
+                continue;
+            }
             var targetDir = Path.Combine(dir.FullName, "target");
             if (!Directory.Exists(targetDir))
             {

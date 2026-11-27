@@ -535,3 +535,38 @@ evidence = [
     "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0030"
+modules = ["document", "engine", "core", "ffi", "cli"]
+files = [
+    "crates/oryq-document/src/json.rs",
+    "crates/oryq-document/src/lib.rs",
+    "crates/oryq-engine/src/coordinator/single_process.rs",
+    "crates/oryq-engine/src/io/memory.rs",
+    "crates/oryq-engine/src/io/platform/mod.rs",
+    "crates/oryq-engine/src/io/platform/unix.rs",
+    "crates/oryq-engine/src/io/platform/windows.rs",
+    "crates/oryq-engine/src/io/registry.rs",
+    "crates/oryq-engine/src/io/vfs.rs",
+    "crates/oryq-engine/src/pager/mod.rs",
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-core/src/api/read.rs",
+    "crates/oryq-core/src/lib.rs",
+    "crates/oryq-ffi/src/api.rs",
+    "crates/oryq-ffi/src/guard.rs",
+    "crates/oryq-ffi/src/handles.rs",
+    "crates/oryq-ffi/src/status.rs",
+    "crates/oryq-cli/src/main.rs",
+]
+reason = "Implement Issue #46 (v0.14.2): fix OryqDb close/begin UAF race via atomic CLOSING_BIT CAS gate, make ReadTransaction Send + Sync (RwLock), detect single-thread re-entrant begin_write self-deadlock (ERR_BUSY), enable concurrent shared OS/process-local locks for read_only opens, parse id_json standalone via parse_json_value_str, check vector alignment/overflow & zero-init FFI out-pointers, preserve LAST_ERROR across destructors, map reachable OryqStatus codes, harden oryq-cli (read-only inspection, global --help, strict arg checks, BrokenPipe, index/count/explain subcommands), and harden Python/Go/Node/.NET bindings."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-core --test ffi_concurrency_and_locks",
+    "cargo test -p oryq-ffi --all-features",
+    "cargo test -p oryq-cli --all-features",
+    "cargo test --workspace --all-features",
+    "python3 -m unittest discover -s bindings/python/tests -v",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

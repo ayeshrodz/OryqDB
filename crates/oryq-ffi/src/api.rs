@@ -4,11 +4,11 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
 use oryq_core::{
-    from_json_str, to_json_string, Database, DatabaseConfig, SortOrder, Value, ValueView,
+    parse_json_value_str, to_json_string, Database, DatabaseConfig, SortOrder, Value, ValueView,
 };
 
 use crate::diagnostics::last_error_ptr;
-use crate::guard::ffi_guard;
+use crate::guard::{ffi_guard, ffi_guard_preserve_last_error};
 use crate::handles::{OryqCursor, OryqDb, OryqReadTxn, OryqWriteTxn};
 use crate::status::OryqStatus;
 
@@ -49,18 +49,8 @@ fn parse_id_json(id_json: &str) -> Result<Value, (OryqStatus, String)> {
             }
         }
     }
-    let wrapped = format!(r#"{{"_id":{id_json}}}"#);
-    let (doc, _) =
-        from_json_str(&wrapped, None).map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
-    doc.view()
-        .get_field("_id")
-        .map(|v| v.to_owned_value())
-        .ok_or_else(|| {
-            (
-                OryqStatus::ErrInvalidArgument,
-                "failed to extract _id value from id_json".to_owned(),
-            )
-        })
+    // Parse strictly as a standalone JSON value (prevents JSON key-injection payloads like `1,"x":2`).
+    parse_json_value_str(id_json).map_err(|e| (OryqStatus::from_error(&e), e.to_string()))
 }
 
 #[no_mangle]
@@ -107,6 +97,10 @@ pub unsafe extern "C" fn oryq_db_open(
                 "out_db must not be null".to_owned(),
             ));
         }
+        // SAFETY: `out_db` is verified non-null; zero-init before fallible work.
+        unsafe {
+            *out_db = std::ptr::null_mut();
+        }
         let path_str = read_cstr(path_utf8, "path_utf8")?;
         let db = Database::open(Path::new(path_str), DatabaseConfig::default())
             .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
@@ -131,14 +125,15 @@ pub unsafe extern "C" fn oryq_db_close(db: *mut OryqDb) -> OryqStatus {
         }
         // SAFETY: Caller passes an owned `OryqDb` pointer from `oryq_db_open`.
         let db_ref = unsafe { &*db };
-        if db_ref.has_live_children() {
+        if !db_ref.try_begin_close() {
             return Err((
                 OryqStatus::ErrBusy,
                 "cannot close database while child read/write transactions are still open"
                     .to_owned(),
             ));
         }
-        // SAFETY: No child handles remain; reclaim Box allocation and drop `Database`.
+        // SAFETY: `try_begin_close` atomically verified 0 children and set CLOSING_BIT;
+        // reclaim Box allocation and drop `Database`.
         let _ = unsafe { Box::from_raw(db) };
         Ok(OryqStatus::Ok)
     })
@@ -207,6 +202,10 @@ pub unsafe extern "C" fn oryq_read_txn_begin(
                 "db and out_txn must not be null".to_owned(),
             ));
         }
+        // SAFETY: `out_txn` is verified non-null; zero-init before fallible work.
+        unsafe {
+            *out_txn = std::ptr::null_mut();
+        }
         // SAFETY: `db` is valid for this call.
         let db_ref = unsafe { &*db };
         let rtx =
@@ -225,7 +224,7 @@ pub unsafe extern "C" fn oryq_read_txn_begin(
 /// `txn` must be null or a valid pointer from `oryq_read_txn_begin` not yet closed.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_read_txn_close(txn: *mut OryqReadTxn) -> OryqStatus {
-    ffi_guard(|| {
+    ffi_guard_preserve_last_error(|| {
         if !txn.is_null() {
             // SAFETY: Reclaims owned `OryqReadTxn`.
             let _ = unsafe { Box::from_raw(txn) };
@@ -249,6 +248,10 @@ pub unsafe extern "C" fn oryq_write_txn_begin(
                 OryqStatus::ErrInvalidArgument,
                 "db and out_txn must not be null".to_owned(),
             ));
+        }
+        // SAFETY: `out_txn` is verified non-null; zero-init before fallible work.
+        unsafe {
+            *out_txn = std::ptr::null_mut();
         }
         // SAFETY: `db` is valid for this call.
         let db_ref = unsafe { &*db };
@@ -293,7 +296,7 @@ pub unsafe extern "C" fn oryq_write_txn_commit(txn: *mut OryqWriteTxn) -> OryqSt
 /// `txn` must be null or a valid pointer from `oryq_write_txn_begin` and must not be used afterward.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_write_txn_rollback(txn: *mut OryqWriteTxn) -> OryqStatus {
-    ffi_guard(|| {
+    ffi_guard_preserve_last_error(|| {
         if !txn.is_null() {
             // SAFETY: Takes ownership and drops the transaction (which rolls back automatically).
             let _ = unsafe { Box::from_raw(txn) };
@@ -600,7 +603,7 @@ pub unsafe extern "C" fn oryq_cursor_get_i64(
 /// `oryq_search_fts`, or `oryq_search_vector` not yet closed.
 #[no_mangle]
 pub unsafe extern "C" fn oryq_cursor_close(cursor: *mut OryqCursor) -> OryqStatus {
-    ffi_guard(|| {
+    ffi_guard_preserve_last_error(|| {
         if !cursor.is_null() {
             // SAFETY: Reclaims owned `OryqCursor`.
             let _ = unsafe { Box::from_raw(cursor) };
@@ -1281,9 +1284,23 @@ pub unsafe extern "C" fn oryq_search_vector(
                 "query_vec must be non-null with query_len > 0".to_owned(),
             ));
         }
+        if (query_vec as usize) % std::mem::align_of::<f32>() != 0 {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "query_vec pointer is not 4-byte aligned for f32".to_owned(),
+            ));
+        }
+        let max_elems = (isize::MAX as usize) / std::mem::size_of::<f32>();
+        if query_len > max_elems {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                format!("query_len ({query_len}) exceeds platform slice byte limit"),
+            ));
+        }
         #[cfg(feature = "vec")]
         {
-            // SAFETY: Caller guarantees `query_vec` points to `query_len` readable `f32` values.
+            // SAFETY: `query_vec` is verified non-null, properly aligned for `f32`, and
+            // `query_len * size_of::<f32>() <= isize::MAX`.
             let query_slice = unsafe { std::slice::from_raw_parts(query_vec, query_len) };
             // SAFETY: `txn` is valid for this call.
             let rtx = unsafe { &*txn }
@@ -1340,5 +1357,94 @@ mod tests {
             Value::String("user-1".into())
         );
         assert!(parse_id_json("-0").is_ok());
+        // Key-injection payloads must be rejected cleanly by standalone JSON parsing.
+        assert!(parse_id_json(r#"1, "injected": 2"#).is_err());
+        assert!(parse_id_json(r#"1},{"_id":2"#).is_err());
+    }
+
+    #[test]
+    fn status_mappings_and_destructor_last_error_preservation() {
+        use oryq_core::{ErrorCategory, ErrorEnvelope};
+
+        let doc_large = ErrorEnvelope::new(
+            ErrorCategory::Overflow,
+            "core",
+            "insert",
+            "document exceeds max_document_bytes",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&doc_large),
+            OryqStatus::ErrDocumentTooLarge
+        );
+
+        let prec = ErrorEnvelope::new(
+            ErrorCategory::Overflow,
+            "document",
+            "inc",
+            "lossless i64-to-f64 conversion failed for 9007199254740993 (exceeds 2^53)",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&prec),
+            OryqStatus::ErrNumericPrecision
+        );
+
+        let col_named_index = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "collection",
+            "collection 'user_index' does not exist",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&col_named_index),
+            OryqStatus::ErrNotFound
+        );
+
+        let idx_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search",
+            "index 'idx_foo' not found",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&idx_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
+        let fts_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search_fts",
+            "FTS index 'idx_fts' not found on collection 'docs'",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&fts_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
+        let vec_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search_vector",
+            "vector index 'idx_vec' not found on collection 'docs'",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&vec_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
+        // Destructors must preserve prior LAST_ERROR on entry.
+        // SAFETY: Passing null pointers is explicitly defined and safe for these C ABI entry points.
+        unsafe {
+            let st = oryq_db_open(std::ptr::null(), std::ptr::null_mut());
+            assert_eq!(st, OryqStatus::ErrInvalidArgument);
+            assert!(!oryq_last_error_message().is_null());
+            assert_eq!(oryq_cursor_close(std::ptr::null_mut()), OryqStatus::Ok);
+            assert_eq!(oryq_read_txn_close(std::ptr::null_mut()), OryqStatus::Ok);
+            assert_eq!(
+                oryq_write_txn_rollback(std::ptr::null_mut()),
+                OryqStatus::Ok
+            );
+            assert!(!oryq_last_error_message().is_null());
+        }
     }
 }

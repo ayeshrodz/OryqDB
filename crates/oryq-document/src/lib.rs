@@ -19,7 +19,9 @@ pub use codec::{
     encode_document, field_name_hash_prefix, validate_document, MAX_NESTING_DEPTH, ORYQ_DOC_VERSION,
 };
 pub use compare::compare_values;
-pub use json::{from_json_str, from_json_value, to_json_string, to_json_value};
+pub use json::{
+    from_json_str, from_json_value, parse_json_value_str, to_json_string, to_json_value,
+};
 pub use patch::{
     bloom_mask_for_top_level, compact_document, decode_physical_patch, encode_physical_patch,
     resolve_path_with_patches, PatchEntry, PatchOp, PhysicalPatch, NO_PREV_DELTA_SLOT,
