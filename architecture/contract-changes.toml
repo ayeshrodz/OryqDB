@@ -570,3 +570,29 @@ evidence = [
     "python3 -m unittest discover -s bindings/python/tests -v",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0031"
+modules = ["engine", "index", "fts", "vec", "core", "cli"]
+files = [
+    "crates/oryq-engine/src/btree/mod.rs",
+    "crates/oryq-engine/src/config.rs",
+    "crates/oryq-engine/src/coordinator/single_process.rs",
+    "crates/oryq-engine/src/transaction/mod.rs",
+    "crates/oryq-index/src/primary/write.rs",
+    "crates/oryq-index/src/secondary/write.rs",
+    "crates/oryq-index/src/compound.rs",
+    "crates/oryq-fts/src/provider.rs",
+    "crates/oryq-vec/src/provider.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-cli/src/main.rs",
+]
+reason = "Implement Issue #53 (v0.14.3): Ponytail audit hardening — add BTree::free_all_pages deduplicating 5 index drop_index DFS loops, add configurable busy_timeout_ms to EngineConfig/DatabaseConfig/SingleProcessCoordinator, synchronize .NET OryqDatabase operational methods with _lifecycleLock, restrict CLI --help interception to args[1], and route CLI count --filter through count_matching."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-core --test ffi_concurrency_and_locks",
+    "cargo test --workspace --all-features",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

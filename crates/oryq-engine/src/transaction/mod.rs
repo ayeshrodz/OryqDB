@@ -250,7 +250,11 @@ impl StorageEngine {
         }
 
         let cache = PageCache::with_limit(config.max_cache_bytes);
-        let coordinator = SingleProcessCoordinator::new(latest_committed_tx_id, config.max_readers);
+        let coordinator = SingleProcessCoordinator::with_busy_timeout(
+            latest_committed_tx_id,
+            config.max_readers,
+            config.busy_timeout_ms,
+        );
 
         Ok(Self {
             io,

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result, SnapshotId, TxId};
 
@@ -29,10 +30,19 @@ pub struct SingleProcessCoordinator {
     state: Arc<Mutex<CoordState>>,
     writer_cv: Arc<Condvar>,
     admission_cv: Arc<Condvar>,
+    busy_timeout_ms: u64,
 }
 
 impl SingleProcessCoordinator {
     pub fn new(initial_committed_tx_id: TxId, max_readers: usize) -> Self {
+        Self::with_busy_timeout(initial_committed_tx_id, max_readers, 5_000)
+    }
+
+    pub fn with_busy_timeout(
+        initial_committed_tx_id: TxId,
+        max_readers: usize,
+        busy_timeout_ms: u64,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(CoordState {
                 latest_committed: initial_committed_tx_id,
@@ -46,6 +56,7 @@ impl SingleProcessCoordinator {
             })),
             writer_cv: Arc::new(Condvar::new()),
             admission_cv: Arc::new(Condvar::new()),
+            busy_timeout_ms,
         }
     }
 
@@ -98,8 +109,43 @@ impl SingleProcessCoordinator {
                 "a write transaction is already active on this thread (re-entrant begin_write would deadlock)",
             ));
         }
+        let deadline = if self.busy_timeout_ms > 0 {
+            Instant::now().checked_add(Duration::from_millis(self.busy_timeout_ms))
+        } else {
+            None
+        };
         while st.writer_active && !st.poisoned {
-            st = self.writer_cv.wait(st).map_err(|_| poisoned_lock())?;
+            if let Some(dl) = deadline {
+                let Some(rem) = dl.checked_duration_since(Instant::now()) else {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Busy,
+                        MODULE_ID,
+                        "SingleProcessCoordinator::acquire_writer",
+                        format!(
+                            "timed out waiting for active writer after {}ms",
+                            self.busy_timeout_ms
+                        ),
+                    ));
+                };
+                let (guard, timeout_res) = self
+                    .writer_cv
+                    .wait_timeout(st, rem)
+                    .map_err(|_| poisoned_lock())?;
+                st = guard;
+                if timeout_res.timed_out() && st.writer_active && !st.poisoned {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Busy,
+                        MODULE_ID,
+                        "SingleProcessCoordinator::acquire_writer",
+                        format!(
+                            "timed out waiting for active writer after {}ms",
+                            self.busy_timeout_ms
+                        ),
+                    ));
+                }
+            } else {
+                st = self.writer_cv.wait(st).map_err(|_| poisoned_lock())?;
+            }
         }
         if st.poisoned {
             return Err(engine_poisoned("SingleProcessCoordinator::acquire_writer"));

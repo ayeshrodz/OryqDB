@@ -1,11 +1,9 @@
 //! Transactional [`oryq_index::IndexProvider`] implementation (`index.vec`) backed by
 //! restricted [`IndexWriteContext`] B+ tree storage.
 
-use std::collections::HashSet;
-
 use oryq_document::{DocumentView, FieldPath, ValueView};
-use oryq_engine::btree::{build_leaf_page, read_internal_node, LeafEntry};
-use oryq_engine::{BTree, PageStore, PageStoreMut, SlottedPageView, TreeKind, WriteTxn};
+use oryq_engine::btree::{build_leaf_page, LeafEntry};
+use oryq_engine::{BTree, PageStore, PageStoreMut, TreeKind, WriteTxn};
 use oryq_index::{
     IndexDescriptor, IndexFieldSpec, IndexKind, IndexProvider, IndexReadCapabilities,
     IndexWriteContext, MaintenanceResult, SortOrder,
@@ -375,23 +373,6 @@ impl IndexProvider for VectorIndexProvider {
     fn drop_index(&self, tx: &mut WriteTxn<'_>, desc: &IndexDescriptor) -> Result<()> {
         let ns = NamespaceId::new(desc.index_id.raw())?;
         let mut ctx = IndexWriteContext::new(ns, tx);
-        let mut stack = vec![desc.root_page_id];
-        let mut visited = HashSet::new();
-        while let Some(pid) = stack.pop() {
-            if !visited.insert(pid) {
-                continue;
-            }
-            let bytes = ctx.read_page(pid)?;
-            let view = SlottedPageView::parse(&bytes, pid)?;
-            if TreeKind::is_internal(view.header().page_type) {
-                let node = read_internal_node(&bytes, pid)?;
-                stack.push(node.leftmost_child);
-                for (_, child) in node.separators {
-                    stack.push(child);
-                }
-            }
-            ctx.free_page(pid)?;
-        }
-        Ok(())
+        BTree::open(desc.root_page_id, TreeKind::Index).free_all_pages(&mut ctx)
     }
 }
