@@ -137,7 +137,12 @@ impl StorageEngine {
         } else if !pager.header().wal_required {
             // Sealed database: missing WAL is permitted; present WAL must still validate if non-empty.
             if io.exists(&wal_path) {
-                let wf = io.open(&wal_path, OpenMode::READ_WRITE)?;
+                let wal_mode = if config.read_only {
+                    OpenMode::READ_ONLY
+                } else {
+                    OpenMode::READ_WRITE
+                };
+                let wf = io.open(&wal_path, wal_mode)?;
                 let scan = scan_wal(
                     wf.as_ref(),
                     pager.header().database_uuid,

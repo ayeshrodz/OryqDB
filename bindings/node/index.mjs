@@ -52,8 +52,9 @@ function toJson(val) {
 }
 
 export class Cursor {
-  constructor(handle) {
+  constructor(handle, parent = null) {
     this._handle = handle;
+    this._parent = parent;
   }
 
   _req() {
@@ -110,14 +111,16 @@ export class Cursor {
     if (this._handle) {
       const h = this._handle;
       this._handle = null;
+      this._parent = null;
       native.cursorClose(h);
     }
   }
 }
 
 export class ReadTxn {
-  constructor(handle) {
+  constructor(handle, parent = null) {
     this._handle = handle;
+    this._parent = parent;
   }
 
   _req() {
@@ -131,12 +134,13 @@ export class ReadTxn {
 
   find(collection, filter = null) {
     const f = filter === null || filter === undefined ? null : toJson(filter);
-    return new Cursor(native.findJson(this._req(), collection, f));
+    return new Cursor(native.findJson(this._req(), collection, f), this);
   }
 
   aggregate(collection, pipeline) {
     return new Cursor(
       native.aggregateJson(this._req(), collection, toJson(pipeline)),
+      this,
     );
   }
 
@@ -148,6 +152,7 @@ export class ReadTxn {
     }
     return new Cursor(
       native.searchFts(this._req(), collection, indexName, queryText, limit),
+      this,
     );
   }
 
@@ -168,6 +173,7 @@ export class ReadTxn {
     }
     return new Cursor(
       native.searchVector(this._req(), collection, indexName, f32, topK),
+      this,
     );
   }
 
@@ -175,14 +181,16 @@ export class ReadTxn {
     if (this._handle) {
       const h = this._handle;
       this._handle = null;
+      this._parent = null;
       native.readTxnClose(h);
     }
   }
 }
 
 export class WriteTxn {
-  constructor(handle) {
+  constructor(handle, parent = null) {
     this._handle = handle;
+    this._parent = parent;
   }
 
   _req() {
@@ -284,6 +292,7 @@ export class WriteTxn {
   commit() {
     const h = this._req();
     this._handle = null;
+    this._parent = null;
     native.writeTxnCommit(h);
   }
 
@@ -291,6 +300,7 @@ export class WriteTxn {
     if (this._handle) {
       const h = this._handle;
       this._handle = null;
+      this._parent = null;
       native.writeTxnRollback(h);
     }
   }
@@ -328,11 +338,11 @@ export class Database {
   }
 
   beginRead() {
-    return new ReadTxn(native.readTxnBegin(this._req()));
+    return new ReadTxn(native.readTxnBegin(this._req()), this);
   }
 
   beginWrite() {
-    return new WriteTxn(native.writeTxnBegin(this._req()));
+    return new WriteTxn(native.writeTxnBegin(this._req()), this);
   }
 
   checkpoint() {

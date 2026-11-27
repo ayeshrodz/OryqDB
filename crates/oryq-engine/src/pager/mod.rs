@@ -105,8 +105,16 @@ impl Pager {
             OpenMode::READ_WRITE
         };
         let file = io.open(path, mode)?;
-        let lease = io.file_registry().acquire(file.identity().clone())?;
-        file.try_lock_exclusive()?;
+        let lease = if config.read_only {
+            io.file_registry().acquire_shared(file.identity().clone())?
+        } else {
+            io.file_registry().acquire(file.identity().clone())?
+        };
+        if config.read_only {
+            file.try_lock_shared()?;
+        } else {
+            file.try_lock_exclusive()?;
+        }
 
         let file_len = file.len()?;
         if file_len < PageSize::Size4096.bytes() as u64 {

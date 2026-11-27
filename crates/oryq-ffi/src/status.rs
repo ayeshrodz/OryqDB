@@ -37,15 +37,57 @@ pub enum OryqStatus {
 
 impl OryqStatus {
     pub fn from_error(err: &ErrorEnvelope) -> Self {
+        let msg = err.message();
         match err.category() {
-            ErrorCategory::InvalidArgument => Self::ErrInvalidArgument,
+            ErrorCategory::InvalidArgument => {
+                if msg.contains("parallel arrays") {
+                    Self::ErrParallelArrayIndex
+                } else if msg.contains("conflicting") && msg.contains("path") {
+                    Self::ErrConflictingPath
+                } else if msg.contains("_id") && (msg.contains("type") || msg.contains("invalid")) {
+                    Self::ErrInvalidIdType
+                } else {
+                    Self::ErrInvalidArgument
+                }
+            }
             ErrorCategory::InvalidQuery => Self::ErrInvalidQuery,
-            ErrorCategory::NotFound => Self::ErrNotFound,
+            ErrorCategory::NotFound => {
+                if msg.contains("index") {
+                    Self::ErrIndexNotFound
+                } else {
+                    Self::ErrNotFound
+                }
+            }
             ErrorCategory::DuplicateKey => Self::ErrDuplicateKey,
             ErrorCategory::TypeMismatch => Self::ErrTypeMismatch,
-            ErrorCategory::Overflow => Self::ErrNumericOverflow,
-            ErrorCategory::QuotaExceeded => Self::ErrQueryMemoryLimit,
-            ErrorCategory::Cancelled | ErrorCategory::Busy => Self::ErrBusy,
+            ErrorCategory::Overflow => {
+                if msg.contains("index key") || msg.contains("max_index_key") {
+                    Self::ErrIndexKeyTooLarge
+                } else if msg.contains("precision") {
+                    Self::ErrNumericPrecision
+                } else {
+                    Self::ErrNumericOverflow
+                }
+            }
+            ErrorCategory::QuotaExceeded => {
+                if msg.contains("document") && msg.contains("max_document_bytes") {
+                    Self::ErrDocumentTooLarge
+                } else if msg.contains("wal") || msg.contains("WAL") || msg.contains("version") {
+                    Self::ErrWalLimit
+                } else if msg.contains("transaction") {
+                    Self::ErrTransactionMemory
+                } else {
+                    Self::ErrQueryMemoryLimit
+                }
+            }
+            ErrorCategory::Busy => {
+                if msg.contains("max_readers") || msg.contains("reader snapshot table full") {
+                    Self::ErrTooManyReaders
+                } else {
+                    Self::ErrBusy
+                }
+            }
+            ErrorCategory::Cancelled => Self::ErrBusy,
             ErrorCategory::LockedByProcess => Self::ErrLockedByProcess,
             ErrorCategory::SnapshotTooOld => Self::ErrSnapshotTooOld,
             ErrorCategory::UnsupportedFeature => Self::ErrUnsupportedFeature,

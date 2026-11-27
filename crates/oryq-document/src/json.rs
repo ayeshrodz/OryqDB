@@ -10,6 +10,19 @@ use crate::view::DocumentView;
 const MODULE_ID: &str = "document";
 const MAX_JSON_DEPTH: usize = 128;
 
+/// Parses a standalone JSON or Extended-JSON value string into a validated [`Value`].
+pub fn parse_json_value_str(json: &str) -> Result<Value> {
+    let parsed: JsonValue = serde_json::from_str(json).map_err(|e| {
+        ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "json::parse_json_value_str",
+            format!("invalid JSON value: {e}"),
+        )
+    })?;
+    json_to_value(&parsed)
+}
+
 /// Parses a JSON or Extended-JSON object string into a validated [`DocumentBuf`].
 pub fn from_json_str(
     json: &str,

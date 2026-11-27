@@ -78,6 +78,26 @@ pub fn try_lock_exclusive(file: &File) -> Result<()> {
     }
 }
 
+pub fn try_lock_shared(file: &File) -> Result<()> {
+    match LockExt::try_lock_shared(file) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Err(ErrorEnvelope::new(
+            ErrorCategory::LockedByProcess,
+            MODULE_ID,
+            "platform::unix::try_lock_shared",
+            "database file is exclusively locked by another handle or process",
+        )
+        .with_source(err)),
+        Err(err) => Err(ErrorEnvelope::new(
+            ErrorCategory::Io,
+            MODULE_ID,
+            "platform::unix::try_lock_shared",
+            format!("shared file lock failed: {err}"),
+        )
+        .with_source(err)),
+    }
+}
+
 pub fn unlock(file: &File) -> Result<()> {
     LockExt::unlock(file).map_err(|err| {
         ErrorEnvelope::new(

@@ -21,6 +21,7 @@ import (
 	"math"
 	"runtime"
 	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -134,14 +135,28 @@ func ABIVersion() (uint16, uint16) {
 	return uint16(packed >> 16), uint16(packed & 0xFFFF)
 }
 
-// Database wraps an open OryqDb* handle.
+func cStringChecked(s string) (*C.char, error) {
+	if strings.IndexByte(s, 0) >= 0 {
+		return nil, &Error{
+			Status:  StatusErrInvalidArgument,
+			Message: "string argument must not contain interior NUL bytes",
+		}
+	}
+	return C.CString(s), nil
+}
+
+// Database wraps an open OryqDb* handle with goroutine-safe lifecycle locking.
 type Database struct {
+	mu  sync.RWMutex
 	ptr *C.OryqDb
 }
 
 // Open opens or creates a database at path (pass ":memory:" for an ephemeral in-memory DB).
 func Open(path string) (*Database, error) {
-	cPath := C.CString(path)
+	cPath, err := cStringChecked(path)
+	if err != nil {
+		return nil, err
+	}
 	defer C.free(unsafe.Pointer(cPath))
 	var out *C.OryqDb
 	if err := callStatus(func() C.oryq_status { return C.oryq_db_open(cPath, &out) }); err != nil {
@@ -155,7 +170,7 @@ func OpenInMemory() (*Database, error) {
 	return Open(":memory:")
 }
 
-func (db *Database) requireOpen() (*C.OryqDb, error) {
+func (db *Database) requireOpenLocked() (*C.OryqDb, error) {
 	if db == nil || db.ptr == nil {
 		return nil, &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
 	}
@@ -164,7 +179,12 @@ func (db *Database) requireOpen() (*C.OryqDb, error) {
 
 // Close closes the database handle. Returns StatusErrBusy if any child transaction is still open.
 func (db *Database) Close() error {
-	if db == nil || db.ptr == nil {
+	if db == nil {
+		return nil
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.ptr == nil {
 		return nil
 	}
 	ptr := db.ptr
@@ -177,7 +197,12 @@ func (db *Database) Close() error {
 
 // Checkpoint runs a WAL checkpoint and seals the database if idle.
 func (db *Database) Checkpoint() error {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
 	if err != nil {
 		return err
 	}
@@ -186,7 +211,12 @@ func (db *Database) Checkpoint() error {
 
 // Vacuum compacts the database in place, reclaiming free pages and shrinking the .oryq file.
 func (db *Database) Vacuum() error {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
 	if err != nil {
 		return err
 	}
@@ -195,18 +225,31 @@ func (db *Database) Vacuum() error {
 
 // BackupTo creates a standalone sealed online backup at destPath.
 func (db *Database) BackupTo(destPath string) error {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	cDest, err := cStringChecked(destPath)
 	if err != nil {
 		return err
 	}
-	cDest := C.CString(destPath)
 	defer C.free(unsafe.Pointer(cDest))
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
+	if err != nil {
+		return err
+	}
 	return callStatus(func() C.oryq_status { return C.oryq_db_backup_to(ptr, cDest) })
 }
 
 // IntegrityCheck verifies snapshot-consistent collection and index integrity.
 func (db *Database) IntegrityCheck() (bool, error) {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return false, &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
 	if err != nil {
 		return false, err
 	}
@@ -219,7 +262,12 @@ func (db *Database) IntegrityCheck() (bool, error) {
 
 // BeginRead starts a snapshot-isolated ReadTxn.
 func (db *Database) BeginRead() (*ReadTxn, error) {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -227,12 +275,17 @@ func (db *Database) BeginRead() (*ReadTxn, error) {
 	if err := callStatus(func() C.oryq_status { return C.oryq_read_txn_begin(ptr, &out) }); err != nil {
 		return nil, err
 	}
-	return &ReadTxn{ptr: out}, nil
+	return &ReadTxn{ptr: out, parent: db}, nil
 }
 
 // BeginWrite starts an exclusive ACID WriteTxn.
 func (db *Database) BeginWrite() (*WriteTxn, error) {
-	ptr, err := db.requireOpen()
+	if db == nil {
+		return nil, &Error{Status: StatusErrInvalidArgument, Message: "database is closed"}
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	ptr, err := db.requireOpenLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -240,12 +293,14 @@ func (db *Database) BeginWrite() (*WriteTxn, error) {
 	if err := callStatus(func() C.oryq_status { return C.oryq_write_txn_begin(ptr, &out) }); err != nil {
 		return nil, err
 	}
-	return &WriteTxn{ptr: out}, nil
+	return &WriteTxn{ptr: out, parent: db}, nil
 }
 
-// WriteTxn wraps an exclusive OryqWriteTxn* handle.
+// WriteTxn wraps an exclusive OryqWriteTxn* handle with mutex synchronization.
 type WriteTxn struct {
-	ptr *C.OryqWriteTxn
+	mu     sync.Mutex
+	ptr    *C.OryqWriteTxn
+	parent *Database
 }
 
 func (tx *WriteTxn) requireOpen() (*C.OryqWriteTxn, error) {
@@ -391,27 +446,41 @@ func (tx *WriteTxn) DeleteByIDJSON(collection, idJSON string) error {
 
 // Commit commits the write transaction and consumes the handle.
 func (tx *WriteTxn) Commit() error {
+	if tx == nil {
+		return &Error{Status: StatusErrInvalidArgument, Message: "write transaction is finalized"}
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
 	ptr, err := tx.requireOpen()
 	if err != nil {
 		return err
 	}
 	tx.ptr = nil
+	tx.parent = nil
 	return callStatus(func() C.oryq_status { return C.oryq_write_txn_commit(ptr) })
 }
 
 // Rollback aborts the write transaction and consumes the handle (idempotent if already finalized).
 func (tx *WriteTxn) Rollback() error {
-	if tx == nil || tx.ptr == nil {
+	if tx == nil {
+		return nil
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.ptr == nil {
 		return nil
 	}
 	ptr := tx.ptr
 	tx.ptr = nil
+	tx.parent = nil
 	return callStatus(func() C.oryq_status { return C.oryq_write_txn_rollback(ptr) })
 }
 
-// ReadTxn wraps a snapshot-isolated OryqReadTxn* handle.
+// ReadTxn wraps a snapshot-isolated OryqReadTxn* handle with goroutine-safe locking.
 type ReadTxn struct {
-	ptr *C.OryqReadTxn
+	mu     sync.RWMutex
+	ptr    *C.OryqReadTxn
+	parent *Database
 }
 
 func (tx *ReadTxn) requireOpen() (*C.OryqReadTxn, error) {
@@ -423,11 +492,17 @@ func (tx *ReadTxn) requireOpen() (*C.OryqReadTxn, error) {
 
 // Close closes the read transaction handle.
 func (tx *ReadTxn) Close() error {
-	if tx == nil || tx.ptr == nil {
+	if tx == nil {
+		return nil
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.ptr == nil {
 		return nil
 	}
 	ptr := tx.ptr
 	tx.ptr = nil
+	tx.parent = nil
 	return callStatus(func() C.oryq_status { return C.oryq_read_txn_close(ptr) })
 }
 
@@ -525,9 +600,11 @@ func (tx *ReadTxn) SearchVector(collection, indexName string, queryVec []float32
 	return &Cursor{ptr: out}, nil
 }
 
-// Cursor wraps a streaming OryqCursor* result handle.
+// Cursor wraps a streaming OryqCursor* result handle with mutex synchronization.
 type Cursor struct {
-	ptr *C.OryqCursor
+	mu     sync.Mutex
+	ptr    *C.OryqCursor
+	parent *ReadTxn
 }
 
 func (c *Cursor) requireOpen() (*C.OryqCursor, error) {
@@ -539,11 +616,17 @@ func (c *Cursor) requireOpen() (*C.OryqCursor, error) {
 
 // Close frees the cursor handle.
 func (c *Cursor) Close() error {
-	if c == nil || c.ptr == nil {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ptr == nil {
 		return nil
 	}
 	ptr := c.ptr
 	c.ptr = nil
+	c.parent = nil
 	return callStatus(func() C.oryq_status { return C.oryq_cursor_close(ptr) })
 }
 

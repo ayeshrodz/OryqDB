@@ -1,7 +1,7 @@
 //! Snapshot-isolated [`ReadTransaction`] and [`ReadCollection`] handles.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use oryq_document::{encode_document, DocumentBuf, Value, ValueView};
 use oryq_engine::{BTree, PageStore, ReadTxn, TreeKind};
@@ -22,17 +22,20 @@ const DEFAULT_QUERY_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 const MODULE_ID: &str = "core";
 
 /// Snapshot-isolated read-only transaction over an OryqDB [`crate::Database`].
+///
+/// Thread-safe (`Send + Sync`): concurrent readers on the same snapshot share the
+/// internal catalog cache safely via `RwLock`.
 #[derive(Debug)]
 pub struct ReadTransaction<'db> {
     tx: ReadTxn<'db>,
-    catalog_cache: RefCell<HashMap<String, CatalogEntry>>,
+    catalog_cache: RwLock<HashMap<String, CatalogEntry>>,
 }
 
 impl<'db> ReadTransaction<'db> {
     pub(crate) fn new(tx: ReadTxn<'db>) -> Self {
         Self {
             tx,
-            catalog_cache: RefCell::new(HashMap::new()),
+            catalog_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -46,11 +49,13 @@ impl<'db> ReadTransaction<'db> {
     }
 
     pub fn collection(&self, name: &str) -> Result<ReadCollection<'_, 'db>> {
-        if let Some(entry) = self.catalog_cache.borrow().get(name) {
-            return Ok(ReadCollection {
-                tx: &self.tx,
-                entry: entry.clone(),
-            });
+        if let Ok(cache) = self.catalog_cache.read() {
+            if let Some(entry) = cache.get(name) {
+                return Ok(ReadCollection {
+                    tx: &self.tx,
+                    entry: entry.clone(),
+                });
+            }
         }
         let entry = load_collection_entry(&self.tx, self.tx.catalog_root_page_id(), name)?
             .ok_or_else(|| {
@@ -61,9 +66,9 @@ impl<'db> ReadTransaction<'db> {
                     format!("collection '{name}' does not exist"),
                 )
             })?;
-        self.catalog_cache
-            .borrow_mut()
-            .insert(name.to_owned(), entry.clone());
+        if let Ok(mut cache) = self.catalog_cache.write() {
+            cache.insert(name.to_owned(), entry.clone());
+        }
         Ok(ReadCollection {
             tx: &self.tx,
             entry,

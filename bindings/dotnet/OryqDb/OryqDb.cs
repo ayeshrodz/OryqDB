@@ -159,13 +159,13 @@ public sealed class OryqDatabase : IDisposable
     public OryqReadTxn BeginRead()
     {
         OryqException.Check(OryqNative.oryq_read_txn_begin(RequireOpen(), out var ptr));
-        return new OryqReadTxn(new OryqReadTxnHandle(ptr));
+        return new OryqReadTxn(new OryqReadTxnHandle(ptr), this);
     }
 
     public OryqWriteTxn BeginWrite()
     {
         OryqException.Check(OryqNative.oryq_write_txn_begin(RequireOpen(), out var ptr));
-        return new OryqWriteTxn(new OryqWriteTxnHandle(ptr));
+        return new OryqWriteTxn(new OryqWriteTxnHandle(ptr), this);
     }
 
     public void Checkpoint() => OryqException.Check(OryqNative.oryq_db_checkpoint(RequireOpen()));
@@ -181,34 +181,42 @@ public sealed class OryqDatabase : IDisposable
         return ok;
     }
 
+    private readonly object _lifecycleLock = new();
+
     public void Close()
     {
-        if (_handle.IsClosed || _handle.IsInvalid)
+        lock (_lifecycleLock)
         {
-            return;
-        }
-        bool addedRef = false;
-        try
-        {
-            _handle.DangerousAddRef(ref addedRef);
-            OryqException.Check(OryqNative.oryq_db_close(_handle.DangerousGetHandle()));
-            _handle.SetHandleAsInvalid();
-        }
-        finally
-        {
-            if (addedRef)
+            if (_handle.IsClosed || _handle.IsInvalid)
             {
-                _handle.DangerousRelease();
+                return;
             }
+            bool addedRef = false;
+            try
+            {
+                _handle.DangerousAddRef(ref addedRef);
+                OryqException.Check(OryqNative.oryq_db_close(_handle.DangerousGetHandle()));
+                _handle.SetHandleAsInvalid();
+            }
+            finally
+            {
+                if (addedRef)
+                {
+                    _handle.DangerousRelease();
+                }
+            }
+            _handle.Dispose();
         }
-        _handle.Dispose();
     }
 
     public void Dispose()
     {
-        if (!_handle.IsClosed && !_handle.IsInvalid)
+        lock (_lifecycleLock)
         {
-            _handle.Dispose();
+            if (!_handle.IsClosed && !_handle.IsInvalid)
+            {
+                _handle.Dispose();
+            }
         }
     }
 }
@@ -216,8 +224,14 @@ public sealed class OryqDatabase : IDisposable
 public sealed class OryqWriteTxn : IDisposable
 {
     private readonly OryqWriteTxnHandle _handle;
+    private readonly object _lifecycleLock = new();
+    private OryqDb? _parent;
 
-    internal OryqWriteTxn(OryqWriteTxnHandle handle) => _handle = handle;
+    internal OryqWriteTxn(OryqWriteTxnHandle handle, OryqDb? parent = null)
+    {
+        _handle = handle;
+        _parent = parent;
+    }
 
     private OryqWriteTxnHandle RequireOpen()
     {
@@ -272,57 +286,78 @@ public sealed class OryqWriteTxn : IDisposable
 
     public void Commit()
     {
-        var handle = RequireOpen();
-        bool addedRef = false;
-        try
+        lock (_lifecycleLock)
         {
-            handle.DangerousAddRef(ref addedRef);
-            var ptr = handle.DangerousGetHandle();
-            handle.MarkFinalized();
-            OryqException.Check(OryqNative.oryq_write_txn_commit(ptr));
-        }
-        finally
-        {
-            if (addedRef)
+            var handle = RequireOpen();
+            bool addedRef = false;
+            try
             {
-                handle.DangerousRelease();
+                handle.DangerousAddRef(ref addedRef);
+                var ptr = handle.DangerousGetHandle();
+                handle.MarkFinalized();
+                OryqException.Check(OryqNative.oryq_write_txn_commit(ptr));
             }
-            handle.Dispose();
+            finally
+            {
+                if (addedRef)
+                {
+                    handle.DangerousRelease();
+                }
+                handle.Dispose();
+                _parent = null;
+            }
         }
     }
 
     public void Rollback()
     {
-        if (_handle.IsClosed || _handle.IsInvalid)
+        lock (_lifecycleLock)
         {
-            return;
-        }
-        bool addedRef = false;
-        try
-        {
-            _handle.DangerousAddRef(ref addedRef);
-            var ptr = _handle.DangerousGetHandle();
-            _handle.MarkFinalized();
-            OryqException.Check(OryqNative.oryq_write_txn_rollback(ptr));
-        }
-        finally
-        {
-            if (addedRef)
+            if (_handle.IsClosed || _handle.IsInvalid)
             {
-                _handle.DangerousRelease();
+                return;
             }
-            _handle.Dispose();
+            bool addedRef = false;
+            try
+            {
+                _handle.DangerousAddRef(ref addedRef);
+                var ptr = _handle.DangerousGetHandle();
+                _handle.MarkFinalized();
+                OryqException.Check(OryqNative.oryq_write_txn_rollback(ptr));
+            }
+            finally
+            {
+                if (addedRef)
+                {
+                    _handle.DangerousRelease();
+                }
+                _handle.Dispose();
+                _parent = null;
+            }
         }
     }
 
-    public void Dispose() => _handle.Dispose();
+    public void Dispose()
+    {
+        lock (_lifecycleLock)
+        {
+            _handle.Dispose();
+            _parent = null;
+        }
+    }
 }
 
 public sealed class OryqReadTxn : IDisposable
 {
     private readonly OryqReadTxnHandle _handle;
+    private readonly object _lifecycleLock = new();
+    private OryqDb? _parent;
 
-    internal OryqReadTxn(OryqReadTxnHandle handle) => _handle = handle;
+    internal OryqReadTxn(OryqReadTxnHandle handle, OryqDb? parent = null)
+    {
+        _handle = handle;
+        _parent = parent;
+    }
 
     private OryqReadTxnHandle RequireOpen()
     {
@@ -336,13 +371,13 @@ public sealed class OryqReadTxn : IDisposable
     public OryqCursor Find(string collection, string? filterJson = null)
     {
         OryqException.Check(OryqNative.oryq_find_json(RequireOpen(), collection, filterJson, out var ptr));
-        return new OryqCursor(new OryqCursorHandle(ptr));
+        return new OryqCursor(new OryqCursorHandle(ptr), this);
     }
 
     public OryqCursor Aggregate(string collection, string pipelineJson)
     {
         OryqException.Check(OryqNative.oryq_aggregate_json(RequireOpen(), collection, pipelineJson, out var ptr));
-        return new OryqCursor(new OryqCursorHandle(ptr));
+        return new OryqCursor(new OryqCursorHandle(ptr), this);
     }
 
     public OryqCursor SearchFts(string collection, string indexName, string queryText, int limit = 10)
@@ -353,7 +388,7 @@ public sealed class OryqReadTxn : IDisposable
         }
         OryqException.Check(OryqNative.oryq_search_fts(
             RequireOpen(), collection, indexName, queryText, (nuint)limit, out var ptr));
-        return new OryqCursor(new OryqCursorHandle(ptr));
+        return new OryqCursor(new OryqCursorHandle(ptr), this);
     }
 
     public OryqCursor SearchVector(string collection, string indexName, float[] queryVec, int topK = 10)
@@ -368,17 +403,29 @@ public sealed class OryqReadTxn : IDisposable
         }
         OryqException.Check(OryqNative.oryq_search_vector(
             RequireOpen(), collection, indexName, queryVec, (nuint)queryVec.Length, (nuint)topK, out var ptr));
-        return new OryqCursor(new OryqCursorHandle(ptr));
+        return new OryqCursor(new OryqCursorHandle(ptr), this);
     }
 
-    public void Dispose() => _handle.Dispose();
+    public void Dispose()
+    {
+        lock (_lifecycleLock)
+        {
+            _handle.Dispose();
+            _parent = null;
+        }
+    }
 }
 
 public sealed class OryqCursor : IDisposable
 {
     private readonly OryqCursorHandle _handle;
+    private OryqReadTxn? _parent;
 
-    internal OryqCursor(OryqCursorHandle handle) => _handle = handle;
+    internal OryqCursor(OryqCursorHandle handle, OryqReadTxn? parent = null)
+    {
+        _handle = handle;
+        _parent = parent;
+    }
 
     private OryqCursorHandle RequireOpen()
     {
@@ -473,5 +520,9 @@ public sealed class OryqCursor : IDisposable
         return score;
     }
 
-    public void Dispose() => _handle.Dispose();
+    public void Dispose()
+    {
+        _handle.Dispose();
+        _parent = null;
+    }
 }

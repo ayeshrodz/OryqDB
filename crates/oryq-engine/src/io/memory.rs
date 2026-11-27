@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result};
@@ -15,11 +15,15 @@ use crate::io::registry::{FileIdentity, FileRegistry};
 use crate::io::vfs::{FileHandle, OpenMode, StorageIo};
 
 const MODULE_ID: &str = "engine";
+const LOCK_NONE: i8 = 0;
+const LOCK_SHARED: i8 = 1;
+const LOCK_EXCLUSIVE: i8 = 2;
 
 #[derive(Debug, Default)]
 struct MemoryFile {
     data: Mutex<Vec<u8>>,
-    locked: Mutex<bool>,
+    /// `0` = unlocked, `> 0` = active shared readers, `-1` = exclusive writer.
+    lock_state: Mutex<i64>,
 }
 
 /// Pure-safe in-memory [`StorageIo`] virtual filesystem (`#![forbid(unsafe_code)]`).
@@ -64,16 +68,12 @@ struct MemoryFileHandle {
     identity: FileIdentity,
     readable: bool,
     writable: bool,
-    holds_lock: AtomicBool,
+    holds_lock: AtomicI8,
 }
 
 impl Drop for MemoryFileHandle {
     fn drop(&mut self) {
-        if let Ok(mut locked) = self.file.locked.lock() {
-            if self.holds_lock.swap(false, Ordering::AcqRel) {
-                *locked = false;
-            }
-        }
+        let _ = self.unlock();
     }
 }
 
@@ -224,7 +224,7 @@ impl FileHandle for MemoryFileHandle {
     }
 
     fn try_lock_exclusive(&self) -> Result<()> {
-        let mut locked = self.file.locked.lock().map_err(|_| {
+        let mut state = self.file.lock_state.lock().map_err(|_| {
             ErrorEnvelope::new(
                 ErrorCategory::Internal,
                 MODULE_ID,
@@ -232,24 +232,49 @@ impl FileHandle for MemoryFileHandle {
                 "memory file lock poisoned",
             )
         })?;
-        if self.holds_lock.load(Ordering::Acquire) {
+        if self.holds_lock.load(Ordering::Acquire) == LOCK_EXCLUSIVE {
             return Ok(());
         }
-        if *locked {
+        if *state != 0 {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::LockedByProcess,
                 MODULE_ID,
                 "MemoryFileHandle::try_lock_exclusive",
-                "in-memory file is already exclusively locked",
+                "in-memory file is already locked",
             ));
         }
-        *locked = true;
-        self.holds_lock.store(true, Ordering::Release);
+        *state = -1;
+        self.holds_lock.store(LOCK_EXCLUSIVE, Ordering::Release);
+        Ok(())
+    }
+
+    fn try_lock_shared(&self) -> Result<()> {
+        let mut state = self.file.lock_state.lock().map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Internal,
+                MODULE_ID,
+                "MemoryFileHandle::try_lock_shared",
+                "memory file lock poisoned",
+            )
+        })?;
+        if self.holds_lock.load(Ordering::Acquire) != LOCK_NONE {
+            return Ok(());
+        }
+        if *state < 0 {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::LockedByProcess,
+                MODULE_ID,
+                "MemoryFileHandle::try_lock_shared",
+                "in-memory file is exclusively locked",
+            ));
+        }
+        *state += 1;
+        self.holds_lock.store(LOCK_SHARED, Ordering::Release);
         Ok(())
     }
 
     fn unlock(&self) -> Result<()> {
-        let mut locked = self.file.locked.lock().map_err(|_| {
+        let mut state = self.file.lock_state.lock().map_err(|_| {
             ErrorEnvelope::new(
                 ErrorCategory::Internal,
                 MODULE_ID,
@@ -257,8 +282,10 @@ impl FileHandle for MemoryFileHandle {
                 "memory file lock poisoned",
             )
         })?;
-        if self.holds_lock.swap(false, Ordering::AcqRel) {
-            *locked = false;
+        match self.holds_lock.swap(LOCK_NONE, Ordering::AcqRel) {
+            LOCK_EXCLUSIVE => *state = 0,
+            LOCK_SHARED if *state > 0 => *state -= 1,
+            _ => {}
         }
         Ok(())
     }
@@ -325,7 +352,7 @@ impl StorageIo for MemoryVfs {
             identity,
             readable: mode.read,
             writable: mode.write,
-            holds_lock: AtomicBool::new(false),
+            holds_lock: AtomicI8::new(LOCK_NONE),
         }))
     }
 

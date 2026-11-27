@@ -20,7 +20,8 @@ pub use composition::CoreRegistries;
 pub use config::DatabaseConfig;
 pub use database::Database;
 pub use oryq_document::{
-    from_json_str, to_json_string, DocumentBuf, DocumentView, ObjectId, Uuid, Value, ValueView,
+    from_json_str, parse_json_value_str, to_json_string, DocumentBuf, DocumentView, ObjectId, Uuid,
+    Value, ValueView,
 };
 pub use oryq_engine::{
     BatchCommitReport, CheckpointOutcome, CommitReceipt, GroupCommitConfig, LockInspectionReport,

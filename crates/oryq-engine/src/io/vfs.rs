@@ -68,6 +68,9 @@ pub trait FileHandle: Debug + Send + Sync {
     }
     fn set_len(&self, size: u64) -> Result<()>;
     fn try_lock_exclusive(&self) -> Result<()>;
+    fn try_lock_shared(&self) -> Result<()> {
+        self.try_lock_exclusive()
+    }
     fn unlock(&self) -> Result<()>;
     fn identity(&self) -> &FileIdentity;
 }
@@ -197,6 +200,10 @@ impl FileHandle for OsFileHandle {
 
     fn try_lock_exclusive(&self) -> Result<()> {
         platform::try_lock_exclusive(&self.file)
+    }
+
+    fn try_lock_shared(&self) -> Result<()> {
+        platform::try_lock_shared(&self.file)
     }
 
     fn unlock(&self) -> Result<()> {

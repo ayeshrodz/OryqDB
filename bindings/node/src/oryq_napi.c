@@ -24,26 +24,31 @@ typedef struct {
     OryqBoxKind kind;
 } OryqBox;
 
+static void close_raw_handle(void *ptr, OryqBoxKind kind) {
+    if (!ptr) return;
+    switch (kind) {
+        case BOX_DB:
+            oryq_db_close((OryqDb *)ptr);
+            break;
+        case BOX_READ_TXN:
+            oryq_read_txn_close((OryqReadTxn *)ptr);
+            break;
+        case BOX_WRITE_TXN:
+            oryq_write_txn_rollback((OryqWriteTxn *)ptr);
+            break;
+        case BOX_CURSOR:
+            oryq_cursor_close((OryqCursor *)ptr);
+            break;
+    }
+}
+
 static void finalize_box(napi_env env, void *finalize_data, void *finalize_hint) {
     (void)env;
     (void)finalize_hint;
     OryqBox *box = (OryqBox *)finalize_data;
     if (!box) return;
     if (box->ptr) {
-        switch (box->kind) {
-            case BOX_DB:
-                oryq_db_close((OryqDb *)box->ptr);
-                break;
-            case BOX_READ_TXN:
-                oryq_read_txn_close((OryqReadTxn *)box->ptr);
-                break;
-            case BOX_WRITE_TXN:
-                oryq_write_txn_rollback((OryqWriteTxn *)box->ptr);
-                break;
-            case BOX_CURSOR:
-                oryq_cursor_close((OryqCursor *)box->ptr);
-                break;
-        }
+        close_raw_handle(box->ptr, box->kind);
         box->ptr = NULL;
     }
     free(box);
@@ -52,13 +57,15 @@ static void finalize_box(napi_env env, void *finalize_data, void *finalize_hint)
 static napi_value wrap_box(napi_env env, void *ptr, OryqBoxKind kind) {
     OryqBox *box = (OryqBox *)malloc(sizeof(OryqBox));
     if (!box) {
+        close_raw_handle(ptr, kind);
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
     box->ptr = ptr;
     box->kind = kind;
-    napi_value ext;
+    napi_value ext = NULL;
     if (napi_create_external(env, box, finalize_box, NULL, &ext) != napi_ok) {
+        close_raw_handle(ptr, kind);
         free(box);
         napi_throw_error(env, NULL, "failed to create native external handle");
         return NULL;
@@ -140,6 +147,11 @@ static char *dup_utf8_arg(napi_env env, napi_value val, bool allow_null, bool *i
         return NULL;
     }
     buf[copied] = '\0';
+    if (strlen(buf) != copied) {
+        free(buf);
+        napi_throw_type_error(env, NULL, "string argument must not contain interior NUL bytes");
+        return NULL;
+    }
     return buf;
 }
 
@@ -607,8 +619,12 @@ static napi_value fn_cursor_get_i64(napi_env env, napi_callback_info info) {
     oryq_status st = oryq_cursor_get_i64((OryqCursor *)box->ptr, field, &val);
     free(field);
     if (st != ORYQ_OK) return throw_oryq_error(env, st);
-    napi_value out;
-    napi_create_int64(env, val, &out);
+    if (val > 9007199254740991LL || val < -9007199254740991LL) {
+        napi_throw_range_error(env, NULL, "int64 value exceeds Number.MAX_SAFE_INTEGER; use getBigInt(field)");
+        return NULL;
+    }
+    napi_value out = NULL;
+    if (napi_create_int64(env, val, &out) != napi_ok) return NULL;
     return out;
 }
 

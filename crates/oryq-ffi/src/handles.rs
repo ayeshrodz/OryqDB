@@ -3,7 +3,35 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use oryq_core::{Database, DocumentBuf, QueryCursor, ReadTransaction, WriteTransaction};
+use oryq_core::{
+    Database, DocumentBuf, ErrorCategory, ErrorEnvelope, QueryCursor, ReadTransaction,
+    WriteTransaction,
+};
+
+const CLOSING_BIT: usize = 1usize << (usize::BITS - 1);
+const COUNT_MASK: usize = !CLOSING_BIT;
+
+/// RAII guard holding one active child slot on an [`OryqDb`] until transferred to a live
+/// transaction handle or dropped on error.
+struct ChildSlotGuard {
+    counter: Arc<AtomicUsize>,
+    armed: bool,
+}
+
+impl ChildSlotGuard {
+    fn disarm(mut self) -> Arc<AtomicUsize> {
+        self.armed = false;
+        Arc::clone(&self.counter)
+    }
+}
+
+impl Drop for ChildSlotGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
 
 /// Opaque C handle representing an open OryqDB database.
 #[derive(Debug)]
@@ -21,7 +49,61 @@ impl OryqDb {
     }
 
     pub(crate) fn has_live_children(&self) -> bool {
-        self.active_children.load(Ordering::Acquire) > 0
+        (self.active_children.load(Ordering::Acquire) & COUNT_MASK) > 0
+    }
+
+    /// Atomically transitions `active_children` from `0` to `CLOSING_BIT`, preventing any
+    /// concurrent `begin_read` / `begin_write` from acquiring a new child slot while closing.
+    pub(crate) fn try_begin_close(&self) -> bool {
+        self.active_children
+            .compare_exchange(0, CLOSING_BIT, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Atomically acquires a child slot BEFORE blocking in `begin_read` / `begin_write`.
+    /// Fails with `Busy` if `oryq_db_close` has already initiated closing.
+    fn try_acquire_child_slot(&self) -> oryq_core::Result<ChildSlotGuard> {
+        let mut cur = self.active_children.load(Ordering::Acquire);
+        loop {
+            if (cur & CLOSING_BIT) != 0 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Busy,
+                    "ffi",
+                    "OryqDb::try_acquire_child_slot",
+                    "database handle is closing",
+                ));
+            }
+            let next = cur.checked_add(1).ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Busy,
+                    "ffi",
+                    "OryqDb::try_acquire_child_slot",
+                    "active child transaction count overflow",
+                )
+            })?;
+            if (next & CLOSING_BIT) != 0 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Busy,
+                    "ffi",
+                    "OryqDb::try_acquire_child_slot",
+                    "active child transaction count overflow",
+                ));
+            }
+            match self.active_children.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(ChildSlotGuard {
+                        counter: Arc::clone(&self.active_children),
+                        armed: true,
+                    });
+                }
+                Err(actual) => cur = actual,
+            }
+        }
     }
 }
 
@@ -38,17 +120,18 @@ pub struct OryqReadTxn {
 
 impl OryqReadTxn {
     pub(crate) fn begin(parent: &OryqDb) -> oryq_core::Result<Self> {
+        let slot = parent.try_acquire_child_slot()?;
         let db_owner = Arc::clone(&parent.db);
         let db_ptr: *const Database = Arc::as_ptr(&db_owner);
         // SAFETY: `db_owner` is moved into `Self` and dropped strictly AFTER `self.tx` in `Drop`.
         // `Arc<Database>` keeps the heap allocation at a stable address for the lifetime of `Self`.
         let db_ref: &'static Database = unsafe { &*db_ptr };
         let tx = db_ref.begin_read()?;
-        parent.active_children.fetch_add(1, Ordering::AcqRel);
+        let parent_children = slot.disarm();
         Ok(Self {
             tx: Some(tx),
             _db_owner: db_owner,
-            parent_children: Arc::clone(&parent.active_children),
+            parent_children,
         })
     }
 }
@@ -72,16 +155,17 @@ pub struct OryqWriteTxn {
 
 impl OryqWriteTxn {
     pub(crate) fn begin(parent: &OryqDb) -> oryq_core::Result<Self> {
+        let slot = parent.try_acquire_child_slot()?;
         let db_owner = Arc::clone(&parent.db);
         let db_ptr: *const Database = Arc::as_ptr(&db_owner);
         // SAFETY: `db_owner` is moved into `Self` and dropped strictly AFTER `self.tx` in `Drop`.
         let db_ref: &'static Database = unsafe { &*db_ptr };
         let tx = db_ref.begin_write()?;
-        parent.active_children.fetch_add(1, Ordering::AcqRel);
+        let parent_children = slot.disarm();
         Ok(Self {
             tx: Some(tx),
             _db_owner: db_owner,
-            parent_children: Arc::clone(&parent.active_children),
+            parent_children,
         })
     }
 }
