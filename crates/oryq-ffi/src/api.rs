@@ -1410,6 +1410,28 @@ mod tests {
             OryqStatus::ErrIndexNotFound
         );
 
+        let fts_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search_fts",
+            "FTS index 'idx_fts' not found on collection 'docs'",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&fts_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
+        let vec_missing = ErrorEnvelope::new(
+            ErrorCategory::NotFound,
+            "core",
+            "search_vector",
+            "vector index 'idx_vec' not found on collection 'docs'",
+        );
+        assert_eq!(
+            OryqStatus::from_error(&vec_missing),
+            OryqStatus::ErrIndexNotFound
+        );
+
         // Destructors must preserve prior LAST_ERROR on entry.
         // SAFETY: Passing null pointers is explicitly defined and safe for these C ABI entry points.
         unsafe {

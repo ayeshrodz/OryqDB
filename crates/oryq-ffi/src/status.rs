@@ -53,7 +53,7 @@ impl OryqStatus {
             ErrorCategory::InvalidQuery => Self::ErrInvalidQuery,
             ErrorCategory::NotFound => {
                 if msg.starts_with("index ")
-                    || (msg.contains("index '") && !msg.contains("collection '"))
+                    || (msg.contains("index '") && !msg.starts_with("collection "))
                 {
                     Self::ErrIndexNotFound
                 } else {
