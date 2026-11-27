@@ -5,6 +5,9 @@ pub mod extract;
 pub mod read;
 pub mod write;
 
-pub use extract::{build_secondary_full_key, extract_secondary_key_prefix, split_record_id_suffix};
+pub use extract::{
+    build_secondary_full_key, extract_secondary_key_prefix, extract_secondary_key_prefixes,
+    split_record_id_suffix,
+};
 pub use read::{scan_secondary_all, scan_secondary_eq, scan_secondary_range};
 pub use write::{SecondaryIndexProvider, SECONDARY_PROVIDER_ID};

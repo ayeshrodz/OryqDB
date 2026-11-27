@@ -154,8 +154,8 @@ fn encode_value_into(val: &ValueView<'_>, out: &mut Vec<u8>) -> Result<()> {
         }
         ValueView::Binary { subtype, bytes } => {
             out.push(RANK_BINARY);
-            out.push(subtype);
             encode_escaped_bytes(bytes, out);
+            out.push(subtype);
         }
         ValueView::ObjectId(id) => {
             out.push(RANK_OBJECT_ID);

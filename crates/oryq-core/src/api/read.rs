@@ -83,6 +83,14 @@ impl ReadCollection<'_, '_> {
         &self.entry.name
     }
 
+    pub(crate) fn raw_tx(&self) -> &ReadTxn<'_> {
+        self.tx
+    }
+
+    pub(crate) fn catalog_entry(&self) -> &CatalogEntry {
+        &self.entry
+    }
+
     pub fn find_by_id(&self, id: &Value) -> Result<Option<DocumentBuf>> {
         find_by_id_in_store(self.tx, &self.entry, id)
     }

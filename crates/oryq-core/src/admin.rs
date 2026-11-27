@@ -1,20 +1,26 @@
 //! Administrative operations: snapshot-consistent integrity checking, sealed online backup,
 //! and read-only forensic inspection facade (`W14`).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use oryq_engine::{
-    inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, wal_path_for,
-    LockInspectionReport, PageInspectionReport, PageSize, StorageIo, WalInspectionReport,
+    inspect_locks_readonly, inspect_page_readonly, inspect_wal_readonly, wal_path_for, BTree,
+    LockInspectionReport, PageInspectionReport, PageSize, PageStore, StorageIo, TreeKind,
+    WalInspectionReport,
 };
-use oryq_index::IndexKind;
-use oryq_types::{ErrorCategory, ErrorEnvelope, Result};
+use oryq_index::{
+    decode_record_id, extract_compound_key_prefixes, extract_secondary_key_prefixes,
+    scan_primary_record_ids, split_record_id_suffix, IndexKind,
+};
+use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result};
 
 use crate::config::DatabaseConfig;
 use crate::database::Database;
+use crate::write::decode_collection_record_from_store;
 
 const MODULE_ID: &str = "core";
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -60,12 +66,25 @@ pub fn run_integrity_check(db: &Database) -> Result<IntegrityReport> {
 
     for col_name in &col_names {
         let col = rtx.collection(col_name)?;
-        let all_docs = col.find_all()?;
+        let tx = col.raw_tx();
+        let entry = col.catalog_entry();
+        let data_tree = BTree::open(entry.data_root_page_id, TreeKind::Collection);
+        let raw_rows = data_tree.scan_all(tx)?;
+
+        let mut docs_with_rids = Vec::with_capacity(raw_rows.len());
+        let mut live_rids = BTreeSet::new();
+        for (raw_k, raw_v) in raw_rows {
+            let rid = decode_record_id(&raw_k)?;
+            let doc = decode_collection_record_from_store(tx, &raw_v)?;
+            live_rids.insert(rid);
+            docs_with_rids.push((rid, doc));
+        }
+
         let indexes = col.list_indexes();
         indexes_checked += indexes.len();
 
         // 1. Verify every document has a valid `_id` and resolves via primary index.
-        for doc in &all_docs {
+        for (_, doc) in &docs_with_rids {
             docs_checked += 1;
             let Some(id_view) = doc.view().get_field("_id") else {
                 issues.push(format!("collection '{col_name}': document missing '_id'"));
@@ -90,11 +109,85 @@ pub fn run_integrity_check(db: &Database) -> Result<IntegrityReport> {
 
         // 2. Verify collection count matches scanned documents.
         let count = col.count()?;
-        if count != all_docs.len() {
+        if count != docs_with_rids.len() {
             issues.push(format!(
                 "collection '{col_name}': count ({count}) != scanned docs ({})",
-                all_docs.len()
+                docs_with_rids.len()
             ));
+        }
+
+        // 3. Verify primary index reverse consistency (no orphan/extra primary entries).
+        if let Some(primary) = indexes.iter().find(|d| d.kind == IndexKind::Primary) {
+            let primary_rids = scan_primary_record_ids(tx, primary.root_page_id)?;
+            if primary_rids.len() != docs_with_rids.len() {
+                issues.push(format!(
+                    "collection '{col_name}': primary index entry count ({}) != collection doc count ({})",
+                    primary_rids.len(),
+                    docs_with_rids.len()
+                ));
+            }
+            for rid in primary_rids {
+                if !live_rids.contains(&rid) {
+                    issues.push(format!(
+                        "collection '{col_name}': orphan RecordId {rid:?} in primary index"
+                    ));
+                }
+            }
+        }
+
+        // 4. Verify secondary and compound indexes match collection documents exactly.
+        let page_size = tx.page_size();
+        for desc in indexes {
+            if !matches!(desc.kind, IndexKind::Secondary | IndexKind::Compound) {
+                continue;
+            }
+            let idx_tree = BTree::open(desc.root_page_id, TreeKind::Index);
+            let actual_pairs = idx_tree.scan_all(tx)?;
+            let mut actual_set: BTreeSet<(Vec<u8>, RecordId)> = BTreeSet::new();
+            let mut unique_check: BTreeMap<Vec<u8>, RecordId> = BTreeMap::new();
+
+            for (raw_k, _) in actual_pairs {
+                let (prefix, rid) = split_record_id_suffix(&raw_k)?;
+                let prefix_vec = prefix.to_vec();
+                if desc.unique {
+                    if let Some(&prev_rid) = unique_check.get(&prefix_vec) {
+                        if prev_rid != rid {
+                            issues.push(format!(
+                                "collection '{col_name}': unique index '{}' has duplicate prefix for {prev_rid:?} and {rid:?}",
+                                desc.name
+                            ));
+                        }
+                    } else {
+                        unique_check.insert(prefix_vec.clone(), rid);
+                    }
+                }
+                actual_set.insert((prefix_vec, rid));
+            }
+
+            let mut expected_set: BTreeSet<(Vec<u8>, RecordId)> = BTreeSet::new();
+            for (rid, doc) in &docs_with_rids {
+                let prefixes = match desc.kind {
+                    IndexKind::Secondary => {
+                        extract_secondary_key_prefixes(desc, &doc.view(), page_size)?
+                    }
+                    IndexKind::Compound => {
+                        extract_compound_key_prefixes(desc, &doc.view(), page_size)?
+                    }
+                    _ => Vec::new(),
+                };
+                for p in prefixes {
+                    expected_set.insert((p, *rid));
+                }
+            }
+
+            let missing = expected_set.difference(&actual_set).count();
+            let extra = actual_set.difference(&expected_set).count();
+            if missing > 0 || extra > 0 {
+                issues.push(format!(
+                    "collection '{col_name}': index '{}' mismatch (missing={missing}, extra={extra})",
+                    desc.name
+                ));
+            }
         }
     }
 

@@ -8,6 +8,7 @@ use crate::types::{Decimal128, DocumentBuf, ObjectId, Uuid, Value, ValueView};
 use crate::view::DocumentView;
 
 const MODULE_ID: &str = "document";
+const MAX_JSON_DEPTH: usize = 128;
 
 /// Parses a JSON or Extended-JSON object string into a validated [`DocumentBuf`].
 pub fn from_json_str(
@@ -67,6 +68,18 @@ pub fn to_json_string(view: &DocumentView<'_>) -> Result<String> {
 }
 
 pub(crate) fn json_to_value(v: &JsonValue) -> Result<Value> {
+    json_to_value_depth(v, 0)
+}
+
+fn json_to_value_depth(v: &JsonValue, depth: usize) -> Result<Value> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "json::json_to_value",
+            format!("JSON nesting depth exceeds maximum allowed ({MAX_JSON_DEPTH})"),
+        ));
+    }
     match v {
         JsonValue::Null => Ok(Value::Null),
         JsonValue::Bool(b) => Ok(Value::Bool(*b)),
@@ -88,7 +101,7 @@ pub(crate) fn json_to_value(v: &JsonValue) -> Result<Value> {
         JsonValue::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(json_to_value(item)?);
+                out.push(json_to_value_depth(item, depth + 1)?);
             }
             Ok(Value::Array(out))
         }
@@ -98,7 +111,7 @@ pub(crate) fn json_to_value(v: &JsonValue) -> Result<Value> {
             }
             let mut fields = Vec::with_capacity(map.len());
             for (k, val) in map {
-                fields.push((k.clone(), json_to_value(val)?));
+                fields.push((k.clone(), json_to_value_depth(val, depth + 1)?));
             }
             Ok(Value::Document(fields))
         }

@@ -684,8 +684,13 @@ impl AccState {
                 AccumulatorSpec::SumConst(c),
             ) => {
                 *total += *c;
-                if c.fract() == 0.0 && *all_int {
-                    *int_total = int_total.saturating_add(*c as i64);
+                if *all_int && c.is_finite() && c.fract() == 0.0 && c.abs() < ((1u64 << 53) as f64)
+                {
+                    if let Some(next) = int_total.checked_add(*c as i64) {
+                        *int_total = next;
+                    } else {
+                        *all_int = false;
+                    }
                 } else {
                     *all_int = false;
                 }
@@ -701,12 +706,22 @@ impl AccState {
                 Some(Value::Int64(n)) => {
                     *total += n as f64;
                     if *all_int {
-                        *int_total = int_total.saturating_add(n);
+                        if let Some(next) = int_total.checked_add(n) {
+                            *int_total = next;
+                        } else {
+                            *all_int = false;
+                        }
                     }
                 }
                 Some(Value::Float64(f)) => {
                     *total += f;
                     *all_int = false;
+                }
+                Some(Value::Decimal128(d)) => {
+                    if let Ok(f) = d.to_string().parse::<f64>() {
+                        *total += f;
+                        *all_int = false;
+                    }
                 }
                 _ => {}
             },
@@ -719,6 +734,12 @@ impl AccState {
                     Some(Value::Float64(f)) => {
                         *sum += f;
                         *count += 1;
+                    }
+                    Some(Value::Decimal128(d)) => {
+                        if let Ok(f) = d.to_string().parse::<f64>() {
+                            *sum += f;
+                            *count += 1;
+                        }
                     }
                     _ => {}
                 }

@@ -1,11 +1,14 @@
 //! Rule-based query planner selecting primary, secondary equality, secondary range, or
 //! collection scan with strict sparse-index completeness safety (`docs/modules/query.md` §4).
 
+use std::cmp::Ordering;
+
 use oryq_document::{FieldPath, Value};
 use oryq_index::{IndexDescriptor, IndexKind};
 
 use crate::ast::FilterExpr;
 use crate::explain::{AccessPlan, ExplainPlan};
+use crate::predicates::compare_owned_values;
 
 /// Plans physical access for `filter` over `collection` given its active `indexes`.
 ///
@@ -57,6 +60,9 @@ pub fn plan_find(
     }
 
     // 2. Secondary equality scan on leading indexed field (Secondary & Compound only; never Pluggable).
+    // Whole-array equality (`Value::Array`) falls back to `CollectionScan` because multikey indexes
+    // expand arrays into element keys (except empty `[]`), so an element-key probe cannot match a
+    // whole non-empty array target.
     for desc in indexes {
         if !matches!(desc.kind, IndexKind::Secondary | IndexKind::Compound)
             || desc.fields.is_empty()
@@ -66,6 +72,9 @@ pub fn plan_find(
         let lead = &desc.fields[0].path;
         for clause in &clauses {
             if let FilterExpr::Eq(path, val) = clause {
+                if matches!(val, Value::Array(items) if !items.is_empty()) {
+                    continue;
+                }
                 if path == lead && (!desc.sparse || !matches!(val, Value::Null)) {
                     // Always retain full filter as residual to preserve exact array/multi-clause semantics.
                     return ExplainPlan {
@@ -94,22 +103,29 @@ pub fn plan_find(
         let mut upper: Option<(Value, bool)> = None;
         for clause in &clauses {
             match clause {
-                FilterExpr::Gt(path, v) if path == lead => {
-                    lower = Some((v.clone(), false));
+                FilterExpr::Gt(path, v) if path == lead && !is_nan_bound(v) => {
+                    tighten_lower(&mut lower, v.clone(), false);
                 }
-                FilterExpr::Gte(path, v) if path == lead => {
-                    lower = Some((v.clone(), true));
+                FilterExpr::Gte(path, v) if path == lead && !is_nan_bound(v) => {
+                    tighten_lower(&mut lower, v.clone(), true);
                 }
-                FilterExpr::Lt(path, v) if path == lead => {
-                    upper = Some((v.clone(), false));
+                FilterExpr::Lt(path, v) if path == lead && !is_nan_bound(v) => {
+                    tighten_upper(&mut upper, v.clone(), false);
                 }
-                FilterExpr::Lte(path, v) if path == lead => {
-                    upper = Some((v.clone(), true));
+                FilterExpr::Lte(path, v) if path == lead && !is_nan_bound(v) => {
+                    tighten_upper(&mut upper, v.clone(), true);
                 }
                 _ => {}
             }
         }
         if lower.is_some() || upper.is_some() {
+            // Multikey soundness: for an array field like `[5, 100]`, `{x: {$gt: 10, $lt: 20}}`
+            // matches because `100 > 10` and `5 < 20` even though no single element lies in `(10, 20)`.
+            // Restricting the index scan to one bound (with full `residual_filter` recheck) guarantees
+            // zero false negatives while still pruning keys on one side.
+            if lower.is_some() && upper.is_some() {
+                upper = None;
+            }
             return ExplainPlan {
                 collection: collection.to_owned(),
                 access: AccessPlan::SecondaryRangeScan {
@@ -128,6 +144,36 @@ pub fn plan_find(
         collection: collection.to_owned(),
         access: AccessPlan::CollectionScan,
         residual_filter: Some(filter.clone()),
+    }
+}
+
+fn is_nan_bound(v: &Value) -> bool {
+    match v {
+        Value::Float64(f) => f.is_nan(),
+        Value::Decimal128(d) => d.is_nan(),
+        _ => false,
+    }
+}
+
+fn tighten_lower(slot: &mut Option<(Value, bool)>, cand: Value, cand_inc: bool) {
+    match slot {
+        None => *slot = Some((cand, cand_inc)),
+        Some((cur, cur_inc)) => match compare_owned_values(&cand, cur) {
+            Ordering::Greater => *slot = Some((cand, cand_inc)),
+            Ordering::Equal if !cand_inc => *cur_inc = false,
+            _ => {}
+        },
+    }
+}
+
+fn tighten_upper(slot: &mut Option<(Value, bool)>, cand: Value, cand_inc: bool) {
+    match slot {
+        None => *slot = Some((cand, cand_inc)),
+        Some((cur, cur_inc)) => match compare_owned_values(&cand, cur) {
+            Ordering::Less => *slot = Some((cand, cand_inc)),
+            Ordering::Equal if !cand_inc => *cur_inc = false,
+            _ => {}
+        },
     }
 }
 

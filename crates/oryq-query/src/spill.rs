@@ -1,16 +1,42 @@
 //! RAII temporary spill file manager with byte quota enforcement for external merge sort
 //! (`docs/modules/query.md` §5).
 
-use std::fs::{self, File};
+use std::collections::hash_map::RandomState;
+use std::fs::{self, DirBuilder, File};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_document::DocumentBuf;
 use oryq_types::{ErrorCategory, ErrorEnvelope, Result};
 
 const MODULE_ID: &str = "query";
+/// Maximum valid serialized `OryqDoc` length in a spill run (`256 MiB - 1`).
+const MAX_SPILL_DOC_BYTES: usize = (1 << 28) - 1;
 static SPILL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn random_spill_token() -> u64 {
+    #[cfg(unix)]
+    {
+        if let Ok(mut f) = File::open("/dev/urandom") {
+            let mut buf = [0u8; 8];
+            if f.read_exact(&mut buf).is_ok() {
+                return u64::from_le_bytes(buf);
+            }
+        }
+    }
+    let mut h = RandomState::new().build_hasher();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    h.write_u128(nanos);
+    h.write_u32(std::process::id());
+    h.write_u64(SPILL_SEQ.fetch_add(1, Ordering::Relaxed));
+    h.finish()
+}
 
 /// Manages temporary spill run files for one query execution and removes all of them on drop.
 #[derive(Debug)]
@@ -23,23 +49,54 @@ pub struct SpillManager {
 
 impl SpillManager {
     pub fn new(max_spill_bytes: usize) -> Result<Self> {
-        let seq = SPILL_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("oryqdb_spill_{}_{seq}", std::process::id()));
-        fs::create_dir_all(&dir).map_err(|err| {
-            ErrorEnvelope::new(
-                ErrorCategory::Io,
-                MODULE_ID,
-                "SpillManager::new",
-                format!("failed to create spill dir: {err}"),
-            )
-            .with_source(err)
-        })?;
-        Ok(Self {
-            dir,
-            files: Vec::new(),
-            bytes_written: 0,
-            max_spill_bytes,
-        })
+        let mut last_err = None;
+        for _ in 0..16 {
+            let seq = SPILL_SEQ.fetch_add(1, Ordering::Relaxed);
+            let token = random_spill_token();
+            let dir = std::env::temp_dir().join(format!(
+                "oryqdb_spill_{}_{seq}_{token:016x}",
+                std::process::id()
+            ));
+            let mut builder = DirBuilder::new();
+            builder.recursive(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&dir) {
+                Ok(()) => {
+                    return Ok(Self {
+                        dir,
+                        files: Vec::new(),
+                        bytes_written: 0,
+                        max_spill_bytes,
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_err = Some(err);
+                    continue;
+                }
+                Err(err) => {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Io,
+                        MODULE_ID,
+                        "SpillManager::new",
+                        format!("failed to create spill dir: {err}"),
+                    )
+                    .with_source(err));
+                }
+            }
+        }
+        Err(ErrorEnvelope::new(
+            ErrorCategory::Io,
+            MODULE_ID,
+            "SpillManager::new",
+            format!(
+                "failed to create unique spill dir after 16 attempts: {:?}",
+                last_err
+            ),
+        ))
     }
 
     pub fn dir_path(&self) -> &PathBuf {
@@ -120,24 +177,56 @@ impl SpillManager {
             )
             .with_source(err)
         })?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Io,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!("failed to stat spill run: {err}"),
+                )
+                .with_source(err)
+            })?
+            .len();
+        let mut remaining = file_len;
         let mut reader = BufReader::new(file);
         let mut docs = Vec::new();
         let mut len_buf = [0u8; 4];
         loop {
-            match reader.read_exact(&mut len_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(err) => {
-                    return Err(ErrorEnvelope::new(
-                        ErrorCategory::Io,
-                        MODULE_ID,
-                        "SpillManager::read_run",
-                        format!("failed reading spill length: {err}"),
-                    )
-                    .with_source(err));
-                }
+            if remaining == 0 {
+                break;
             }
+            if remaining < 4 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!("truncated spill record length header ({remaining} trailing bytes)"),
+                ));
+            }
+            reader.read_exact(&mut len_buf).map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Io,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!("failed reading spill length: {err}"),
+                )
+                .with_source(err)
+            })?;
+            remaining -= 4;
             let len = u32::from_le_bytes(len_buf) as usize;
+            if len > MAX_SPILL_DOC_BYTES || (len as u64) > remaining {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!(
+                        "corrupt spill record length {len} exceeds remaining file size {remaining}"
+                    ),
+                ));
+            }
+            remaining -= len as u64;
             let mut raw = vec![0u8; len];
             reader.read_exact(&mut raw).map_err(|err| {
                 ErrorEnvelope::new(

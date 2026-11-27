@@ -4,8 +4,11 @@
 //! or catalog update fails, the entire statement rolls back cleanly without affecting
 //! earlier statements in the same [`WriteTxn`].
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashSet;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_document::{
@@ -51,24 +54,61 @@ pub const fn max_inline_record_bytes(page_size: PageSize) -> usize {
 }
 
 /// Generates a 12-byte monotonically sortable [`ObjectId`] (`docs/document-model.md` §4.2):
-/// `[4-byte unix_seconds_be][5-byte process_tag][3-byte atomic_counter_be]`.
+/// `[4-byte unix_seconds_be][5-byte CSPRNG process_tag][3-byte atomic_counter_be]`.
 pub fn generate_object_id() -> ObjectId {
-    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    static PROCESS_TAG: OnceLock<[u8; 5]> = OnceLock::new();
+    static COUNTER: OnceLock<AtomicU32> = OnceLock::new();
+
+    let tag = *PROCESS_TAG.get_or_init(|| {
+        let mut bytes = [0u8; 8];
+        fill_random_bytes(&mut bytes);
+        [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]]
+    });
+    let counter = COUNTER.get_or_init(|| {
+        let mut bytes = [0u8; 4];
+        fill_random_bytes(&mut bytes);
+        AtomicU32::new(u32::from_be_bytes(bytes) & 0x00FF_FFFF)
+    });
+
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let pid = std::process::id();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed) & 0x00FF_FFFF;
+    let seq = counter.fetch_add(1, Ordering::Relaxed) & 0x00FF_FFFF;
 
     let mut raw = [0u8; 12];
     raw[0..4].copy_from_slice(&secs.to_be_bytes());
-    raw[4..8].copy_from_slice(&pid.to_be_bytes());
-    raw[8] = 0xA5;
+    raw[4..9].copy_from_slice(&tag);
     raw[9] = ((seq >> 16) & 0xFF) as u8;
     raw[10] = ((seq >> 8) & 0xFF) as u8;
     raw[11] = (seq & 0xFF) as u8;
     ObjectId::from_bytes(raw)
+}
+
+pub(crate) fn fill_random_bytes(dest: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(dest).is_ok() {
+                return;
+            }
+        }
+    }
+    static FALLBACK_SEQ: AtomicU32 = AtomicU32::new(1);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    for chunk in dest.chunks_mut(8) {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(pid);
+        h.write_u32(FALLBACK_SEQ.fetch_add(1, Ordering::Relaxed));
+        let val = h.finish().to_le_bytes();
+        chunk.copy_from_slice(&val[..chunk.len()]);
+    }
 }
 
 /// Encodes an inline collection B+ tree value `[storage_kind=0x00][oryqdoc_bytes]`.
