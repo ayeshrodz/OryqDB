@@ -144,7 +144,27 @@ fn cross_thread_begin_write_respects_busy_timeout_ms() {
     let handle = thread::spawn(move || db2.begin_write().unwrap_err().category());
     assert_eq!(handle.join().unwrap(), ErrorCategory::Busy);
 
+    // Wake-and-acquire before timeout succeeds when the active writer releases in time.
+    let db3 = Arc::clone(&db);
+    let waker = thread::spawn(move || {
+        let wtx2 = db3.begin_write().unwrap();
+        wtx2.rollback();
+    });
+    thread::sleep(std::time::Duration::from_millis(10));
     drop(_wtx);
+    waker.join().unwrap();
+
     drop(db);
+
+    // Large busy_timeout_ms (u64::MAX) must not panic on Instant::checked_add overflow.
+    let huge_cfg = DatabaseConfig {
+        busy_timeout_ms: u64::MAX,
+        ..DatabaseConfig::default()
+    };
+    let db_huge = Database::open(&db_path, huge_cfg).unwrap();
+    let wtx_huge = db_huge.begin_write().unwrap();
+    wtx_huge.rollback();
+    drop(db_huge);
+
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -110,7 +110,7 @@ impl SingleProcessCoordinator {
             ));
         }
         let deadline = if self.busy_timeout_ms > 0 {
-            Some(Instant::now() + Duration::from_millis(self.busy_timeout_ms))
+            Instant::now().checked_add(Duration::from_millis(self.busy_timeout_ms))
         } else {
             None
         };

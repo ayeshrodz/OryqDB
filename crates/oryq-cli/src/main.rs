@@ -199,11 +199,11 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let rtx = db.begin_read().map_err(fmt_err)?;
             let col = rtx.collection(col_name).map_err(fmt_err)?;
             let cnt = match filter {
-                Some(f) => {
+                Some(f) if !f.trim().is_empty() => {
                     let expr = oryq_core::parse_filter_json(f).map_err(fmt_err)?;
                     col.count_matching(Some(&expr)).map_err(fmt_err)?
                 }
-                None => col.count().map_err(fmt_err)? as u64,
+                _ => col.count().map_err(fmt_err)? as u64,
             };
             out_line(&cnt.to_string())?;
             Ok(())
