@@ -4,9 +4,13 @@
 use std::cmp::Ordering;
 
 use oryq_document::{compare_values, encode_document, DocumentView, FieldPath, Value, ValueView};
-use oryq_types::Result;
+use oryq_types::{ErrorCategory, ErrorEnvelope, Result};
 
 use crate::ast::FilterExpr;
+
+const MODULE_ID: &str = "query";
+/// Maximum recursion depth allowed for nested `FilterExpr` evaluation.
+pub const MAX_FILTER_DEPTH: usize = 128;
 
 /// Compares two owned [`Value`]s using `oryq_document::compare_values` exact semantics.
 pub fn compare_owned_values(a: &Value, b: &Value) -> Ordering {
@@ -51,11 +55,23 @@ fn as_scalar_view(v: &Value) -> Option<ValueView<'_>> {
 /// - Scalar predicates on array fields match if ANY element in the array matches.
 /// - `$elemMatch` evaluates a nested `FilterExpr` against each object element of an array.
 pub fn eval_filter(doc: &DocumentView<'_>, expr: &FilterExpr) -> Result<bool> {
+    eval_filter_depth(doc, expr, 0)
+}
+
+fn eval_filter_depth(doc: &DocumentView<'_>, expr: &FilterExpr, depth: usize) -> Result<bool> {
+    if depth > MAX_FILTER_DEPTH {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::InvalidArgument,
+            MODULE_ID,
+            "predicates::eval_filter",
+            format!("filter nesting depth exceeds maximum allowed ({MAX_FILTER_DEPTH})"),
+        ));
+    }
     match expr {
         FilterExpr::MatchAll => Ok(true),
         FilterExpr::And(clauses) => {
             for c in clauses {
-                if !eval_filter(doc, c)? {
+                if !eval_filter_depth(doc, c, depth + 1)? {
                     return Ok(false);
                 }
             }
@@ -63,7 +79,7 @@ pub fn eval_filter(doc: &DocumentView<'_>, expr: &FilterExpr) -> Result<bool> {
         }
         FilterExpr::Or(clauses) => {
             for c in clauses {
-                if eval_filter(doc, c)? {
+                if eval_filter_depth(doc, c, depth + 1)? {
                     return Ok(true);
                 }
             }
@@ -71,13 +87,13 @@ pub fn eval_filter(doc: &DocumentView<'_>, expr: &FilterExpr) -> Result<bool> {
         }
         FilterExpr::Nor(clauses) => {
             for c in clauses {
-                if eval_filter(doc, c)? {
+                if eval_filter_depth(doc, c, depth + 1)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        FilterExpr::Not(inner) => Ok(!eval_filter(doc, inner)?),
+        FilterExpr::Not(inner) => Ok(!eval_filter_depth(doc, inner, depth + 1)?),
         FilterExpr::Exists(path, want_exists) => {
             let exists = resolve_path(doc, path).is_some();
             Ok(exists == *want_exists)
@@ -128,7 +144,7 @@ pub fn eval_filter(doc: &DocumentView<'_>, expr: &FilterExpr) -> Result<bool> {
                 for item in items {
                     if let Value::Document(sub_fields) = item {
                         let (sub_doc, _) = encode_document(&sub_fields, None)?;
-                        if eval_filter(&sub_doc.view(), sub)? {
+                        if eval_filter_depth(&sub_doc.view(), sub, depth + 1)? {
                             return Ok(true);
                         }
                     }
@@ -140,14 +156,15 @@ pub fn eval_filter(doc: &DocumentView<'_>, expr: &FilterExpr) -> Result<bool> {
     }
 }
 
-/// Resolves a dotted [`FieldPath`] against `doc`, returning `None` if any segment is missing.
+/// Resolves a dotted [`FieldPath`] against `doc`, traversing recursively through nested
+/// documents and intermediate arrays (e.g. `items.meta.tag`).
 pub fn resolve_path(doc: &DocumentView<'_>, path: &FieldPath) -> Option<Value> {
     let segs: Vec<&str> = path.segments().collect();
     if segs.is_empty() {
         return None;
     }
     let mut current: ValueView<'_> = doc.get_field(segs[0])?;
-    for &seg in &segs[1..] {
+    for (idx_pos, &seg) in segs[1..].iter().enumerate() {
         match current {
             ValueView::Document(sub) => {
                 current = sub.get_field(seg)?;
@@ -156,14 +173,9 @@ pub fn resolve_path(doc: &DocumentView<'_>, path: &FieldPath) -> Option<Value> {
                 if let Ok(idx) = seg.parse::<usize>() {
                     current = arr.get(idx)?;
                 } else {
+                    let rest = &segs[1 + idx_pos..];
                     let mut collected = Vec::new();
-                    for item in arr.iter() {
-                        if let ValueView::Document(sub) = item {
-                            if let Some(val) = sub.get_field(seg) {
-                                collected.push(val.to_owned_value());
-                            }
-                        }
-                    }
+                    collect_path_from_array(&arr, rest, &mut collected);
                     if collected.is_empty() {
                         return None;
                     }
@@ -174,6 +186,57 @@ pub fn resolve_path(doc: &DocumentView<'_>, path: &FieldPath) -> Option<Value> {
         }
     }
     Some(current.to_owned_value())
+}
+
+fn collect_path_from_array(
+    arr: &oryq_document::ArrayView<'_>,
+    rest: &[&str],
+    out: &mut Vec<Value>,
+) {
+    if rest.is_empty() {
+        for item in arr.iter() {
+            out.push(item.to_owned_value());
+        }
+        return;
+    }
+    let seg = rest[0];
+    let tail = &rest[1..];
+    if let Ok(idx) = seg.parse::<usize>() {
+        if let Some(el) = arr.get(idx) {
+            collect_path_from_value(el, tail, out);
+        }
+        return;
+    }
+    for item in arr.iter() {
+        if let ValueView::Document(sub) = item {
+            if let Some(val) = sub.get_field(seg) {
+                collect_path_from_value(val, tail, out);
+            }
+        }
+    }
+}
+
+fn collect_path_from_value(val: ValueView<'_>, rest: &[&str], out: &mut Vec<Value>) {
+    if rest.is_empty() {
+        match val {
+            ValueView::Array(arr) => {
+                for item in arr.iter() {
+                    out.push(item.to_owned_value());
+                }
+            }
+            other => out.push(other.to_owned_value()),
+        }
+        return;
+    }
+    match val {
+        ValueView::Document(sub) => {
+            if let Some(next) = sub.get_field(rest[0]) {
+                collect_path_from_value(next, &rest[1..], out);
+            }
+        }
+        ValueView::Array(arr) => collect_path_from_array(&arr, rest, out),
+        _ => {}
+    }
 }
 
 fn matches_eq(actual: &Value, target: &Value) -> bool {
@@ -199,11 +262,19 @@ where
     }
 }
 
+fn is_nan_value(v: &Value) -> bool {
+    match v {
+        Value::Float64(f) => f.is_nan(),
+        Value::Decimal128(d) => d.is_nan(),
+        _ => false,
+    }
+}
+
 fn compare_same_family_or_ordered<F>(actual: &Value, bound: &Value, check: F) -> bool
 where
     F: FnOnce(Ordering) -> bool,
 {
-    if !same_order_family(actual, bound) {
+    if !same_order_family(actual, bound) || is_nan_value(actual) || is_nan_value(bound) {
         return false;
     }
     check(compare_owned_values(actual, bound))

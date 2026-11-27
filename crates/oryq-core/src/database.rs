@@ -3,7 +3,6 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use oryq_engine::{
     clone_error_envelope, BatchCommitReport, BatchItem, BatchTx, CheckpointOutcome, CommitReceipt,
@@ -366,16 +365,8 @@ impl Database {
 }
 
 fn generate_database_uuid() -> [u8; 16] {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut uuid = nanos.to_be_bytes();
-    let pid = std::process::id().to_be_bytes();
-    uuid[0] ^= pid[0];
-    uuid[1] ^= pid[1];
-    uuid[2] ^= pid[2];
-    uuid[3] ^= pid[3];
+    let mut uuid = [0u8; 16];
+    crate::write::statement::fill_random_bytes(&mut uuid);
     // Mark RFC 4122 version 4 / variant bits.
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
     uuid[8] = (uuid[8] & 0x3F) | 0x80;

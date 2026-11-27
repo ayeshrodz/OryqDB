@@ -1,7 +1,7 @@
 //! Secondary single/nested-field [`IndexProvider`] implementation with uniqueness,
 //! sparse omission, and differential transactional maintenance.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use oryq_document::DocumentView;
 use oryq_engine::btree::read_internal_node;
@@ -13,7 +13,7 @@ use oryq_types::{
 use crate::descriptor::{IndexDescriptor, IndexKind, IndexReadCapabilities, MaintenanceResult};
 use crate::provider::IndexProvider;
 use crate::secondary::extract::{
-    build_secondary_full_key, extract_secondary_key_prefix, split_record_id_suffix,
+    build_secondary_full_key, extract_secondary_key_prefixes, split_record_id_suffix,
 };
 
 const MODULE_ID: &str = "index";
@@ -36,7 +36,7 @@ impl IndexProvider for SecondaryIndexProvider {
         IndexReadCapabilities {
             exact_equality: !desc.sparse,
             ordered_range: true,
-            multikey: false,
+            multikey: true,
             sparse: desc.sparse,
         }
     }
@@ -93,24 +93,26 @@ impl IndexProvider for SecondaryIndexProvider {
         record_id: RecordId,
         doc: &DocumentView<'_>,
     ) -> Result<MaintenanceResult> {
-        let Some(prefix) = extract_secondary_key_prefix(desc, doc, tx.page_size())? else {
+        let prefixes = extract_secondary_key_prefixes(desc, doc, tx.page_size())?;
+        if prefixes.is_empty() {
             return Ok(MaintenanceResult {
                 new_root_page_id: desc.root_page_id,
                 entries_added: 0,
                 entries_removed: 0,
             });
-        };
-
-        let mut tree = BTree::open(desc.root_page_id, TreeKind::Index);
-        if desc.unique {
-            check_unique_collision(tx, &tree, &prefix, record_id, &desc.name)?;
         }
 
-        let full_key = build_secondary_full_key(&prefix, record_id);
-        tree.insert(tx, &full_key, &[])?;
+        let mut tree = BTree::open(desc.root_page_id, TreeKind::Index);
+        for prefix in &prefixes {
+            if desc.unique {
+                check_unique_collision(tx, &tree, prefix, record_id, &desc.name)?;
+            }
+            let full_key = build_secondary_full_key(prefix, record_id);
+            tree.insert(tx, &full_key, &[])?;
+        }
         Ok(MaintenanceResult {
             new_root_page_id: tree.root(),
-            entries_added: 1,
+            entries_added: prefixes.len(),
             entries_removed: 0,
         })
     }
@@ -123,11 +125,17 @@ impl IndexProvider for SecondaryIndexProvider {
         before: &DocumentView<'_>,
         after: &DocumentView<'_>,
     ) -> Result<MaintenanceResult> {
-        let old_prefix = extract_secondary_key_prefix(desc, before, tx.page_size())?;
-        let new_prefix = extract_secondary_key_prefix(desc, after, tx.page_size())?;
+        let old_set: BTreeSet<Vec<u8>> =
+            extract_secondary_key_prefixes(desc, before, tx.page_size())?
+                .into_iter()
+                .collect();
+        let new_set: BTreeSet<Vec<u8>> =
+            extract_secondary_key_prefixes(desc, after, tx.page_size())?
+                .into_iter()
+                .collect();
 
-        // Differential bypass: if the extracted secondary key did not change, perform zero B+ tree I/O.
-        if old_prefix == new_prefix {
+        // Differential bypass: if the extracted secondary keys did not change, perform zero B+ tree I/O.
+        if old_set == new_set {
             return Ok(MaintenanceResult {
                 new_root_page_id: desc.root_page_id,
                 entries_added: 0,
@@ -139,20 +147,20 @@ impl IndexProvider for SecondaryIndexProvider {
         let mut removed = 0usize;
         let mut added = 0usize;
 
-        if let Some(old_p) = old_prefix {
-            let old_key = build_secondary_full_key(&old_p, record_id);
+        for old_p in old_set.difference(&new_set) {
+            let old_key = build_secondary_full_key(old_p, record_id);
             if tree.delete(tx, &old_key)?.is_some() {
-                removed = 1;
+                removed += 1;
             }
         }
 
-        if let Some(new_p) = new_prefix {
+        for new_p in new_set.difference(&old_set) {
             if desc.unique {
-                check_unique_collision(tx, &tree, &new_p, record_id, &desc.name)?;
+                check_unique_collision(tx, &tree, new_p, record_id, &desc.name)?;
             }
-            let new_key = build_secondary_full_key(&new_p, record_id);
+            let new_key = build_secondary_full_key(new_p, record_id);
             tree.insert(tx, &new_key, &[])?;
-            added = 1;
+            added += 1;
         }
 
         Ok(MaintenanceResult {
@@ -169,17 +177,23 @@ impl IndexProvider for SecondaryIndexProvider {
         record_id: RecordId,
         doc: &DocumentView<'_>,
     ) -> Result<MaintenanceResult> {
-        let Some(prefix) = extract_secondary_key_prefix(desc, doc, tx.page_size())? else {
+        let prefixes = extract_secondary_key_prefixes(desc, doc, tx.page_size())?;
+        if prefixes.is_empty() {
             return Ok(MaintenanceResult {
                 new_root_page_id: desc.root_page_id,
                 entries_added: 0,
                 entries_removed: 0,
             });
-        };
+        }
 
         let mut tree = BTree::open(desc.root_page_id, TreeKind::Index);
-        let full_key = build_secondary_full_key(&prefix, record_id);
-        let removed = usize::from(tree.delete(tx, &full_key)?.is_some());
+        let mut removed = 0usize;
+        for prefix in &prefixes {
+            let full_key = build_secondary_full_key(prefix, record_id);
+            if tree.delete(tx, &full_key)?.is_some() {
+                removed += 1;
+            }
+        }
         Ok(MaintenanceResult {
             new_root_page_id: tree.root(),
             entries_added: 0,

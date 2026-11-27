@@ -60,9 +60,18 @@ pub fn decode_prefix_block(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
         ));
     }
     let count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let max_entries = (raw.len() - 4) / 4;
+    if count > max_entries {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "compound::decode_prefix_block",
+            format!("prefix block entry count ({count}) exceeds buffer capacity ({max_entries})"),
+        ));
+    }
     let mut pos = 4;
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(count);
-    for _ in 0..count {
+    for i in 0..count {
         if pos + 4 > raw.len() {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
@@ -74,6 +83,14 @@ pub fn decode_prefix_block(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
         let shared = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
         let slen = u16::from_le_bytes(raw[pos + 2..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
+        if i % PREFIX_RESTART_INTERVAL == 0 && shared != 0 {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "compound::decode_prefix_block",
+                "non-zero shared prefix on restart key",
+            ));
+        }
         if pos + slen > raw.len() {
             return Err(ErrorEnvelope::new(
                 ErrorCategory::Corruption,
@@ -140,42 +157,37 @@ pub fn extract_compound_key_prefixes(
     let mut per_field_encoded: Vec<Vec<Vec<u8>>> = Vec::with_capacity(desc.fields.len());
 
     for field in &desc.fields {
-        match doc.get_path(&field.path) {
-            Some(ValueView::Array(arr)) => {
-                any_present = true;
-                array_field_count += 1;
-                if array_field_count >= 2 {
-                    return Err(ErrorEnvelope::new(
-                        ErrorCategory::InvalidArgument,
-                        MODULE_ID,
-                        "compound::extract_compound_key_prefixes",
-                        format!(
-                            "cannot index parallel arrays in compound index '{}'",
-                            desc.name
-                        ),
-                    ));
-                }
-                let mut elem_keys = Vec::new();
-                for el in arr.iter() {
-                    elem_keys.push(encode_value_key(&el, field.order, max_prefix)?);
-                }
-                if elem_keys.is_empty() {
-                    // Empty array produces no index entries for this document.
-                    return Ok(Vec::new());
-                }
-                per_field_encoded.push(elem_keys);
+        let extracted = crate::secondary::extract::extract_path_values(doc, &field.path);
+        if extracted.encountered_array {
+            array_field_count += 1;
+            if array_field_count >= 2 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::InvalidArgument,
+                    MODULE_ID,
+                    "compound::extract_compound_key_prefixes",
+                    format!(
+                        "cannot index parallel arrays in compound index '{}'",
+                        desc.name
+                    ),
+                ));
             }
-            Some(val) => {
-                any_present = true;
-                per_field_encoded.push(vec![encode_value_key(&val, field.order, max_prefix)?]);
+        }
+        if !extracted.values.is_empty() {
+            any_present = true;
+            let mut elem_keys = Vec::with_capacity(extracted.values.len());
+            for el in &extracted.values {
+                elem_keys.push(encode_value_key(el, field.order, max_prefix)?);
             }
-            None => {
-                per_field_encoded.push(vec![encode_value_key(
-                    &ValueView::Null,
-                    field.order,
-                    max_prefix,
-                )?]);
-            }
+            per_field_encoded.push(elem_keys);
+        } else if let Some(empty_arr) = extracted.empty_array {
+            any_present = true;
+            per_field_encoded.push(vec![encode_value_key(&empty_arr, field.order, max_prefix)?]);
+        } else {
+            per_field_encoded.push(vec![encode_value_key(
+                &ValueView::Null,
+                field.order,
+                max_prefix,
+            )?]);
         }
     }
 

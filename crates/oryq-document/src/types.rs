@@ -306,34 +306,61 @@ impl Decimal128 {
             ));
         }
 
-        let mut coeff: u128 = 0;
+        let mut sig: Vec<u8> = Vec::new();
         let mut saw_nonzero = false;
-        let mut sig_digits = 0usize;
         for b in int_part.bytes().chain(frac_part.bytes()) {
-            let d = (b - b'0') as u128;
+            let d = b - b'0';
             if d != 0 || saw_nonzero {
                 saw_nonzero = true;
-                sig_digits += 1;
-                if sig_digits > 34 {
-                    return Err(ErrorEnvelope::new(
-                        ErrorCategory::Overflow,
-                        MODULE_ID,
-                        "Decimal128::parse_str",
-                        format!("decimal `{input}` exceeds 34 significant digits"),
-                    ));
-                }
-                coeff = coeff * 10 + d;
+                sig.push(d);
             }
         }
 
+        // Normalize trailing zeros only when the raw digit string exceeds 34 significant digits,
+        // preserving exact scale for <=34-digit inputs while accepting values like 10^34 or 1.000...0.
+        let mut trailing_stripped: i32 = 0;
+        while sig.len() > 34 && sig.last() == Some(&0) {
+            sig.pop();
+            trailing_stripped = trailing_stripped.checked_add(1).ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Overflow,
+                    MODULE_ID,
+                    "Decimal128::parse_str",
+                    "decimal exponent overflow",
+                )
+            })?;
+        }
+        if sig.len() > 34 {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "Decimal128::parse_str",
+                format!("decimal `{input}` exceeds 34 significant digits"),
+            ));
+        }
+
+        let mut coeff: u128 = 0;
+        for d in sig {
+            coeff = coeff * 10 + (d as u128);
+        }
+
+        let frac_len = i32::try_from(frac_part.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "Decimal128::parse_str",
+                "decimal fractional part too long",
+            )
+        })?;
         let exponent = exp_part
-            .checked_sub(frac_part.len() as i32)
+            .checked_sub(frac_len)
+            .and_then(|e| e.checked_add(trailing_stripped))
             .ok_or_else(|| {
                 ErrorEnvelope::new(
                     ErrorCategory::Overflow,
                     MODULE_ID,
                     "Decimal128::parse_str",
-                    "decimal exponent underflow",
+                    "decimal exponent overflow",
                 )
             })?;
 
@@ -342,6 +369,12 @@ impl Decimal128 {
             coefficient: coeff,
             exponent,
         })
+    }
+
+    /// Returns `true` if this `Decimal128` represents `NaN`.
+    #[inline]
+    pub fn is_nan(&self) -> bool {
+        matches!(self.decode(), DecodedDecimal128::NaN)
     }
 }
 

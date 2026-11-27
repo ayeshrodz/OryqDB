@@ -4,14 +4,36 @@ use oryq_document::ValueView;
 use oryq_engine::{BTree, PageStore, TreeKind};
 use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result};
 
-use crate::descriptor::IndexDescriptor;
+use crate::descriptor::{IndexDescriptor, IndexKind};
 use crate::key_codec::{encode_value_key, max_index_key_bytes, SortOrder};
 use crate::secondary::extract::split_record_id_suffix;
 
 const MODULE_ID: &str = "index";
 const RECORD_ID_BYTES: usize = 8;
 
-/// Scans all `RecordId`s in `desc` whose indexed field equals `target` (canonical order).
+#[inline]
+fn is_multi_field_compound(desc: &IndexDescriptor) -> bool {
+    desc.kind == IndexKind::Compound && desc.fields.len() > 1
+}
+
+/// Compares `entry_prefix` against a single leading-field `bound_prefix`.
+///
+/// Every encoded value key is prefix-free, so for multi-field compound indexes (`f0 || f1 ...`),
+/// `entry_prefix.starts_with(bound_prefix)` holds iff `f0 == bound`.
+#[inline]
+fn cmp_leading_prefix(
+    entry_prefix: &[u8],
+    bound_prefix: &[u8],
+    is_compound: bool,
+) -> core::cmp::Ordering {
+    if is_compound && entry_prefix.starts_with(bound_prefix) {
+        core::cmp::Ordering::Equal
+    } else {
+        entry_prefix.cmp(bound_prefix)
+    }
+}
+
+/// Scans all `RecordId`s in `desc` whose leading indexed field equals `target` (canonical order).
 pub fn scan_secondary_eq(
     store: &impl PageStore,
     desc: &IndexDescriptor,
@@ -25,6 +47,7 @@ pub fn scan_secondary_eq(
             "secondary index descriptor has no fields",
         )
     })?;
+    let is_compound = is_multi_field_compound(desc);
     let max_prefix = max_index_key_bytes(store.page_size()).saturating_sub(RECORD_ID_BYTES);
     let prefix = encode_value_key(target, field.order, max_prefix)?;
 
@@ -38,7 +61,9 @@ pub fn scan_secondary_eq(
     if cur.seek_ge(&start)? {
         while let Some((k, _)) = cur.current() {
             let (entry_prefix, rid) = split_record_id_suffix(k)?;
-            if entry_prefix != prefix.as_slice() {
+            if cmp_leading_prefix(entry_prefix, prefix.as_slice(), is_compound)
+                != core::cmp::Ordering::Equal
+            {
                 break;
             }
             out.push(rid);
@@ -50,8 +75,8 @@ pub fn scan_secondary_eq(
     Ok(out)
 }
 
-/// Scans `RecordId`s in `desc` whose indexed value falls within optional lower/upper bounds
-/// (in logical ascending value order; handles `SortOrder::Desc` automatically).
+/// Scans `RecordId`s in `desc` whose leading indexed value falls within optional lower/upper bounds
+/// (in logical ascending value order; handles `SortOrder::Desc` and multi-field compound prefixes).
 pub fn scan_secondary_range(
     store: &impl PageStore,
     desc: &IndexDescriptor,
@@ -66,6 +91,7 @@ pub fn scan_secondary_range(
             "secondary index descriptor has no fields",
         )
     })?;
+    let is_compound = is_multi_field_compound(desc);
     let max_prefix = max_index_key_bytes(store.page_size()).saturating_sub(RECORD_ID_BYTES);
 
     let lower_enc = match lower {
@@ -89,7 +115,10 @@ pub fn scan_secondary_range(
         Some((prefix, inclusive)) => {
             let mut seek_key = Vec::with_capacity(prefix.len() + RECORD_ID_BYTES);
             seek_key.extend_from_slice(prefix);
-            if *inclusive {
+            if *inclusive || is_compound {
+                // For compound indexes, additional trailing field bytes follow `prefix`, so seeking
+                // at `prefix || 0x00*8` avoids skipping any trailing-field bytes and lets the loop
+                // filter `!lo_inc` exactly via `cmp_leading_prefix`.
                 seek_key.extend_from_slice(&[0x00; RECORD_ID_BYTES]);
             } else {
                 seek_key.extend_from_slice(&[0xFF; RECORD_ID_BYTES]);
@@ -105,7 +134,7 @@ pub fn scan_secondary_range(
             let (entry_prefix, rid) = split_record_id_suffix(k)?;
 
             if let Some((ref lo_prefix, lo_inc)) = byte_lo {
-                let cmp = entry_prefix.cmp(lo_prefix.as_slice());
+                let cmp = cmp_leading_prefix(entry_prefix, lo_prefix.as_slice(), is_compound);
                 if cmp == core::cmp::Ordering::Less
                     || (!lo_inc && cmp == core::cmp::Ordering::Equal)
                 {
@@ -117,7 +146,7 @@ pub fn scan_secondary_range(
             }
 
             if let Some((ref hi_prefix, hi_inc)) = byte_hi {
-                let cmp = entry_prefix.cmp(hi_prefix.as_slice());
+                let cmp = cmp_leading_prefix(entry_prefix, hi_prefix.as_slice(), is_compound);
                 if cmp == core::cmp::Ordering::Greater
                     || (!hi_inc && cmp == core::cmp::Ordering::Equal)
                 {

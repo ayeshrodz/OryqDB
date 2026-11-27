@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use oryq_document::{encode_document, DocumentBuf, FieldPath, Value};
+use oryq_document::{encode_document, DocumentBuf, Value};
 use oryq_index::SortOrder;
 use oryq_types::{ErrorCategory, ErrorEnvelope, RecordId, Result};
 
@@ -265,15 +265,15 @@ pub fn compare_docs_by_sort(a: &DocumentBuf, b: &DocumentBuf, sort: &SortSpec) -
 /// Applies an inclusion or exclusion [`ProjectionSpec`] to a document.
 pub fn apply_projection(doc: &DocumentBuf, proj: &ProjectionSpec) -> Result<DocumentBuf> {
     let view = doc.view();
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    match proj {
+    let fields: Vec<(String, Value)> = match proj {
         ProjectionSpec::Include {
             fields: inc_paths,
             include_id,
         } => {
+            let mut out = Vec::new();
             if *include_id {
                 if let Some(id_val) = view.get_field("_id") {
-                    fields.push(("_id".to_owned(), id_val.to_owned_value()));
+                    out.push(("_id".to_owned(), id_val.to_owned_value()));
                 }
             }
             for path in inc_paths {
@@ -283,38 +283,93 @@ pub fn apply_projection(doc: &DocumentBuf, proj: &ProjectionSpec) -> Result<Docu
                 }
                 if segs.len() == 1 {
                     if let Some(val) = view.get_field(segs[0]) {
-                        fields.push((segs[0].to_owned(), val.to_owned_value()));
+                        merge_nested_field(&mut out, &segs, val.to_owned_value());
                     }
                 } else if let Some(val) = resolve_path(&view, path) {
-                    insert_nested_field(&mut fields, path, val);
+                    merge_nested_field(&mut out, &segs, val);
                 }
             }
+            out
         }
         ProjectionSpec::Exclude { fields: exc_paths } => {
-            for (k, v) in view.iter() {
-                let excluded = exc_paths.iter().any(|p| {
-                    let mut it = p.segments();
-                    it.next() == Some(k) && it.next().is_none()
-                });
-                if !excluded {
-                    fields.push((k.to_owned(), v.to_owned_value()));
-                }
-            }
+            let owned_fields: Vec<(String, Value)> = view
+                .iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned_value()))
+                .collect();
+            let path_vecs: Vec<Vec<&str>> =
+                exc_paths.iter().map(|p| p.segments().collect()).collect();
+            let path_slices: Vec<&[&str]> = path_vecs.iter().map(Vec::as_slice).collect();
+            exclude_nested_fields(owned_fields, &path_slices)
         }
-    }
+    };
     let (encoded, _) = encode_document(&fields, None)?;
     Ok(encoded)
 }
 
-fn insert_nested_field(root: &mut Vec<(String, Value)>, path: &FieldPath, val: Value) {
-    let segs: Vec<&str> = path.segments().collect();
-    if segs.len() == 1 {
-        root.push((segs[0].to_owned(), val));
+fn merge_nested_field(target: &mut Vec<(String, Value)>, segs: &[&str], val: Value) {
+    let Some((&head, tail)) = segs.split_first() else {
+        return;
+    };
+    if tail.is_empty() {
+        if let Some((_, existing)) = target.iter_mut().find(|(k, _)| k == head) {
+            *existing = val;
+        } else {
+            target.push((head.to_owned(), val));
+        }
         return;
     }
-    let mut current = val;
-    for &seg in segs[1..].iter().rev() {
-        current = Value::Document(vec![(seg.to_owned(), current)]);
+    if let Some((_, Value::Document(sub_fields))) = target.iter_mut().find(|(k, _)| k == head) {
+        merge_nested_field(sub_fields, tail, val);
+        return;
     }
-    root.push((segs[0].to_owned(), current));
+    let mut sub_fields = Vec::new();
+    merge_nested_field(&mut sub_fields, tail, val);
+    if let Some((_, existing)) = target.iter_mut().find(|(k, _)| k == head) {
+        *existing = Value::Document(sub_fields);
+    } else {
+        target.push((head.to_owned(), Value::Document(sub_fields)));
+    }
+}
+
+fn exclude_nested_fields(
+    fields: Vec<(String, Value)>,
+    exc_paths: &[&[&str]],
+) -> Vec<(String, Value)> {
+    let mut out = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        let drop_whole = exc_paths
+            .iter()
+            .any(|segs| segs.len() == 1 && segs[0] == k.as_str());
+        if drop_whole {
+            continue;
+        }
+        let sub_paths: Vec<&[&str]> = exc_paths
+            .iter()
+            .filter(|segs| segs.len() > 1 && segs[0] == k.as_str())
+            .map(|segs| &segs[1..])
+            .collect();
+        if sub_paths.is_empty() {
+            out.push((k, v));
+            continue;
+        }
+        let filtered_val = match v {
+            Value::Document(sub_fields) => {
+                Value::Document(exclude_nested_fields(sub_fields, &sub_paths))
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::Document(sub_fields) => {
+                            Value::Document(exclude_nested_fields(sub_fields, &sub_paths))
+                        }
+                        other => other,
+                    })
+                    .collect(),
+            ),
+            other => other,
+        };
+        out.push((k, filtered_val));
+    }
+    out
 }

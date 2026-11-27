@@ -34,6 +34,7 @@ pub use primary::{
 pub use provider::IndexProvider;
 pub use registry::IndexProviderRegistry;
 pub use secondary::{
-    build_secondary_full_key, extract_secondary_key_prefix, scan_secondary_all, scan_secondary_eq,
-    scan_secondary_range, split_record_id_suffix, SecondaryIndexProvider, SECONDARY_PROVIDER_ID,
+    build_secondary_full_key, extract_secondary_key_prefix, extract_secondary_key_prefixes,
+    scan_secondary_all, scan_secondary_eq, scan_secondary_range, split_record_id_suffix,
+    SecondaryIndexProvider, SECONDARY_PROVIDER_ID,
 };

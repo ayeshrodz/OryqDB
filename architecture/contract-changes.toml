@@ -501,3 +501,37 @@ evidence = [
     "cargo run -p xtask -- modules core",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0029"
+modules = ["document", "index", "query", "core"]
+files = [
+    "crates/oryq-document/src/json.rs",
+    "crates/oryq-document/src/types.rs",
+    "crates/oryq-document/src/patch/normalize.rs",
+    "crates/oryq-index/src/lib.rs",
+    "crates/oryq-index/src/key_codec.rs",
+    "crates/oryq-index/src/compound.rs",
+    "crates/oryq-index/src/secondary/mod.rs",
+    "crates/oryq-index/src/secondary/extract.rs",
+    "crates/oryq-index/src/secondary/write.rs",
+    "crates/oryq-index/src/secondary/read.rs",
+    "crates/oryq-query/src/predicates/mod.rs",
+    "crates/oryq-query/src/planner/mod.rs",
+    "crates/oryq-query/src/cursor.rs",
+    "crates/oryq-query/src/pipeline.rs",
+    "crates/oryq-query/src/spill.rs",
+    "crates/oryq-core/src/write/statement.rs",
+    "crates/oryq-core/src/database.rs",
+    "crates/oryq-core/src/api/read.rs",
+    "crates/oryq-core/src/admin.rs",
+]
+reason = "Implement Issue #45 (v0.14.1): fix secondary multikey arrays, compound range upper/lower prefix bounds, compound empty-array & multikey range planning, multi-hop array dotted paths, Binary memcomparable order, nested projection exclusion/sibling inclusion, $group Decimal128 & SumConst, Decimal128::parse_str trailing zeros, JSON/Filter recursion depth limits, decode_prefix_block/decode_physical_patch/SpillManager allocation bounds + 0700 CSPRNG spill dir, CSPRNG ObjectId/UUID, and full multi-index integrity_check."
+compatibility = "api_change"
+evidence = [
+    "cargo test -p oryq-core --test query_index_security_regression",
+    "cargo test --workspace --all-features",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

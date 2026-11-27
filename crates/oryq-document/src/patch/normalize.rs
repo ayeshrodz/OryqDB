@@ -181,6 +181,15 @@ pub fn decode_physical_patch(bytes: &[u8]) -> Result<PhysicalPatch> {
     }
     let prev_delta_slot = u16::from_le_bytes([bytes[0], bytes[1]]);
     let entry_count = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+    let max_possible_entries = (bytes.len() - PATCH_HEADER_SIZE) / PATCH_ENTRY_FIXED_SIZE;
+    if entry_count > max_possible_entries {
+        return Err(corrupt(
+            "patch::decode_physical_patch",
+            format!(
+                "patch entry_count ({entry_count}) exceeds buffer capacity ({max_possible_entries})"
+            ),
+        ));
+    }
 
     let mut offset = PATCH_HEADER_SIZE;
     let mut entries = Vec::with_capacity(entry_count);
