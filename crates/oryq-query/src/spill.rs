@@ -194,20 +194,27 @@ impl SpillManager {
         let mut docs = Vec::new();
         let mut len_buf = [0u8; 4];
         loop {
-            match reader.read_exact(&mut len_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(err) => {
-                    return Err(ErrorEnvelope::new(
-                        ErrorCategory::Io,
-                        MODULE_ID,
-                        "SpillManager::read_run",
-                        format!("failed reading spill length: {err}"),
-                    )
-                    .with_source(err));
-                }
+            if remaining == 0 {
+                break;
             }
-            remaining = remaining.saturating_sub(4);
+            if remaining < 4 {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!("truncated spill record length header ({remaining} trailing bytes)"),
+                ));
+            }
+            reader.read_exact(&mut len_buf).map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorCategory::Io,
+                    MODULE_ID,
+                    "SpillManager::read_run",
+                    format!("failed reading spill length: {err}"),
+                )
+                .with_source(err)
+            })?;
+            remaining -= 4;
             let len = u32::from_le_bytes(len_buf) as usize;
             if len > MAX_SPILL_DOC_BYTES || (len as u64) > remaining {
                 return Err(ErrorEnvelope::new(

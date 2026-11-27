@@ -518,4 +518,93 @@ fn decimal128_trailing_zeros_and_dos_recursion_allocation_guards() {
     }
     let err = SpillManager::read_run(&bad_run).unwrap_err();
     assert_eq!(err.category(), ErrorCategory::Corruption);
+
+    // Truncated 2-byte trailing length header must return Corruption.
+    let trunc_run = mgr.dir_path().join("trunc.spill");
+    {
+        let mut f = fs::File::create(&trunc_run).unwrap();
+        f.write_all(&[0x01, 0x02]).unwrap();
+    }
+    let err = SpillManager::read_run(&trunc_run).unwrap_err();
+    assert_eq!(err.category(), ErrorCategory::Corruption);
+}
+
+#[test]
+fn numeric_array_index_paths_and_multihop_empty_leaf_arrays_match_oracle() {
+    let db = open_mem_db();
+    {
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("orders").unwrap();
+        let mut col = wtx.collection("orders").unwrap();
+        col.insert_json(
+            r#"{"_id": 1, "tags": ["first", "second"], "items": [{"meta": {"tag": "a"}}, {"meta": {"tag": []}}]}"#,
+        )
+        .unwrap();
+        col.insert_json(
+            r#"{"_id": 2, "tags": ["other", "first"], "items": [{"meta": {"tag": "b"}}]}"#,
+        )
+        .unwrap();
+        wtx.commit().unwrap();
+    }
+
+    let queries = [
+        r#"{"tags.0": "first"}"#,
+        r#"{"items.0.meta.tag": "a"}"#,
+        r#"{"items.meta.tag": []}"#,
+    ];
+    let expected: Vec<BTreeSet<String>> = {
+        let rtx = db.begin_read().unwrap();
+        let col = rtx.collection("orders").unwrap();
+        queries
+            .iter()
+            .map(|q| {
+                collect_ids(
+                    &col.find_json(Some(q), None, None, 0, None)
+                        .unwrap()
+                        .collect_all(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(expected[0].len(), 1);
+    assert_eq!(expected[1].len(), 1);
+    assert_eq!(expected[2].len(), 1);
+
+    {
+        let mut wtx = db.begin_write().unwrap();
+        let mut col = wtx.collection("orders").unwrap();
+        col.create_index("tags.0", SortOrder::Asc, false, false, Some("idx_tags0"))
+            .unwrap();
+        col.create_index(
+            "items.0.meta.tag",
+            SortOrder::Asc,
+            false,
+            false,
+            Some("idx_items0_tag"),
+        )
+        .unwrap();
+        col.create_index(
+            "items.meta.tag",
+            SortOrder::Asc,
+            false,
+            false,
+            Some("idx_items_tag"),
+        )
+        .unwrap();
+        wtx.commit().unwrap();
+    }
+
+    let rtx = db.begin_read().unwrap();
+    let col = rtx.collection("orders").unwrap();
+    for (q, exp) in queries.iter().zip(&expected) {
+        let got = collect_ids(
+            &col.find_json(Some(q), None, None, 0, None)
+                .unwrap()
+                .collect_all(),
+        );
+        assert_eq!(&got, exp, "indexed mismatch for query {q}");
+    }
+
+    let report = db.integrity_check().unwrap();
+    assert!(report.ok, "integrity issues: {:?}", report.issues);
 }

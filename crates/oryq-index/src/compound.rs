@@ -99,8 +99,7 @@ pub fn decode_prefix_block(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
                 "truncated prefix entry suffix",
             ));
         }
-        let mut full = Vec::with_capacity(shared + slen);
-        if shared > 0 {
+        let mut full = if shared > 0 {
             let prev = keys.last().ok_or_else(|| {
                 ErrorEnvelope::new(
                     ErrorCategory::Corruption,
@@ -117,8 +116,12 @@ pub fn decode_prefix_block(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
                     "shared prefix exceeds previous key length",
                 ));
             }
-            full.extend_from_slice(&prev[..shared]);
-        }
+            let mut buf = Vec::with_capacity(shared + slen);
+            buf.extend_from_slice(&prev[..shared]);
+            buf
+        } else {
+            Vec::with_capacity(slen)
+        };
         full.extend_from_slice(&raw[pos..pos + slen]);
         pos += slen;
         keys.push(full);
@@ -172,16 +175,18 @@ pub fn extract_compound_key_prefixes(
                 ));
             }
         }
-        if !extracted.values.is_empty() {
+        if !extracted.values.is_empty() || extracted.empty_array.is_some() {
             any_present = true;
-            let mut elem_keys = Vec::with_capacity(extracted.values.len());
+            let mut elem_keys = Vec::with_capacity(
+                extracted.values.len() + usize::from(extracted.empty_array.is_some()),
+            );
             for el in &extracted.values {
                 elem_keys.push(encode_value_key(el, field.order, max_prefix)?);
             }
+            if let Some(empty_arr) = extracted.empty_array {
+                elem_keys.push(encode_value_key(&empty_arr, field.order, max_prefix)?);
+            }
             per_field_encoded.push(elem_keys);
-        } else if let Some(empty_arr) = extracted.empty_array {
-            any_present = true;
-            per_field_encoded.push(vec![encode_value_key(&empty_arr, field.order, max_prefix)?]);
         } else {
             per_field_encoded.push(vec![encode_value_key(
                 &ValueView::Null,

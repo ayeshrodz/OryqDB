@@ -220,8 +220,12 @@ fn collect_path_from_value(val: ValueView<'_>, rest: &[&str], out: &mut Vec<Valu
     if rest.is_empty() {
         match val {
             ValueView::Array(arr) => {
-                for item in arr.iter() {
-                    out.push(item.to_owned_value());
+                if arr.is_empty() {
+                    out.push(Value::Array(Vec::new()));
+                } else {
+                    for item in arr.iter() {
+                        out.push(item.to_owned_value());
+                    }
                 }
             }
             other => out.push(other.to_owned_value()),

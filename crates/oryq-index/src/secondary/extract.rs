@@ -73,10 +73,16 @@ fn collect_from_value<'a>(val: ValueView<'a>, rest: &[&str], out: &mut Extracted
     match val {
         ValueView::Document(sub) => collect_from_doc(&sub, rest, out),
         ValueView::Array(arr) => {
-            out.encountered_array = true;
-            for el in arr.iter() {
-                if let ValueView::Document(sub) = el {
-                    collect_from_doc(&sub, rest, out);
+            if let Ok(idx) = rest[0].parse::<usize>() {
+                if let Some(el) = arr.get(idx) {
+                    collect_from_value(el, &rest[1..], out);
+                }
+            } else {
+                out.encountered_array = true;
+                for el in arr.iter() {
+                    if let ValueView::Document(sub) = el {
+                        collect_from_doc(&sub, rest, out);
+                    }
                 }
             }
         }
@@ -87,6 +93,7 @@ fn collect_from_value<'a>(val: ValueView<'a>, rest: &[&str], out: &mut Extracted
 /// Extracts all unique encoded value-key prefixes for a single/nested-path secondary index from `doc`.
 ///
 /// - Expands array values and multi-hop array dotted paths (`items.meta.tag`) for multikey indexing.
+/// - Supports numeric array index segments (`items.0.tag`, `tags.0`) matching `oryq-query::resolve_path`.
 /// - Deduplicates repeated element keys within the same document via `BTreeSet`.
 /// - Encodes an empty array `[]` using the canonical empty-array key so `unique: true` is enforced.
 /// - When `desc.sparse == true` and the field is `Missing`, returns an empty `Vec`.
@@ -108,10 +115,7 @@ pub fn extract_secondary_key_prefixes(
     let max_prefix = max_index_key_bytes(page_size).saturating_sub(RECORD_ID_BYTES);
     let extracted = extract_path_values(doc, &field.path);
 
-    if extracted.values.is_empty() {
-        if let Some(empty_arr) = extracted.empty_array {
-            return Ok(vec![encode_value_key(&empty_arr, field.order, max_prefix)?]);
-        }
+    if extracted.values.is_empty() && extracted.empty_array.is_none() {
         if desc.sparse {
             return Ok(Vec::new());
         }
@@ -125,6 +129,9 @@ pub fn extract_secondary_key_prefixes(
     let mut dedup = BTreeSet::new();
     for val in &extracted.values {
         dedup.insert(encode_value_key(val, field.order, max_prefix)?);
+    }
+    if let Some(empty_arr) = extracted.empty_array {
+        dedup.insert(encode_value_key(&empty_arr, field.order, max_prefix)?);
     }
     Ok(dedup.into_iter().collect())
 }

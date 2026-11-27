@@ -316,10 +316,25 @@ impl Decimal128 {
             }
         }
 
-        // Normalize trailing zeros only when the raw digit string exceeds 34 significant digits,
-        // preserving exact scale for <=34-digit inputs while accepting values like 10^34 or 1.000...0.
+        let frac_len = i32::try_from(frac_part.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::Overflow,
+                MODULE_ID,
+                "Decimal128::parse_str",
+                "decimal fractional part too long",
+            )
+        })?;
+
+        // Normalize trailing zeros when raw digits exceed 34 OR when the raw exponent would
+        // underflow IEEE 754 decimal128's minimum exponent (-6176), preserving exact scale otherwise.
         let mut trailing_stripped: i32 = 0;
-        while sig.len() > 34 && sig.last() == Some(&0) {
+        while sig.last() == Some(&0)
+            && (sig.len() > 34
+                || exp_part
+                    .saturating_sub(frac_len)
+                    .saturating_add(trailing_stripped)
+                    < -6176)
+        {
             sig.pop();
             trailing_stripped = trailing_stripped.checked_add(1).ok_or_else(|| {
                 ErrorEnvelope::new(
@@ -344,14 +359,6 @@ impl Decimal128 {
             coeff = coeff * 10 + (d as u128);
         }
 
-        let frac_len = i32::try_from(frac_part.len()).map_err(|_| {
-            ErrorEnvelope::new(
-                ErrorCategory::Overflow,
-                MODULE_ID,
-                "Decimal128::parse_str",
-                "decimal fractional part too long",
-            )
-        })?;
         let exponent = exp_part
             .checked_sub(frac_len)
             .and_then(|e| e.checked_add(trailing_stripped))
