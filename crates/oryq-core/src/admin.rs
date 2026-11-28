@@ -294,6 +294,40 @@ pub fn run_online_backup(
     result
 }
 
+const BACKUP_CHUNK_DOCS: usize = 1_000;
+const BACKUP_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const BACKUP_CHECKPOINT_DOCS: usize = 10_000;
+const BACKUP_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+
+fn flush_backup_batch(
+    target_db: &Database,
+    col_name: &str,
+    batch: &mut Vec<oryq_document::DocumentBuf>,
+    batch_bytes: &mut usize,
+    docs_since_ckpt: &mut usize,
+    bytes_since_ckpt: &mut usize,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let mut wtx = target_db.begin_write()?;
+    {
+        let mut dst_col = wtx.collection(col_name)?;
+        for doc in batch.drain(..) {
+            dst_col.insert(&doc)?;
+        }
+    }
+    wtx.commit()?;
+    *batch_bytes = 0;
+
+    if *docs_since_ckpt >= BACKUP_CHECKPOINT_DOCS || *bytes_since_ckpt >= BACKUP_CHECKPOINT_BYTES {
+        target_db.checkpoint(true)?;
+        *docs_since_ckpt = 0;
+        *bytes_since_ckpt = 0;
+    }
+    Ok(())
+}
+
 fn copy_snapshot_into_db(db: &Database, target_db: &Database) -> Result<(usize, usize, bool)> {
     // Hold one consistent MVCC read snapshot for the entire backup/compaction copy.
     let rtx = db.begin_read()?;
@@ -301,15 +335,18 @@ fn copy_snapshot_into_db(db: &Database, target_db: &Database) -> Result<(usize, 
 
     let mut collections_copied = 0usize;
     let mut documents_copied = 0usize;
+    let mut docs_since_ckpt = 0usize;
+    let mut bytes_since_ckpt = 0usize;
 
-    {
-        let mut wtx = target_db.begin_write()?;
-        for col_name in &col_names {
-            let src_col = rtx.collection(col_name)?;
+    for col_name in &col_names {
+        let src_col = rtx.collection(col_name)?;
+
+        // Create collection and all non-primary indexes in a dedicated DDL transaction.
+        {
+            let mut wtx = target_db.begin_write()?;
             wtx.create_collection(col_name)?;
             let mut dst_col = wtx.collection(col_name)?;
 
-            // Recreate non-primary indexes
             for idx in src_col.list_indexes() {
                 match idx.kind {
                     IndexKind::Primary => {}
@@ -386,15 +423,43 @@ fn copy_snapshot_into_db(db: &Database, target_db: &Database) -> Result<(usize, 
                     }
                 }
             }
-
-            // Copy all documents from the pinned snapshot
-            for doc in src_col.find_all()? {
-                dst_col.insert(&doc)?;
-                documents_copied += 1;
-            }
-            collections_copied += 1;
+            wtx.commit()?;
         }
-        wtx.commit()?;
+
+        // Stream all documents in bounded-memory chunks and checkpoint periodically so
+        // large databases (>256 MiB) never OOM RAM or grow the target WAL unboundedly.
+        let mut batch = Vec::with_capacity(BACKUP_CHUNK_DOCS.min(256));
+        let mut batch_bytes = 0usize;
+        src_col.for_each_document(|doc| {
+            let doc_len = doc.as_bytes().len();
+            batch_bytes = batch_bytes.saturating_add(doc_len);
+            documents_copied += 1;
+            docs_since_ckpt += 1;
+            bytes_since_ckpt = bytes_since_ckpt.saturating_add(doc_len);
+            batch.push(doc);
+
+            if batch.len() >= BACKUP_CHUNK_DOCS || batch_bytes >= BACKUP_CHUNK_BYTES {
+                flush_backup_batch(
+                    target_db,
+                    col_name,
+                    &mut batch,
+                    &mut batch_bytes,
+                    &mut docs_since_ckpt,
+                    &mut bytes_since_ckpt,
+                )?;
+            }
+            Ok(true)
+        })?;
+
+        flush_backup_batch(
+            target_db,
+            col_name,
+            &mut batch,
+            &mut batch_bytes,
+            &mut docs_since_ckpt,
+            &mut bytes_since_ckpt,
+        )?;
+        collections_copied += 1;
     }
 
     // Checkpoint & seal target so it is standalone (wal_required == false)

@@ -495,35 +495,56 @@ pub fn spillable_sort(
         run_paths.push(spill.write_run(&chunk)?);
     }
 
-    // K-way merge over sorted runs.
-    let mut runs: Vec<std::vec::IntoIter<DocumentBuf>> = Vec::with_capacity(run_paths.len());
+    // Streaming k-way merge over sorted runs using a min-heap (`BinaryHeap`):
+    // holds only ONE active head document per run in memory at a time (O(K) merge memory, O(N log K) time).
+    let mut readers = Vec::with_capacity(run_paths.len());
     for p in &run_paths {
-        runs.push(SpillManager::read_run(p)?.into_iter());
+        readers.push(SpillManager::open_run(p)?);
     }
-    let mut heads: Vec<Option<DocumentBuf>> = runs.iter_mut().map(|r| r.next()).collect();
-    let mut merged = Vec::new();
 
-    loop {
-        ctx.check_cancelled()?;
-        let mut best_idx: Option<usize> = None;
-        for (i, head) in heads.iter().enumerate() {
-            if let Some(cand) = head {
-                match best_idx {
-                    None => best_idx = Some(i),
-                    Some(bi) => {
-                        let best_doc = heads[bi].as_ref().unwrap();
-                        if compare_docs_by_sort(cand, best_doc, sort) == Ordering::Less {
-                            best_idx = Some(i);
-                        }
-                    }
-                }
-            }
+    struct HeapEntry<'a> {
+        doc: DocumentBuf,
+        run_idx: usize,
+        sort: &'a SortSpec,
+    }
+    impl PartialEq for HeapEntry<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.run_idx == other.run_idx
+                && compare_docs_by_sort(&self.doc, &other.doc, self.sort) == Ordering::Equal
         }
-        let Some(winner) = best_idx else {
-            break;
-        };
-        merged.push(heads[winner].take().unwrap());
-        heads[winner] = runs[winner].next();
+    }
+    impl Eq for HeapEntry<'_> {}
+    impl PartialOrd for HeapEntry<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for HeapEntry<'_> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            // Reversed for min-heap behavior in Rust's max-heap BinaryHeap.
+            compare_docs_by_sort(&other.doc, &self.doc, self.sort)
+                .then_with(|| other.run_idx.cmp(&self.run_idx))
+        }
+    }
+
+    let mut heap = std::collections::BinaryHeap::with_capacity(readers.len());
+    for (run_idx, reader) in readers.iter_mut().enumerate() {
+        if let Some(doc) = reader.next_doc()? {
+            heap.push(HeapEntry { doc, run_idx, sort });
+        }
+    }
+
+    let mut merged = Vec::new();
+    while let Some(HeapEntry { doc, run_idx, .. }) = heap.pop() {
+        ctx.check_cancelled()?;
+        merged.push(doc);
+        if let Some(next_doc) = readers[run_idx].next_doc()? {
+            heap.push(HeapEntry {
+                doc: next_doc,
+                run_idx,
+                sort,
+            });
+        }
     }
 
     // `spill` drops here and cleans up all temporary run files automatically!

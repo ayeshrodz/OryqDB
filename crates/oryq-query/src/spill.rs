@@ -166,13 +166,13 @@ impl SpillManager {
         Ok(path)
     }
 
-    /// Reads all documents back from a previously written spill run file.
-    pub fn read_run(path: &PathBuf) -> Result<Vec<DocumentBuf>> {
+    /// Opens a streaming reader over a previously written spill run file.
+    pub fn open_run(path: &PathBuf) -> Result<SpillRunReader> {
         let file = File::open(path).map_err(|err| {
             ErrorEnvelope::new(
                 ErrorCategory::Io,
                 MODULE_ID,
-                "SpillManager::read_run",
+                "SpillManager::open_run",
                 format!("failed to open spill run: {err}"),
             )
             .with_source(err)
@@ -183,63 +183,88 @@ impl SpillManager {
                 ErrorEnvelope::new(
                     ErrorCategory::Io,
                     MODULE_ID,
-                    "SpillManager::read_run",
+                    "SpillManager::open_run",
                     format!("failed to stat spill run: {err}"),
                 )
                 .with_source(err)
             })?
             .len();
-        let mut remaining = file_len;
-        let mut reader = BufReader::new(file);
+        Ok(SpillRunReader {
+            reader: BufReader::new(file),
+            remaining: file_len,
+        })
+    }
+
+    /// Reads all documents back from a previously written spill run file.
+    pub fn read_run(path: &PathBuf) -> Result<Vec<DocumentBuf>> {
+        let mut reader = Self::open_run(path)?;
         let mut docs = Vec::new();
-        let mut len_buf = [0u8; 4];
-        loop {
-            if remaining == 0 {
-                break;
-            }
-            if remaining < 4 {
-                return Err(ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "SpillManager::read_run",
-                    format!("truncated spill record length header ({remaining} trailing bytes)"),
-                ));
-            }
-            reader.read_exact(&mut len_buf).map_err(|err| {
-                ErrorEnvelope::new(
-                    ErrorCategory::Io,
-                    MODULE_ID,
-                    "SpillManager::read_run",
-                    format!("failed reading spill length: {err}"),
-                )
-                .with_source(err)
-            })?;
-            remaining -= 4;
-            let len = u32::from_le_bytes(len_buf) as usize;
-            if len > MAX_SPILL_DOC_BYTES || (len as u64) > remaining {
-                return Err(ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "SpillManager::read_run",
-                    format!(
-                        "corrupt spill record length {len} exceeds remaining file size {remaining}"
-                    ),
-                ));
-            }
-            remaining -= len as u64;
-            let mut raw = vec![0u8; len];
-            reader.read_exact(&mut raw).map_err(|err| {
-                ErrorEnvelope::new(
-                    ErrorCategory::Io,
-                    MODULE_ID,
-                    "SpillManager::read_run",
-                    format!("failed reading spill payload: {err}"),
-                )
-                .with_source(err)
-            })?;
-            docs.push(DocumentBuf::from_bytes(raw)?);
+        while let Some(doc) = reader.next_doc()? {
+            docs.push(doc);
         }
         Ok(docs)
+    }
+}
+
+/// Streaming forward reader over a single length-prefixed spill run file.
+#[derive(Debug)]
+pub struct SpillRunReader {
+    reader: BufReader<File>,
+    remaining: u64,
+}
+
+impl SpillRunReader {
+    /// Reads and decodes the next document from this spill run, or `Ok(None)` at EOF.
+    pub fn next_doc(&mut self) -> Result<Option<DocumentBuf>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        if self.remaining < 4 {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "SpillRunReader::next_doc",
+                format!(
+                    "truncated spill record length header ({} trailing bytes)",
+                    self.remaining
+                ),
+            ));
+        }
+        let mut len_buf = [0u8; 4];
+        self.reader.read_exact(&mut len_buf).map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorCategory::Io,
+                MODULE_ID,
+                "SpillRunReader::next_doc",
+                format!("failed reading spill length: {err}"),
+            )
+            .with_source(err)
+        })?;
+        self.remaining -= 4;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_SPILL_DOC_BYTES || (len as u64) > self.remaining {
+            return Err(ErrorEnvelope::new(
+                ErrorCategory::Corruption,
+                MODULE_ID,
+                "SpillRunReader::next_doc",
+                format!(
+                    "corrupt spill record length {len} exceeds remaining file size {}",
+                    self.remaining
+                ),
+            ));
+        }
+        self.remaining -= len as u64;
+        let mut raw = vec![0u8; len];
+        self.reader.read_exact(&mut raw).map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorCategory::Io,
+                MODULE_ID,
+                "SpillRunReader::next_doc",
+                format!("failed reading spill payload: {err}"),
+            )
+            .with_source(err)
+        })?;
+        Ok(Some(DocumentBuf::from_bytes(raw)?))
     }
 }
 

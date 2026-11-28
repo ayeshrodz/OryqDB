@@ -1,6 +1,5 @@
 //! Compound (up to 16 fields, mixed `Asc`/`Desc`) & multi-key array index provider
-//! with `R=16` prefix-restart compression codec, parallel-array prohibition, and exact
-//! `RecordId` deduplication (`docs/indexing.md` §4.2–§4.4).
+//! with parallel-array prohibition and exact `RecordId` deduplication (`docs/indexing.md` §4.2–§4.4).
 
 use std::collections::BTreeSet;
 
@@ -22,111 +21,6 @@ const RECORD_ID_BYTES: usize = 8;
 pub const COMPOUND_PROVIDER_ID: &str = "index.compound";
 /// Maximum number of fields in a single compound index.
 pub const MAX_COMPOUND_FIELDS: usize = 16;
-/// Prefix-compression restart interval `R = 16` (`docs/indexing.md` §4.2).
-pub const PREFIX_RESTART_INTERVAL: usize = 16;
-
-/// Encodes a sorted slice of index keys using `R=16` prefix compression with restart points.
-pub fn encode_prefix_block(sorted_keys: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&(sorted_keys.len() as u32).to_le_bytes());
-    let mut prev: &[u8] = &[];
-    for (i, key) in sorted_keys.iter().enumerate() {
-        let shared = if i % PREFIX_RESTART_INTERVAL == 0 {
-            0usize
-        } else {
-            prev.iter()
-                .zip(key.iter())
-                .take_while(|(a, b)| a == b)
-                .count()
-        };
-        let suffix = &key[shared..];
-        out.extend_from_slice(&(shared as u16).to_le_bytes());
-        out.extend_from_slice(&(suffix.len() as u16).to_le_bytes());
-        out.extend_from_slice(suffix);
-        prev = key.as_slice();
-    }
-    out
-}
-
-/// Decodes an `R=16` prefix-compressed key block back into exact full keys.
-pub fn decode_prefix_block(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
-    if raw.len() < 4 {
-        return Err(ErrorEnvelope::new(
-            ErrorCategory::Corruption,
-            MODULE_ID,
-            "compound::decode_prefix_block",
-            "truncated prefix block header",
-        ));
-    }
-    let count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
-    let max_entries = (raw.len() - 4) / 4;
-    if count > max_entries {
-        return Err(ErrorEnvelope::new(
-            ErrorCategory::Corruption,
-            MODULE_ID,
-            "compound::decode_prefix_block",
-            format!("prefix block entry count ({count}) exceeds buffer capacity ({max_entries})"),
-        ));
-    }
-    let mut pos = 4;
-    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(count);
-    for i in 0..count {
-        if pos + 4 > raw.len() {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Corruption,
-                MODULE_ID,
-                "compound::decode_prefix_block",
-                "truncated prefix entry header",
-            ));
-        }
-        let shared = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
-        let slen = u16::from_le_bytes(raw[pos + 2..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        if i % PREFIX_RESTART_INTERVAL == 0 && shared != 0 {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Corruption,
-                MODULE_ID,
-                "compound::decode_prefix_block",
-                "non-zero shared prefix on restart key",
-            ));
-        }
-        if pos + slen > raw.len() {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Corruption,
-                MODULE_ID,
-                "compound::decode_prefix_block",
-                "truncated prefix entry suffix",
-            ));
-        }
-        let mut full = if shared > 0 {
-            let prev = keys.last().ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "compound::decode_prefix_block",
-                    "non-zero shared prefix on restart key",
-                )
-            })?;
-            if shared > prev.len() {
-                return Err(ErrorEnvelope::new(
-                    ErrorCategory::Corruption,
-                    MODULE_ID,
-                    "compound::decode_prefix_block",
-                    "shared prefix exceeds previous key length",
-                ));
-            }
-            let mut buf = Vec::with_capacity(shared + slen);
-            buf.extend_from_slice(&prev[..shared]);
-            buf
-        } else {
-            Vec::with_capacity(slen)
-        };
-        full.extend_from_slice(&raw[pos..pos + slen]);
-        pos += slen;
-        keys.push(full);
-    }
-    Ok(keys)
-}
 
 /// Extracts all unique compound/multi-key value prefixes for `doc` under `desc`.
 ///

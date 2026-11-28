@@ -93,16 +93,51 @@ impl<S: PageStore> QuerySource for CoreQuerySource<'_, S> {
     }
 
     fn scan_collection(&self, collection: &str) -> Result<Vec<(RecordId, DocumentBuf)>> {
+        let mut out = Vec::new();
+        self.visit_collection(collection, &mut |rid, doc| {
+            out.push((rid, doc));
+            Ok(true)
+        })?;
+        Ok(out)
+    }
+
+    fn visit_collection(
+        &self,
+        collection: &str,
+        visitor: &mut dyn FnMut(RecordId, DocumentBuf) -> Result<bool>,
+    ) -> Result<()> {
         let data_root = self.with_cached_entry(collection, |e| Ok(e.data_root_page_id))?;
         let tree = BTree::open(data_root, TreeKind::Collection);
-        let pairs = tree.scan_all(self.store)?;
-        let mut out = Vec::with_capacity(pairs.len());
-        for (raw_key, raw_val) in pairs {
-            let rid = decode_record_id(&raw_key)?;
-            let doc = decode_collection_record_from_store(self.store, &raw_val)?;
-            out.push((rid, doc));
+        let mut cur = tree.cursor(self.store);
+        if cur.seek_first()? {
+            while let Some((raw_key, raw_val)) = cur.current() {
+                let rid = decode_record_id(raw_key)?;
+                let doc = decode_collection_record_from_store(self.store, raw_val)?;
+                if !visitor(rid, doc)? {
+                    break;
+                }
+                if !cur.step_next()? {
+                    break;
+                }
+            }
         }
-        Ok(out)
+        Ok(())
+    }
+
+    fn count_collection(&self, collection: &str) -> Result<u64> {
+        let data_root = self.with_cached_entry(collection, |e| Ok(e.data_root_page_id))?;
+        let tree = BTree::open(data_root, TreeKind::Collection);
+        let mut cur = tree.cursor(self.store);
+        let mut count = 0u64;
+        if cur.seek_first()? {
+            while cur.current().is_some() {
+                count += 1;
+                if !cur.step_next()? {
+                    break;
+                }
+            }
+        }
+        Ok(count)
     }
 
     fn get_by_record_id(

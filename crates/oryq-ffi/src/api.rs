@@ -4,7 +4,8 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
 use oryq_core::{
-    parse_json_value_str, to_json_string, Database, DatabaseConfig, SortOrder, Value, ValueView,
+    parse_filter_json, parse_json_value_str, to_json_string, Database, DatabaseConfig, DocumentBuf,
+    SortOrder, SyncMode, Value, ValueView,
 };
 
 use crate::diagnostics::last_error_ptr;
@@ -12,8 +13,8 @@ use crate::guard::{ffi_guard, ffi_guard_preserve_last_error};
 use crate::handles::{OryqCursor, OryqDb, OryqReadTxn, OryqWriteTxn};
 use crate::status::OryqStatus;
 
-/// ABI version packed as `(major << 16) | minor` (`1.2` -> `0x0001_0002`).
-pub const ORYQ_ABI_VERSION: u32 = (1 << 16) | 2;
+/// ABI version packed as `(major << 16) | minor` (`1.3` -> `0x0001_0003`).
+pub const ORYQ_ABI_VERSION: u32 = (1 << 16) | 3;
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -80,14 +81,123 @@ pub unsafe extern "C" fn oryq_free_string(ptr: *mut c_char) {
     }
 }
 
-/// Opens or creates an OryqDB database file at `path_utf8` (pass `":memory:"` for an isolated,
-/// zero-disk ephemeral in-memory database).
+fn parse_config_json(config_json: &str) -> Result<DatabaseConfig, (OryqStatus, String)> {
+    let val = parse_json_value_str(config_json)
+        .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+    let fields = match val {
+        Value::Document(fields) => fields,
+        _ => {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "config_json must be a JSON object".to_owned(),
+            ));
+        }
+    };
+    let mut cfg = DatabaseConfig::default();
+    for (key, value) in fields {
+        match (key.as_str(), value) {
+            ("read_only", Value::Bool(b)) => cfg.read_only = b,
+            ("create_if_missing", Value::Bool(b)) => cfg.create_if_missing = b,
+            ("auto_checkpoint_on_close", Value::Bool(b)) => cfg.auto_checkpoint_on_close = b,
+            ("sync_mode", Value::String(s)) => {
+                cfg.sync_mode = match s.as_str() {
+                    "full" | "Full" => SyncMode::Full,
+                    "normal" | "Normal" => SyncMode::Normal,
+                    "off" | "Off" | "none" | "None" => SyncMode::Off,
+                    other => {
+                        return Err((
+                            OryqStatus::ErrInvalidArgument,
+                            format!("invalid sync_mode '{other}' (expected full|normal|off)"),
+                        ));
+                    }
+                };
+            }
+            ("max_cache_bytes", Value::Int64(n)) if n >= 0 => {
+                cfg.max_cache_bytes = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_cache_bytes exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
+            }
+            ("max_wal_hard_bytes", Value::Int64(n)) if n > 0 => cfg.max_wal_hard_bytes = n as u64,
+            ("wal_autocheckpoint_bytes", Value::Int64(n)) if n >= 0 => {
+                cfg.wal_autocheckpoint_bytes = n as u64;
+            }
+            ("busy_timeout_ms", Value::Int64(n)) if n >= 0 => cfg.busy_timeout_ms = n as u64,
+            ("max_readers", Value::Int64(n)) if n > 0 => {
+                cfg.max_readers = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_readers exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
+            }
+            ("max_document_bytes", Value::Int64(n)) if n > 0 => {
+                cfg.max_document_bytes = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_document_bytes exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
+            }
+            (other, _) => {
+                return Err((
+                    OryqStatus::ErrInvalidArgument,
+                    format!("invalid or unsupported config option '{other}'"),
+                ));
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+fn resolve_cursor_field<'a>(
+    doc: &'a DocumentBuf,
+    field_name: &str,
+) -> Result<Option<ValueView<'a>>, (OryqStatus, String)> {
+    if field_name.is_empty() {
+        return Err((
+            OryqStatus::ErrInvalidArgument,
+            "field path must not be empty".to_owned(),
+        ));
+    }
+    if !field_name.contains('.') {
+        return Ok(doc.view().get_field(field_name));
+    }
+    let mut segments = field_name.split('.');
+    let first = segments.next().unwrap_or("");
+    if first.is_empty() {
+        return Err((
+            OryqStatus::ErrInvalidArgument,
+            format!("invalid dotted field path '{field_name}'"),
+        ));
+    }
+    let mut current = doc.view().get_field(first);
+    for seg in segments {
+        if seg.is_empty() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                format!("invalid dotted field path '{field_name}'"),
+            ));
+        }
+        current = match current {
+            Some(ValueView::Document(sub)) => sub.get_field(seg),
+            _ => return Ok(None),
+        };
+    }
+    Ok(current)
+}
+
+/// Opens or creates an OryqDB database file at `path_utf8` with an optional JSON configuration
+/// object (`config_json_or_null` may be null for defaults).
 ///
 /// # Safety
-/// `path_utf8` must be a valid NUL-terminated UTF-8 string; `out_db` must be a valid writable pointer.
+/// `path_utf8` and `out_db` must be valid pointers; `config_json_or_null` may be null.
 #[no_mangle]
-pub unsafe extern "C" fn oryq_db_open(
+pub unsafe extern "C" fn oryq_db_open_with_config(
     path_utf8: *const c_char,
+    config_json_or_null: *const c_char,
     out_db: *mut *mut OryqDb,
 ) -> OryqStatus {
     ffi_guard(|| {
@@ -102,7 +212,12 @@ pub unsafe extern "C" fn oryq_db_open(
             *out_db = std::ptr::null_mut();
         }
         let path_str = read_cstr(path_utf8, "path_utf8")?;
-        let db = Database::open(Path::new(path_str), DatabaseConfig::default())
+        let cfg = if config_json_or_null.is_null() {
+            DatabaseConfig::default()
+        } else {
+            parse_config_json(read_cstr(config_json_or_null, "config_json")?)?
+        };
+        let db = Database::open(Path::new(path_str), cfg)
             .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
         let boxed = Box::new(OryqDb::new(db));
         // SAFETY: `out_db` is verified non-null and owned by the caller for writing the handle.
@@ -111,6 +226,20 @@ pub unsafe extern "C" fn oryq_db_open(
         }
         Ok(OryqStatus::Ok)
     })
+}
+
+/// Opens or creates an OryqDB database file at `path_utf8` (pass `":memory:"` for an isolated,
+/// zero-disk ephemeral in-memory database).
+///
+/// # Safety
+/// `path_utf8` must be a valid NUL-terminated UTF-8 string; `out_db` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_db_open(
+    path_utf8: *const c_char,
+    out_db: *mut *mut OryqDb,
+) -> OryqStatus {
+    // SAFETY: Caller upholds pointer preconditions; null config uses defaults.
+    unsafe { oryq_db_open_with_config(path_utf8, std::ptr::null(), out_db) }
 }
 
 /// Closes an open [`OryqDb`] handle. Returns `ORYQ_ERR_BUSY` if any child transaction is still open.
@@ -257,6 +386,39 @@ pub unsafe extern "C" fn oryq_write_txn_begin(
         let db_ref = unsafe { &*db };
         let wtx =
             OryqWriteTxn::begin(db_ref).map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        // SAFETY: `out_txn` is non-null and writable.
+        unsafe {
+            *out_txn = Box::into_raw(Box::new(wtx));
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Non-blocking exclusive write transaction acquisition. Returns `ORYQ_ERR_BUSY` immediately
+/// if another writer is active or the database is closing.
+///
+/// # Safety
+/// `db` must be valid; `out_txn` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_write_txn_try_begin(
+    db: *const OryqDb,
+    out_txn: *mut *mut OryqWriteTxn,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if db.is_null() || out_txn.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "db and out_txn must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_txn` is verified non-null; zero-init before fallible work.
+        unsafe {
+            *out_txn = std::ptr::null_mut();
+        }
+        // SAFETY: `db` is valid for this call.
+        let db_ref = unsafe { &*db };
+        let wtx = OryqWriteTxn::try_begin(db_ref)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
         // SAFETY: `out_txn` is non-null and writable.
         unsafe {
             *out_txn = Box::into_raw(Box::new(wtx));
@@ -457,6 +619,313 @@ pub unsafe extern "C" fn oryq_delete_by_id_json(
     })
 }
 
+/// Inserts a JSON array of documents into `collection` inside an open write transaction.
+///
+/// # Safety
+/// `txn`, `collection`, and `docs_array_json` must be valid; `out_inserted_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_insert_many_json(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    docs_array_json: *const c_char,
+    out_inserted_or_null: *mut usize,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if !out_inserted_or_null.is_null() {
+            // SAFETY: `out_inserted_or_null` is verified non-null.
+            unsafe {
+                *out_inserted_or_null = 0;
+            }
+        }
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let json_arr = read_cstr(docs_array_json, "docs_array_json")?;
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let inserted = col
+            .insert_many_json(json_arr)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        if !out_inserted_or_null.is_null() {
+            // SAFETY: `out_inserted_or_null` is verified non-null.
+            unsafe {
+                *out_inserted_or_null = inserted.len();
+            }
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Updates all documents matching `filter_json` using `update_json`.
+///
+/// # Safety
+/// `txn`, `collection`, `filter_json`, and `update_json` must be valid; `out_updated_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_update_many_json(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    filter_json: *const c_char,
+    update_json: *const c_char,
+    out_updated_or_null: *mut usize,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if !out_updated_or_null.is_null() {
+            // SAFETY: `out_updated_or_null` is verified non-null.
+            unsafe {
+                *out_updated_or_null = 0;
+            }
+        }
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let filter = read_cstr(filter_json, "filter_json")?;
+        let upd = read_cstr(update_json, "update_json")?;
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let count = col
+            .update_many_json(filter, upd)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        if !out_updated_or_null.is_null() {
+            // SAFETY: `out_updated_or_null` is verified non-null.
+            unsafe {
+                *out_updated_or_null = count;
+            }
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Deletes all documents matching `filter_json`.
+///
+/// # Safety
+/// `txn`, `collection`, and `filter_json` must be valid; `out_deleted_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_delete_many_json(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    filter_json: *const c_char,
+    out_deleted_or_null: *mut usize,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if !out_deleted_or_null.is_null() {
+            // SAFETY: `out_deleted_or_null` is verified non-null.
+            unsafe {
+                *out_deleted_or_null = 0;
+            }
+        }
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let filter = read_cstr(filter_json, "filter_json")?;
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let count = col
+            .delete_many_json(filter)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        if !out_deleted_or_null.is_null() {
+            // SAFETY: `out_deleted_or_null` is verified non-null.
+            unsafe {
+                *out_deleted_or_null = count;
+            }
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Upserts a JSON document into `collection` (replaces existing doc with matching `_id` or inserts).
+/// Sets `*out_inserted_or_null` to `true` if inserted, `false` if an existing doc was replaced.
+///
+/// # Safety
+/// `txn`, `collection`, and `doc_json` must be valid; `out_inserted_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_upsert_json(
+    txn: *mut OryqWriteTxn,
+    collection: *const c_char,
+    doc_json: *const c_char,
+    out_inserted_or_null: *mut bool,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if !out_inserted_or_null.is_null() {
+            // SAFETY: `out_inserted_or_null` is verified non-null.
+            unsafe {
+                *out_inserted_or_null = false;
+            }
+        }
+        if txn.is_null() {
+            return Err((OryqStatus::ErrInvalidArgument, "txn is null".to_owned()));
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let json = read_cstr(doc_json, "doc_json")?;
+        // SAFETY: `txn` is valid for this call.
+        let wtx = unsafe { &mut *txn }
+            .tx
+            .as_mut()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn finalized".to_owned()))?;
+        let mut col = wtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let inserted = col
+            .upsert_json(json)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        if !out_inserted_or_null.is_null() {
+            // SAFETY: `out_inserted_or_null` is verified non-null.
+            unsafe {
+                *out_inserted_or_null = inserted;
+            }
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Executes a JSON `find()` query with optional filter, projection, sort, skip, and limit
+/// (`limit_or_neg1 < 0` means no limit) on a read transaction and returns an [`OryqCursor`].
+///
+/// # Safety
+/// `txn`, `collection`, and `out_cursor` must be valid; filter/projection/sort pointers may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_find_with_options_json(
+    txn: *const OryqReadTxn,
+    collection: *const c_char,
+    filter_json_or_null: *const c_char,
+    projection_json_or_null: *const c_char,
+    sort_json_or_null: *const c_char,
+    skip: usize,
+    limit_or_neg1: i64,
+    out_cursor: *mut *mut OryqCursor,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() || out_cursor.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "txn and out_cursor must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_cursor` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_cursor = std::ptr::null_mut();
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let filter_opt = if filter_json_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(filter_json_or_null, "filter_json")?)
+        };
+        let proj_opt = if projection_json_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(projection_json_or_null, "projection_json")?)
+        };
+        let sort_opt = if sort_json_or_null.is_null() {
+            None
+        } else {
+            Some(read_cstr(sort_json_or_null, "sort_json")?)
+        };
+        let limit = if limit_or_neg1 < 0 {
+            None
+        } else {
+            Some(limit_or_neg1 as u64)
+        };
+        // SAFETY: `txn` is valid for this call.
+        let rtx = unsafe { &*txn }
+            .tx
+            .as_ref()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn closed".to_owned()))?;
+        let col = rtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let cursor = col
+            .find_json(filter_opt, proj_opt, sort_opt, skip as u64, limit)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        // SAFETY: `out_cursor` is non-null and writable.
+        unsafe {
+            *out_cursor = Box::into_raw(Box::new(OryqCursor::new(cursor)));
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
+/// Counts documents in `collection` matching optional `filter_json_or_null` in O(1) memory.
+///
+/// # Safety
+/// `txn`, `collection`, and `out_count` must be valid; `filter_json_or_null` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn oryq_count_json(
+    txn: *const OryqReadTxn,
+    collection: *const c_char,
+    filter_json_or_null: *const c_char,
+    out_count: *mut u64,
+) -> OryqStatus {
+    ffi_guard(|| {
+        if txn.is_null() || out_count.is_null() {
+            return Err((
+                OryqStatus::ErrInvalidArgument,
+                "txn and out_count must not be null".to_owned(),
+            ));
+        }
+        // SAFETY: `out_count` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_count = 0;
+        }
+        let col_name = read_cstr(collection, "collection")?;
+        let filter_opt = if filter_json_or_null.is_null() {
+            None
+        } else {
+            let s = read_cstr(filter_json_or_null, "filter_json")?;
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    parse_filter_json(s)
+                        .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?,
+                )
+            }
+        };
+        // SAFETY: `txn` is valid for this call.
+        let rtx = unsafe { &*txn }
+            .tx
+            .as_ref()
+            .ok_or_else(|| (OryqStatus::ErrInvalidArgument, "txn closed".to_owned()))?;
+        let col = rtx
+            .collection(col_name)
+            .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?;
+        let count = match filter_opt.as_ref() {
+            Some(expr) => col
+                .count_matching(Some(expr))
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?,
+            None => col
+                .count()
+                .map_err(|e| (OryqStatus::from_error(&e), e.to_string()))?
+                as u64,
+        };
+        // SAFETY: `out_count` is non-null and writable.
+        unsafe {
+            *out_count = count;
+        }
+        Ok(OryqStatus::Ok)
+    })
+}
+
 /// Executes a JSON `find()` query on a read transaction and returns an [`OryqCursor`].
 ///
 /// # Safety
@@ -567,6 +1036,10 @@ pub unsafe extern "C" fn oryq_cursor_get_i64(
                 "cursor and out_val must not be null".to_owned(),
             ));
         }
+        // SAFETY: `out_val` is verified non-null; initialize before fallible work.
+        unsafe {
+            *out_val = 0;
+        }
         let field_name = read_cstr(field, "field")?;
         // SAFETY: `cursor` is valid for this call.
         let cur = unsafe { &*cursor };
@@ -576,7 +1049,7 @@ pub unsafe extern "C" fn oryq_cursor_get_i64(
                 "cursor has no active current document".to_owned(),
             )
         })?;
-        match doc.view().get_field(field_name) {
+        match resolve_cursor_field(doc, field_name)? {
             Some(ValueView::Int64(n)) => {
                 // SAFETY: `out_val` is non-null.
                 unsafe {
@@ -680,7 +1153,7 @@ pub unsafe extern "C" fn oryq_cursor_get_utf8(
                 "cursor has no active current document".to_owned(),
             )
         })?;
-        match doc.view().get_field(field_name) {
+        match resolve_cursor_field(doc, field_name)? {
             Some(ValueView::String(s)) => {
                 // SAFETY: `out_ptr` and `out_len` are non-null and writable.
                 // `s` borrows directly from `cur.current`'s immutable `Arc<[u8]>` buffer.
@@ -732,7 +1205,7 @@ pub unsafe extern "C" fn oryq_cursor_get_f64(
                 "cursor has no active current document".to_owned(),
             )
         })?;
-        match doc.view().get_field(field_name) {
+        match resolve_cursor_field(doc, field_name)? {
             Some(ValueView::Float64(v)) => {
                 // SAFETY: `out_val` is non-null.
                 unsafe {
@@ -782,7 +1255,7 @@ pub unsafe extern "C" fn oryq_cursor_get_bool(
                 "cursor has no active current document".to_owned(),
             )
         })?;
-        match doc.view().get_field(field_name) {
+        match resolve_cursor_field(doc, field_name)? {
             Some(ValueView::Bool(b)) => {
                 // SAFETY: `out_val` is non-null.
                 unsafe {

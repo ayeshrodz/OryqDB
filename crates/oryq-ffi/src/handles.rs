@@ -168,6 +168,21 @@ impl OryqWriteTxn {
             parent_children,
         })
     }
+
+    pub(crate) fn try_begin(parent: &OryqDb) -> oryq_core::Result<Self> {
+        let slot = parent.try_acquire_child_slot()?;
+        let db_owner = Arc::clone(&parent.db);
+        let db_ptr: *const Database = Arc::as_ptr(&db_owner);
+        // SAFETY: `db_owner` is moved into `Self` and dropped strictly AFTER `self.tx` in `Drop`.
+        let db_ref: &'static Database = unsafe { &*db_ptr };
+        let tx = db_ref.try_begin_write()?;
+        let parent_children = slot.disarm();
+        Ok(Self {
+            tx: Some(tx),
+            _db_owner: db_owner,
+            parent_children,
+        })
+    }
 }
 
 impl Drop for OryqWriteTxn {

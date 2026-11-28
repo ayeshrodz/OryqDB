@@ -47,6 +47,10 @@ impl QueryCursor {
 }
 
 /// Executes a `find()` query against `source` within a single snapshot and returns a [`QueryCursor`].
+///
+/// When `options.sort` is `None`, rows are streamed lazily from the underlying B+ tree cursor,
+/// stopping as soon as `skip + limit` matching documents are visited (O(1) extra RAM for
+/// paginated `find({}).limit(k)` queries).
 pub fn execute_find(
     source: &dyn QuerySource,
     collection: &str,
@@ -57,33 +61,50 @@ pub fn execute_find(
     let indexes = source.collection_indexes(collection)?;
     let plan = plan_find(collection, options.filter.as_ref(), &indexes);
 
-    let mut matched = fetch_matching_docs(source, collection, &plan, &indexes, ctx)?;
-
-    // Apply optional sort with memory budget check.
-    if let Some(sort) = &options.sort {
-        let approx_bytes: usize = matched.iter().map(|d| d.as_bytes().len() + 64).sum();
-        let _guard = ctx.budget().reserve(approx_bytes)?;
-        sort_documents(&mut matched, sort);
-    }
-
-    // Apply skip & limit.
-    let skip = usize::try_from(options.skip).unwrap_or(usize::MAX);
-    let mut sliced: Vec<DocumentBuf> = matched.into_iter().skip(skip).collect();
-    if let Some(limit) = options.limit {
-        let lim = usize::try_from(limit).unwrap_or(usize::MAX);
-        sliced.truncate(lim);
-    }
-
-    // Apply projection.
-    let final_rows = if let Some(proj) = &options.projection {
-        let mut projected = Vec::with_capacity(sliced.len());
-        for doc in &sliced {
-            ctx.check_cancelled()?;
-            projected.push(apply_projection(doc, proj)?);
+    let final_rows = if options.limit == Some(0) {
+        // Still invoke the access plan so invalid primary `_id` lookups or collection errors
+        // are validated consistently, without scanning or sorting any rows.
+        visit_matching_docs(source, collection, &plan, &indexes, ctx, &mut |_doc| {
+            Ok(false)
+        })?;
+        Vec::new()
+    } else if let Some(sort) = &options.sort {
+        let matched = fetch_matching_docs(source, collection, &plan, &indexes, ctx, None)?;
+        let sorted = crate::pipeline::spillable_sort(matched, sort, ctx)?;
+        let skip = usize::try_from(options.skip).unwrap_or(usize::MAX);
+        let mut sliced: Vec<DocumentBuf> = sorted.into_iter().skip(skip).collect();
+        if let Some(limit) = options.limit {
+            let lim = usize::try_from(limit).unwrap_or(usize::MAX);
+            sliced.truncate(lim);
         }
-        projected
+        apply_optional_projection(sliced, options.projection.as_ref(), ctx)?
     } else {
-        sliced
+        let skip = options.skip;
+        let limit = options.limit;
+        let mut skipped = 0u64;
+        let mut collected = Vec::new();
+        let proj = options.projection.as_ref();
+        visit_matching_docs(source, collection, &plan, &indexes, ctx, &mut |doc| {
+            if limit == Some(0) {
+                return Ok(false);
+            }
+            if skipped < skip {
+                skipped += 1;
+                return Ok(true);
+            }
+            let out_doc = match proj {
+                Some(p) => apply_projection(&doc, p)?,
+                None => doc,
+            };
+            collected.push(out_doc);
+            if let Some(lim) = limit {
+                if (collected.len() as u64) >= lim {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        collected
     };
 
     ctx.add_docs_returned(final_rows.len() as u64);
@@ -93,7 +114,24 @@ pub fn execute_find(
     })
 }
 
-/// Executes a `count()` query using the same planner and predicate semantics as `execute_find`.
+fn apply_optional_projection(
+    rows: Vec<DocumentBuf>,
+    projection: Option<&ProjectionSpec>,
+    ctx: &QueryContext,
+) -> Result<Vec<DocumentBuf>> {
+    let Some(proj) = projection else {
+        return Ok(rows);
+    };
+    let mut projected = Vec::with_capacity(rows.len());
+    for doc in &rows {
+        ctx.check_cancelled()?;
+        projected.push(apply_projection(doc, proj)?);
+    }
+    Ok(projected)
+}
+
+/// Executes a `count()` query using the same planner and predicate semantics as `execute_find`,
+/// streaming in O(1) memory and using key-only B+ tree counting when unfiltered.
 pub fn execute_count(
     source: &dyn QuerySource,
     collection: &str,
@@ -103,8 +141,15 @@ pub fn execute_count(
     ctx.check_cancelled()?;
     let indexes = source.collection_indexes(collection)?;
     let plan = plan_find(collection, filter, &indexes);
-    let matched = fetch_matching_docs(source, collection, &plan, &indexes, ctx)?;
-    Ok(matched.len() as u64)
+    if matches!(plan.access, AccessPlan::CollectionScan) && plan.residual_filter.is_none() {
+        return source.count_collection(collection);
+    }
+    let mut count = 0u64;
+    visit_matching_docs(source, collection, &plan, &indexes, ctx, &mut |_| {
+        count += 1;
+        Ok(true)
+    })?;
+    Ok(count)
 }
 
 /// Executes a `find()` query and returns the [`ExplainAnalyze`] plan + execution metrics.
@@ -132,8 +177,29 @@ fn fetch_matching_docs(
     plan: &ExplainPlan,
     indexes: &[oryq_index::IndexDescriptor],
     ctx: &QueryContext,
+    max_rows: Option<usize>,
 ) -> Result<Vec<DocumentBuf>> {
     let mut results = Vec::new();
+    visit_matching_docs(source, collection, plan, indexes, ctx, &mut |doc| {
+        results.push(doc);
+        if let Some(lim) = max_rows {
+            if results.len() >= lim {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })?;
+    Ok(results)
+}
+
+fn visit_matching_docs(
+    source: &dyn QuerySource,
+    collection: &str,
+    plan: &ExplainPlan,
+    indexes: &[oryq_index::IndexDescriptor],
+    ctx: &QueryContext,
+    on_match: &mut dyn FnMut(DocumentBuf) -> Result<bool>,
+) -> Result<()> {
     match &plan.access {
         AccessPlan::PrimaryIdLookup { target } => {
             ctx.add_keys_examined(1);
@@ -141,7 +207,7 @@ fn fetch_matching_docs(
                 if let Some(doc) = source.get_by_record_id(collection, rid)? {
                     ctx.add_docs_examined(1);
                     if passes_residual(&doc, plan.residual_filter.as_ref())? {
-                        results.push(doc);
+                        let _ = on_match(doc)?;
                     }
                 }
             }
@@ -156,12 +222,12 @@ fn fetch_matching_docs(
                     ErrorEnvelope::new(
                         ErrorCategory::Internal,
                         MODULE_ID,
-                        "cursor::fetch_matching_docs",
+                        "cursor::visit_matching_docs",
                         format!("planned index {index_id:?} not found in catalog"),
                     )
                 })?;
             let rids = source.scan_secondary_eq(desc, target)?;
-            collect_by_rids(source, collection, rids, plan, ctx, &mut results)?;
+            visit_by_rids(source, collection, rids, plan, ctx, on_match)?;
         }
         AccessPlan::SecondaryRangeScan {
             index_id,
@@ -176,36 +242,36 @@ fn fetch_matching_docs(
                     ErrorEnvelope::new(
                         ErrorCategory::Internal,
                         MODULE_ID,
-                        "cursor::fetch_matching_docs",
+                        "cursor::visit_matching_docs",
                         format!("planned index {index_id:?} not found in catalog"),
                     )
                 })?;
             let lower_ref = lower.as_ref().map(|(v, inc)| (v, *inc));
             let upper_ref = upper.as_ref().map(|(v, inc)| (v, *inc));
             let rids = source.scan_secondary_range(desc, lower_ref, upper_ref)?;
-            collect_by_rids(source, collection, rids, plan, ctx, &mut results)?;
+            visit_by_rids(source, collection, rids, plan, ctx, on_match)?;
         }
         AccessPlan::CollectionScan => {
-            let all = source.scan_collection(collection)?;
-            for (_rid, doc) in all {
+            source.visit_collection(collection, &mut |_rid, doc| {
                 ctx.check_cancelled()?;
                 ctx.add_docs_examined(1);
                 if passes_residual(&doc, plan.residual_filter.as_ref())? {
-                    results.push(doc);
+                    return on_match(doc);
                 }
-            }
+                Ok(true)
+            })?;
         }
     }
-    Ok(results)
+    Ok(())
 }
 
-fn collect_by_rids(
+fn visit_by_rids(
     source: &dyn QuerySource,
     collection: &str,
     rids: Vec<RecordId>,
     plan: &ExplainPlan,
     ctx: &QueryContext,
-    out: &mut Vec<DocumentBuf>,
+    on_match: &mut dyn FnMut(DocumentBuf) -> Result<bool>,
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
     for rid in rids {
@@ -216,8 +282,8 @@ fn collect_by_rids(
         }
         if let Some(doc) = source.get_by_record_id(collection, rid)? {
             ctx.add_docs_examined(1);
-            if passes_residual(&doc, plan.residual_filter.as_ref())? {
-                out.push(doc);
+            if passes_residual(&doc, plan.residual_filter.as_ref())? && !on_match(doc)? {
+                break;
             }
         }
     }

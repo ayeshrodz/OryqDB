@@ -2,7 +2,8 @@
 
 //! `oryq`: Command-line administrative, query, backup, and forensic inspection utility for OryqDB.
 
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -776,6 +777,119 @@ fn run(args: &[String]) -> Result<(), CliError> {
                 )
             }
         }
+        "export" => {
+            if args.len() > 4 {
+                return Err(format!(
+                    "unexpected argument '{}'; usage: oryq export <db> <collection> [file]",
+                    args[4]
+                )
+                .into());
+            }
+            let db_path = req_arg(args, 1, "export <db> <collection> [file]")?;
+            let col_name = req_arg(args, 2, "export <db> <collection> [file]")?;
+            let out_path_opt = args.get(3).map(String::as_str);
+            let db = open_db_readonly(db_path)?;
+            let rtx = db.begin_read().map_err(fmt_err)?;
+            let col = rtx.collection(col_name).map_err(fmt_err)?;
+            if let Some(out_path) = out_path_opt {
+                let file = File::create(out_path)
+                    .map_err(|e| format!("failed to create export file '{out_path}': {e}"))?;
+                let mut writer = BufWriter::new(file);
+                let mut exported = 0usize;
+                let mut write_err: Option<String> = None;
+                col.for_each_document(|doc| {
+                    let line = to_json_string(&doc.view())?;
+                    if let Err(e) = writeln!(writer, "{line}") {
+                        write_err = Some(format!("failed writing export file '{out_path}': {e}"));
+                        return Ok(false);
+                    }
+                    exported += 1;
+                    Ok(true)
+                })
+                .map_err(fmt_err)?;
+                if let Some(err) = write_err {
+                    return Err(err.into());
+                }
+                writer
+                    .flush()
+                    .map_err(|e| format!("failed flushing export file '{out_path}': {e}"))?;
+                out_line(&format!("exported {exported} documents to '{out_path}'"))?;
+            } else {
+                let mut pipe_err: Option<CliError> = None;
+                col.for_each_document(|doc| {
+                    let line = to_json_string(&doc.view())?;
+                    if let Err(e) = out_line(&line) {
+                        pipe_err = Some(e);
+                        return Ok(false);
+                    }
+                    Ok(true)
+                })
+                .map_err(fmt_err)?;
+                if let Some(err) = pipe_err {
+                    return Err(err);
+                }
+            }
+            Ok(())
+        }
+        "import" => {
+            check_exact_args(args, 4, "import <db> <collection> <file>")?;
+            let db_path = req_arg(args, 1, "import <db> <collection> <file>")?;
+            let col_name = req_arg(args, 2, "import <db> <collection> <file>")?;
+            let in_path = req_arg(args, 3, "import <db> <collection> <file>")?;
+            let file = File::open(in_path)
+                .map_err(|e| format!("failed to open import file '{in_path}': {e}"))?;
+            let reader = BufReader::new(file);
+            let db = open_db_rw_create(db_path)?;
+            {
+                let mut wtx = db.begin_write().map_err(fmt_err)?;
+                if !wtx
+                    .list_collections()
+                    .map_err(fmt_err)?
+                    .iter()
+                    .any(|c| c == col_name)
+                {
+                    wtx.create_collection(col_name).map_err(fmt_err)?;
+                }
+                wtx.commit().map_err(fmt_err)?;
+            }
+            const IMPORT_BATCH_SIZE: usize = 1_000;
+            let mut batch: Vec<String> = Vec::with_capacity(IMPORT_BATCH_SIZE);
+            let mut imported = 0usize;
+            for (line_idx, line_res) in reader.lines().enumerate() {
+                let line = line_res.map_err(|e| {
+                    format!("failed reading line {} of '{in_path}': {e}", line_idx + 1)
+                })?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                batch.push(trimmed.to_owned());
+                if batch.len() >= IMPORT_BATCH_SIZE {
+                    let mut wtx = db.begin_write().map_err(fmt_err)?;
+                    {
+                        let mut col = wtx.collection(col_name).map_err(fmt_err)?;
+                        for doc_json in batch.drain(..) {
+                            col.insert_json(&doc_json).map_err(fmt_err)?;
+                            imported += 1;
+                        }
+                    }
+                    wtx.commit().map_err(fmt_err)?;
+                }
+            }
+            if !batch.is_empty() {
+                let mut wtx = db.begin_write().map_err(fmt_err)?;
+                {
+                    let mut col = wtx.collection(col_name).map_err(fmt_err)?;
+                    for doc_json in batch.drain(..) {
+                        col.insert_json(&doc_json).map_err(fmt_err)?;
+                        imported += 1;
+                    }
+                }
+                wtx.commit().map_err(fmt_err)?;
+            }
+            out_line(&format!("imported {imported} documents into '{col_name}'"))?;
+            Ok(())
+        }
         other => Err(format!("unknown command '{other}' (run `oryq --help`)").into()),
     }
 }
@@ -885,6 +999,8 @@ fn print_usage() -> Result<(), CliError> {
            checkpoint <db>\n  \
            vacuum <db>\n  \
            backup <db> <dest>\n  \
+           export <db> <collection> [file]\n  \
+           import <db> <collection> <file>\n  \
            integrity-check <db>\n  \
            inspect <db> <page <id> | wal | locks>\n  \
            --version | --help",
@@ -949,6 +1065,19 @@ mod tests {
         ]))
         .is_ok());
         assert!(run(&s(&["drop-index", &db_s, "users", "idx_age"])).is_ok());
+
+        // Export to JSONL file and import into a fresh DB.
+        let jsonl_path = dir.join("users.jsonl");
+        let jsonl_s = jsonl_path.to_string_lossy().to_string();
+        assert!(run(&s(&["export", &db_s, "users", &jsonl_s])).is_ok());
+        assert!(run(&s(&["export", &db_s, "users"])).is_ok());
+
+        let db2_path = dir.join("imported.oryq");
+        let db2_s = db2_path.to_string_lossy().to_string();
+        assert!(run(&s(&["import", &db2_s, "users_copy", &jsonl_s])).is_ok());
+        let db2 = open_db_readonly(&db2_s).unwrap();
+        let rtx2 = db2.begin_read().unwrap();
+        assert_eq!(rtx2.collection("users_copy").unwrap().count().unwrap(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
