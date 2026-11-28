@@ -141,6 +141,9 @@ fn parse_config_json(config_json: &str) -> Result<DatabaseConfig, (OryqStatus, S
                     )
                 })?;
             }
+            ("compression_threshold_bytes", Value::Null) => {
+                cfg.compression_threshold_bytes = None;
+            }
             ("compression_threshold_bytes", Value::Int64(n)) if n >= 0 => {
                 cfg.compression_threshold_bytes = if n == 0 {
                     None

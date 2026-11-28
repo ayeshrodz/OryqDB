@@ -492,6 +492,7 @@ fn build_in_memory_compacted_image(
         let backup_cfg = DatabaseConfig {
             page_size,
             max_document_bytes: db.max_document_bytes(),
+            compression_threshold_bytes: db.compression_threshold_bytes(),
             max_wal_hard_bytes: u64::MAX / 2,
             ..DatabaseConfig::default()
         };

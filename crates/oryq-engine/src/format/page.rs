@@ -609,7 +609,7 @@ impl<'a> SlottedPageMut<'a> {
     where
         F: FnOnce(&mut [u8]),
     {
-        let needed = SLOT_ENTRY_SIZE + payload_len;
+        let needed = SLOT_ENTRY_SIZE.checked_add(payload_len)?;
         if self.contiguous_free_bytes() < needed {
             if self.contiguous_free_bytes() + usize::from(self.header.fragmented_bytes) >= needed {
                 self.compact_payloads();

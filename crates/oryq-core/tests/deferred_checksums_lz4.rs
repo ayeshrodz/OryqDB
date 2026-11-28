@@ -99,6 +99,14 @@ fn lz4_block_roundtrips_edge_cases_and_rejects_corrupt_bombs() {
             .category(),
         ErrorCategory::Corruption
     );
+    // 6. Allocation bomb guard: tiny 4-byte payload declaring 255 MiB must fail cleanly without OOM.
+    let tiny_bomb = [0x10u8, b'a', 0x00, 0x00];
+    assert_eq!(
+        decompress_block(&tiny_bomb, (1 << 28) - 1, (1 << 28) - 1)
+            .unwrap_err()
+            .category(),
+        ErrorCategory::Corruption
+    );
 }
 
 #[test]

@@ -30,7 +30,7 @@ fn write_ext_len(out: &mut Vec<u8>, mut len: usize) {
 pub fn compress_block(input: &[u8]) -> Vec<u8> {
     let len = input.len();
     let mut out = Vec::with_capacity(len.saturating_add(len / 255 + 16));
-    if len < MF_LIMIT {
+    if len < MF_LIMIT || len > u32::MAX as usize {
         emit_last_literals(&mut out, input);
         return out;
     }
@@ -113,7 +113,12 @@ pub fn decompress_block(input: &[u8], expected_len: usize, max_len: usize) -> Re
             "compressed record uncompressed length {expected_len} exceeds max {max_len}"
         )));
     }
-    let mut out = Vec::with_capacity(expected_len);
+    // Cap initial allocation proportional to actual compressed input size so a tiny corrupt
+    // buffer declaring a huge `expected_len` cannot trigger an OOM pre-allocation bomb.
+    let initial_cap = expected_len
+        .min(input.len().saturating_mul(16).max(64))
+        .min(64 * 1024);
+    let mut out = Vec::with_capacity(initial_cap);
     let mut pos = 0usize;
 
     while pos < input.len() {
@@ -142,7 +147,11 @@ pub fn decompress_block(input: &[u8], expected_len: usize, max_len: usize) -> Re
         if lit_end > input.len() {
             return Err(corrupt("truncated LZ4 literal payload"));
         }
-        if out.len().saturating_add(lit_len) > expected_len {
+        let next_out_len = out
+            .len()
+            .checked_add(lit_len)
+            .ok_or_else(|| corrupt("LZ4 output length overflow"))?;
+        if next_out_len > expected_len {
             return Err(corrupt(
                 "LZ4 literal output exceeds declared uncompressed length",
             ));
@@ -184,7 +193,11 @@ pub fn decompress_block(input: &[u8], expected_len: usize, max_len: usize) -> Re
                 }
             }
         }
-        if out.len().saturating_add(match_len) > expected_len {
+        let next_out_len = out
+            .len()
+            .checked_add(match_len)
+            .ok_or_else(|| corrupt("LZ4 output length overflow"))?;
+        if next_out_len > expected_len {
             return Err(corrupt(
                 "LZ4 match output exceeds declared uncompressed length",
             ));
