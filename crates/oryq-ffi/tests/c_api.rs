@@ -48,7 +48,7 @@ impl Drop for TempDir {
 
 #[test]
 fn ffi_crud_find_lifecycle_and_child_busy_guard() {
-    assert_eq!(oryq_abi_version(), (1 << 16) | 2);
+    assert_eq!(oryq_abi_version(), (1 << 16) | 3);
     // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string.
     let ver = unsafe { CStr::from_ptr(oryq_version()) }.to_str().unwrap();
     assert!(!ver.is_empty());
@@ -616,7 +616,7 @@ fn ffi_v1_2_hybrid_fts_and_vector_search_and_feature_gating() {
 
 #[test]
 fn ffi_rejects_null_arguments_and_catches_panics() {
-    assert_eq!(oryq_abi_version(), (1 << 16) | 2);
+    assert_eq!(oryq_abi_version(), (1 << 16) | 3);
     // SAFETY: `oryq_version` returns a static NUL-terminated ASCII string; `oryq_free_string(null)` is a no-op.
     unsafe {
         assert!(!CStr::from_ptr(oryq_version()).to_str().unwrap().is_empty());

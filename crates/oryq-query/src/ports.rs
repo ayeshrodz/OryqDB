@@ -18,6 +18,26 @@ pub trait QuerySource: Debug {
     /// Full ordered scan of `(RecordId, DocumentBuf)` in `collection`.
     fn scan_collection(&self, collection: &str) -> Result<Vec<(RecordId, DocumentBuf)>>;
 
+    /// Lazily visits `(RecordId, DocumentBuf)` pairs in ascending `RecordId` order, stopping
+    /// immediately as soon as `visitor` returns `Ok(false)` (O(1) RAM for `.limit(k)`).
+    fn visit_collection(
+        &self,
+        collection: &str,
+        visitor: &mut dyn FnMut(RecordId, DocumentBuf) -> Result<bool>,
+    ) -> Result<()> {
+        for (rid, doc) in self.scan_collection(collection)? {
+            if !visitor(rid, doc)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Counts all records in `collection` without decoding document payloads when supported.
+    fn count_collection(&self, collection: &str) -> Result<u64> {
+        Ok(self.scan_collection(collection)?.len() as u64)
+    }
+
     /// Resolves a single document by internal [`RecordId`].
     fn get_by_record_id(
         &self,

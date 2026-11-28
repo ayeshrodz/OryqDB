@@ -11,7 +11,7 @@ use oryq_document::{
     compare_values, decode_physical_patch, encode_document, from_json_str, Decimal128, FieldPath,
     Value, ValueView,
 };
-use oryq_index::{decode_prefix_block, encode_value_key, SortOrder};
+use oryq_index::{encode_value_key, SortOrder};
 use oryq_query::{eval_filter, FilterExpr, FindOptions, SpillManager};
 use oryq_types::ErrorCategory;
 
@@ -495,10 +495,6 @@ fn decimal128_trailing_zeros_and_dos_recursion_allocation_guards() {
     }
     let err = eval_filter(&doc.view(), &expr).unwrap_err();
     assert_eq!(err.category(), ErrorCategory::InvalidArgument);
-
-    let bomb = u32::MAX.to_le_bytes();
-    let err = decode_prefix_block(&bomb).unwrap_err();
-    assert_eq!(err.category(), ErrorCategory::Corruption);
 
     let patch_bomb = [0u8, 0u8, 0xFF, 0xFF];
     let err = decode_physical_patch(&patch_bomb).unwrap_err();

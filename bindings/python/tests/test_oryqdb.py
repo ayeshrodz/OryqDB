@@ -30,7 +30,7 @@ class TestOryqDbPythonBindings(unittest.TestCase):
 
             with Database.open(db_path) as db:
                 self.assertTrue(db.version())
-                self.assertEqual(db.abi_version(), (1, 2))
+                self.assertEqual(db.abi_version(), (1, 3))
 
                 # 1. Create collection, unique index, and insert documents
                 with db.write_txn() as wtx:
@@ -310,6 +310,79 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                     d2 = cur.get_score()
                     self.assertLess(d1, d2)
                     self.assertFalse(cur.step())
+
+    def test_v1_3_config_try_write_batch_crud_find_options_count_and_nested_cursor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="oryqdb_v13_") as tmpdir:
+            db_path = Path(tmpdir) / "v13.oryq"
+            with Database.open(
+                db_path,
+                config={
+                    "sync_mode": "normal",
+                    "busy_timeout_ms": 250,
+                    "wal_autocheckpoint_bytes": 1024 * 1024,
+                },
+            ) as db:
+                with db.write_txn() as wtx:
+                    # Non-blocking try_write_txn must fail immediately with ERR_BUSY while wtx is held.
+                    with self.assertRaises(OryqError) as busy_ctx:
+                        db.try_write_txn()
+                    self.assertEqual(busy_ctx.exception.status, OryqStatus.ERR_BUSY)
+
+                    wtx.create_collection("users")
+                    inserted = wtx.insert_many(
+                        "users",
+                        [
+                            {"_id": 1, "score": 10, "profile": {"age": 31, "city": "Auckland"}},
+                            {"_id": 2, "score": 30, "profile": {"age": 27, "city": "Wellington"}},
+                            {"_id": 3, "score": 20, "profile": {"age": 42, "city": "Christchurch"}},
+                        ],
+                    )
+                    self.assertEqual(inserted, 3)
+
+                    self.assertFalse(
+                        wtx.upsert(
+                            "users",
+                            {"_id": 2, "score": 35, "profile": {"age": 28, "city": "Wellington"}},
+                        )
+                    )
+                    self.assertTrue(
+                        wtx.upsert(
+                            "users",
+                            {"_id": 4, "score": 5, "profile": {"age": 22, "city": "Dunedin"}},
+                        )
+                    )
+                    updated = wtx.update_many(
+                        "users", {"score": {"$gte": 20}}, {"$set": {"tier": "pro"}}
+                    )
+                    self.assertEqual(updated, 2)
+                    deleted = wtx.delete_many("users", {"score": {"$lt": 10}})
+                    self.assertEqual(deleted, 1)
+                    wtx.commit()
+
+                with db.read_txn() as rtx:
+                    self.assertEqual(rtx.count("users"), 3)
+                    self.assertEqual(rtx.count("users", {"tier": "pro"}), 2)
+                    with rtx.find(
+                        "users",
+                        {"score": {"$gte": 10}},
+                        projection={"profile": 1, "score": 1},
+                        sort={"score": -1},
+                        skip=0,
+                        limit=2,
+                    ) as cur:
+                        self.assertTrue(cur.step())
+                        self.assertEqual(cur.get_i64("score"), 35)
+                        self.assertEqual(cur.get_i64("profile.age"), 28)
+                        self.assertEqual(cur.get_utf8("profile.city"), "Wellington")
+                        self.assertTrue(cur.step())
+                        self.assertEqual(cur.get_i64("score"), 20)
+                        self.assertEqual(cur.get_utf8("profile.city"), "Christchurch")
+                        self.assertFalse(cur.step())
+
+            # Re-open strictly read_only via config JSON.
+            with Database.open(db_path, config={"read_only": True, "create_if_missing": False}) as ro:
+                with ro.read_txn() as rtx:
+                    self.assertEqual(rtx.count("users"), 3)
 
 
 if __name__ == "__main__":

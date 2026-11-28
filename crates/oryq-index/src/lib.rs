@@ -14,9 +14,8 @@ pub mod registry;
 pub mod secondary;
 
 pub use compound::{
-    decode_prefix_block, encode_prefix_block, extract_compound_key_prefixes,
-    scan_compound_prefix_eq, CompoundIndexProvider, COMPOUND_PROVIDER_ID, MAX_COMPOUND_FIELDS,
-    PREFIX_RESTART_INTERVAL,
+    extract_compound_key_prefixes, scan_compound_prefix_eq, CompoundIndexProvider,
+    COMPOUND_PROVIDER_ID, MAX_COMPOUND_FIELDS,
 };
 
 pub use descriptor::{

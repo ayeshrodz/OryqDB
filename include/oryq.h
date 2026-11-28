@@ -1,4 +1,4 @@
-/* OryqDB C Application Binary Interface (v1.2)
+/* OryqDB C Application Binary Interface (v1.3)
  * License: MIT
  */
 #ifndef ORYQ_H
@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define ORYQ_ABI_VERSION_MAJOR 1
-#define ORYQ_ABI_VERSION_MINOR 2
+#define ORYQ_ABI_VERSION_MINOR 3
 
 typedef struct OryqDb       OryqDb;
 typedef struct OryqReadTxn  OryqReadTxn;
@@ -58,6 +58,10 @@ void        oryq_free_string(char *ptr);
 
 /* Database Lifecycle & Administration (`path_utf8` accepts `":memory:"` for ephemeral in-memory DBs) */
 oryq_status oryq_db_open(const char *path_utf8, OryqDb **out_db);
+/* Opens a database with optional JSON config (`read_only`, `create_if_missing`, `sync_mode`,
+ * `max_cache_bytes`, `max_wal_hard_bytes`, `wal_autocheckpoint_bytes`, `busy_timeout_ms`,
+ * `auto_checkpoint_on_close`, `max_readers`, `max_document_bytes`). Null uses defaults. (ABI v1.3) */
+oryq_status oryq_db_open_with_config(const char *path_utf8, const char *config_json_or_null, OryqDb **out_db);
 oryq_status oryq_db_close(OryqDb *db);
 oryq_status oryq_db_checkpoint(const OryqDb *db);
 oryq_status oryq_db_vacuum(const OryqDb *db);
@@ -68,6 +72,8 @@ oryq_status oryq_db_integrity_check(const OryqDb *db, bool *out_ok);
 oryq_status oryq_read_txn_begin(const OryqDb *db, OryqReadTxn **out_txn);
 oryq_status oryq_read_txn_close(OryqReadTxn *txn);
 oryq_status oryq_write_txn_begin(const OryqDb *db, OryqWriteTxn **out_txn);
+/* Non-blocking write transaction acquisition; returns ORYQ_ERR_BUSY if a writer is active. (ABI v1.3) */
+oryq_status oryq_write_txn_try_begin(const OryqDb *db, OryqWriteTxn **out_txn);
 oryq_status oryq_write_txn_commit(OryqWriteTxn *txn);
 oryq_status oryq_write_txn_rollback(OryqWriteTxn *txn);
 
@@ -77,19 +83,27 @@ oryq_status oryq_drop_collection(OryqWriteTxn *txn, const char *name);
 oryq_status oryq_create_index(OryqWriteTxn *txn, const char *collection, const char *field_path, int32_t sort_order, bool unique, bool sparse, const char *name_or_null);
 oryq_status oryq_drop_index(OryqWriteTxn *txn, const char *collection, const char *index_name);
 oryq_status oryq_insert_json(OryqWriteTxn *txn, const char *collection, const char *doc_json);
+oryq_status oryq_insert_many_json(OryqWriteTxn *txn, const char *collection, const char *docs_array_json, size_t *out_inserted_or_null);
 oryq_status oryq_update_by_id_json(OryqWriteTxn *txn, const char *collection, const char *id_json, const char *update_json);
+oryq_status oryq_update_many_json(OryqWriteTxn *txn, const char *collection, const char *filter_json, const char *update_json, size_t *out_updated_or_null);
 oryq_status oryq_delete_by_id_json(OryqWriteTxn *txn, const char *collection, const char *id_json);
+oryq_status oryq_delete_many_json(OryqWriteTxn *txn, const char *collection, const char *filter_json, size_t *out_deleted_or_null);
+oryq_status oryq_upsert_json(OryqWriteTxn *txn, const char *collection, const char *doc_json, bool *out_inserted_or_null);
 
 /* Query, Aggregation & Zero-Copy Cursor Accessors */
 oryq_status oryq_find_json(const OryqReadTxn *txn, const char *collection, const char *filter_json, OryqCursor **out_cursor);
+/* Full find query with optional filter, projection, sort, skip, and limit (`limit_or_neg1 < 0` = unlimited). (ABI v1.3) */
+oryq_status oryq_find_with_options_json(const OryqReadTxn *txn, const char *collection, const char *filter_json_or_null, const char *projection_json_or_null, const char *sort_json_or_null, size_t skip, int64_t limit_or_neg1, OryqCursor **out_cursor);
+/* Counts documents in `collection` matching optional `filter_json_or_null` in O(1) memory. (ABI v1.3) */
+oryq_status oryq_count_json(const OryqReadTxn *txn, const char *collection, const char *filter_json_or_null, uint64_t *out_count);
 oryq_status oryq_aggregate_json(const OryqReadTxn *txn, const char *collection, const char *pipeline_json, OryqCursor **out_cursor);
 oryq_status oryq_cursor_next(OryqCursor *cursor);
 oryq_status oryq_cursor_next_json(OryqCursor *cursor, char **out_json);
-/* Top-level field getters on the cursor's current document. */
+/* Top-level or dotted nested field getters (e.g. "age" or "profile.age") on the cursor's current document. */
 oryq_status oryq_cursor_get_i64(const OryqCursor *cursor, const char *field, int64_t *out_val);
 oryq_status oryq_cursor_get_f64(const OryqCursor *cursor, const char *field, double *out_val);
 oryq_status oryq_cursor_get_bool(const OryqCursor *cursor, const char *field, bool *out_val);
-/* Borrowed UTF-8 byte slice for a top-level field (NOT NUL-terminated); valid until next cursor advance or close. */
+/* Borrowed UTF-8 byte slice for a top-level or nested field (NOT NUL-terminated); valid until next cursor advance or close. */
 oryq_status oryq_cursor_get_utf8(const OryqCursor *cursor, const char *field, const char **out_ptr, size_t *out_len);
 /* BM25 relevance score (FTS) or distance (Vector) for the current scored cursor row; returns ORYQ_ERR_NOT_FOUND on unscored cursors. */
 oryq_status oryq_cursor_get_score(const OryqCursor *cursor, double *out_score);

@@ -1,4 +1,4 @@
-"""Official Python ctypes bindings for OryqDB (C ABI v1.2).
+"""Official Python ctypes bindings for OryqDB (C ABI v1.3).
 
 License: MIT
 """
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 __all__ = [
     "OryqStatus",
     "OryqError",
@@ -144,6 +144,8 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
     # Database Lifecycle & Administration
     lib.oryq_db_open.argtypes = [c_char_p, POINTER(c_void_p)]
     lib.oryq_db_open.restype = c_int
+    lib.oryq_db_open_with_config.argtypes = [c_char_p, c_char_p, POINTER(c_void_p)]
+    lib.oryq_db_open_with_config.restype = c_int
     lib.oryq_db_close.argtypes = [c_void_p]
     lib.oryq_db_close.restype = c_int
     lib.oryq_db_checkpoint.argtypes = [c_void_p]
@@ -162,6 +164,8 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.oryq_read_txn_close.restype = c_int
     lib.oryq_write_txn_begin.argtypes = [c_void_p, POINTER(c_void_p)]
     lib.oryq_write_txn_begin.restype = c_int
+    lib.oryq_write_txn_try_begin.argtypes = [c_void_p, POINTER(c_void_p)]
+    lib.oryq_write_txn_try_begin.restype = c_int
     lib.oryq_write_txn_commit.argtypes = [c_void_p]
     lib.oryq_write_txn_commit.restype = c_int
     lib.oryq_write_txn_rollback.argtypes = [c_void_p]
@@ -186,14 +190,41 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.oryq_drop_index.restype = c_int
     lib.oryq_insert_json.argtypes = [c_void_p, c_char_p, c_char_p]
     lib.oryq_insert_json.restype = c_int
+    lib.oryq_insert_many_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(c_size_t)]
+    lib.oryq_insert_many_json.restype = c_int
     lib.oryq_update_by_id_json.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
     lib.oryq_update_by_id_json.restype = c_int
+    lib.oryq_update_many_json.argtypes = [
+        c_void_p,
+        c_char_p,
+        c_char_p,
+        c_char_p,
+        POINTER(c_size_t),
+    ]
+    lib.oryq_update_many_json.restype = c_int
     lib.oryq_delete_by_id_json.argtypes = [c_void_p, c_char_p, c_char_p]
     lib.oryq_delete_by_id_json.restype = c_int
+    lib.oryq_delete_many_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(c_size_t)]
+    lib.oryq_delete_many_json.restype = c_int
+    lib.oryq_upsert_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(c_bool)]
+    lib.oryq_upsert_json.restype = c_int
 
     # Query, Aggregation & Zero-Copy Cursor Accessors
     lib.oryq_find_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(c_void_p)]
     lib.oryq_find_json.restype = c_int
+    lib.oryq_find_with_options_json.argtypes = [
+        c_void_p,
+        c_char_p,
+        c_char_p,
+        c_char_p,
+        c_char_p,
+        c_size_t,
+        c_int64,
+        POINTER(c_void_p),
+    ]
+    lib.oryq_find_with_options_json.restype = c_int
+    lib.oryq_count_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(ctypes.c_uint64)]
+    lib.oryq_count_json.restype = c_int
     lib.oryq_aggregate_json.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(c_void_p)]
     lib.oryq_aggregate_json.restype = c_int
     lib.oryq_cursor_next.argtypes = [c_void_p]
@@ -439,17 +470,50 @@ class ReadTxn:
             raise OryqError(OryqStatus.ERR_INVALID_ARGUMENT, "read transaction is already closed")
         return self._handle
 
-    def find(self, collection: str, filter_doc: Optional[Any] = None) -> Cursor:
+    def find(
+        self,
+        collection: str,
+        filter_doc: Optional[Any] = None,
+        *,
+        projection: Optional[Any] = None,
+        sort: Optional[Any] = None,
+        skip: int = 0,
+        limit: Optional[int] = None,
+    ) -> Cursor:
         h = self._require_open()
+        skip = _require_nonneg_int(skip, "skip")
+        limit_val = -1 if limit is None else _require_nonneg_int(limit, "limit")
         filter_bytes = _to_json_bytes(filter_doc) if filter_doc is not None else None
+        proj_bytes = _to_json_bytes(projection) if projection is not None else None
+        sort_bytes = _to_json_bytes(sort) if sort is not None else None
         out_cursor = ctypes.c_void_p()
         _check(
             self._lib,
-            self._lib.oryq_find_json(
-                h, _cstr(collection, "collection"), filter_bytes, ctypes.byref(out_cursor)
+            self._lib.oryq_find_with_options_json(
+                h,
+                _cstr(collection, "collection"),
+                filter_bytes,
+                proj_bytes,
+                sort_bytes,
+                skip,
+                limit_val,
+                ctypes.byref(out_cursor),
             ),
         )
         return Cursor(self._lib, out_cursor, parent=self)
+
+    def count(self, collection: str, filter_doc: Optional[Any] = None) -> int:
+        """Counts documents in `collection` matching optional `filter_doc` in O(1) memory."""
+        h = self._require_open()
+        filter_bytes = _to_json_bytes(filter_doc) if filter_doc is not None else None
+        out_count = ctypes.c_uint64(0)
+        _check(
+            self._lib,
+            self._lib.oryq_count_json(
+                h, _cstr(collection, "collection"), filter_bytes, ctypes.byref(out_count)
+            ),
+        )
+        return int(out_count.value)
 
     def aggregate(self, collection: str, pipeline: Any) -> Cursor:
         h = self._require_open()
@@ -658,6 +722,20 @@ class WriteTxn:
             ),
         )
 
+    def insert_many(self, collection: str, docs: Sequence[Any]) -> int:
+        """Inserts a sequence of document objects and returns the number inserted."""
+        out_inserted = ctypes.c_size_t(0)
+        _check(
+            self._lib,
+            self._lib.oryq_insert_many_json(
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _to_json_bytes(list(docs)),
+                ctypes.byref(out_inserted),
+            ),
+        )
+        return int(out_inserted.value)
+
     def update_by_id(self, collection: str, doc_id: Any, update: Any) -> None:
         _check(
             self._lib,
@@ -669,6 +747,21 @@ class WriteTxn:
             ),
         )
 
+    def update_many(self, collection: str, filter_doc: Any, update: Any) -> int:
+        """Updates all documents matching `filter_doc` and returns the number updated."""
+        out_updated = ctypes.c_size_t(0)
+        _check(
+            self._lib,
+            self._lib.oryq_update_many_json(
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _to_json_bytes(filter_doc),
+                _to_json_bytes(update),
+                ctypes.byref(out_updated),
+            ),
+        )
+        return int(out_updated.value)
+
     def delete_by_id(self, collection: str, doc_id: Any) -> None:
         _check(
             self._lib,
@@ -678,6 +771,34 @@ class WriteTxn:
                 _cstr(json.dumps(doc_id, separators=(",", ":")), "doc_id"),
             ),
         )
+
+    def delete_many(self, collection: str, filter_doc: Any) -> int:
+        """Deletes all documents matching `filter_doc` and returns the number deleted."""
+        out_deleted = ctypes.c_size_t(0)
+        _check(
+            self._lib,
+            self._lib.oryq_delete_many_json(
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _to_json_bytes(filter_doc),
+                ctypes.byref(out_deleted),
+            ),
+        )
+        return int(out_deleted.value)
+
+    def upsert(self, collection: str, doc: Any) -> bool:
+        """Upserts `doc` by `_id`; returns True if inserted, False if an existing doc was replaced."""
+        out_inserted = ctypes.c_bool(False)
+        _check(
+            self._lib,
+            self._lib.oryq_upsert_json(
+                self._require_open(),
+                _cstr(collection, "collection"),
+                _to_json_bytes(doc),
+                ctypes.byref(out_inserted),
+            ),
+        )
+        return bool(out_inserted.value)
 
     def commit(self) -> None:
         h = self._require_open()
@@ -725,12 +846,21 @@ class Database:
         cls,
         path: Union[str, os.PathLike[str]],
         *,
+        config: Optional[Any] = None,
         lib_path: Optional[Union[str, os.PathLike[str]]] = None,
     ) -> Database:
         """Opens or creates an OryqDB database (pass `":memory:"` for an ephemeral in-memory DB)."""
         lib = load_library(lib_path)
         out_db = ctypes.c_void_p()
-        _check(lib, lib.oryq_db_open(_cstr(str(path), "path"), ctypes.byref(out_db)))
+        if config is None:
+            _check(lib, lib.oryq_db_open(_cstr(str(path), "path"), ctypes.byref(out_db)))
+        else:
+            _check(
+                lib,
+                lib.oryq_db_open_with_config(
+                    _cstr(str(path), "path"), _to_json_bytes(config), ctypes.byref(out_db)
+                ),
+            )
         return cls(lib, out_db)
 
     @classmethod
@@ -763,6 +893,15 @@ class Database:
     def write_txn(self) -> WriteTxn:
         out_txn = ctypes.c_void_p()
         _check(self._lib, self._lib.oryq_write_txn_begin(self._require_open(), ctypes.byref(out_txn)))
+        return WriteTxn(self._lib, out_txn, parent=self)
+
+    def try_write_txn(self) -> WriteTxn:
+        """Non-blocking exclusive write transaction acquisition (raises ERR_BUSY if contended)."""
+        out_txn = ctypes.c_void_p()
+        _check(
+            self._lib,
+            self._lib.oryq_write_txn_try_begin(self._require_open(), ctypes.byref(out_txn)),
+        )
         return WriteTxn(self._lib, out_txn, parent=self)
 
     def checkpoint(self) -> None:

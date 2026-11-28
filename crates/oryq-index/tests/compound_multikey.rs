@@ -3,9 +3,8 @@ use std::sync::Arc;
 use oryq_document::{from_json_str, FieldPath, ValueView};
 use oryq_engine::{EngineConfig, OsVfs, PageSize, StorageEngine};
 use oryq_index::{
-    decode_prefix_block, encode_prefix_block, extract_compound_key_prefixes,
-    scan_compound_prefix_eq, CompoundIndexProvider, IndexDescriptor, IndexFieldSpec, IndexProvider,
-    SortOrder,
+    extract_compound_key_prefixes, scan_compound_prefix_eq, CompoundIndexProvider, IndexDescriptor,
+    IndexFieldSpec, IndexProvider, SortOrder,
 };
 use oryq_types::{ErrorCategory, IndexId, PageId, RecordId};
 
@@ -26,22 +25,6 @@ fn open_temp_engine(label: &str) -> StorageEngine {
     };
     let vfs = Arc::new(OsVfs::new());
     StorageEngine::open(vfs, &db_path, cfg, [7u8; 16]).unwrap()
-}
-
-#[test]
-fn r16_prefix_block_roundtrips_exact_sorted_keys() {
-    let mut keys = Vec::new();
-    for i in 0..40u32 {
-        keys.push(format!("region:nz:user:{i:06}").into_bytes());
-    }
-    let encoded = encode_prefix_block(&keys);
-    let raw_total: usize = keys.iter().map(|k| k.len()).sum();
-    assert!(
-        encoded.len() < raw_total,
-        "R=16 prefix block should compress shared prefixes"
-    );
-    let decoded = decode_prefix_block(&encoded).unwrap();
-    assert_eq!(decoded, keys);
 }
 
 #[test]

@@ -32,4 +32,4 @@ pub use pipeline::{
 pub use planner::plan_find;
 pub use ports::QuerySource;
 pub use predicates::{compare_owned_values, eval_filter, resolve_path};
-pub use spill::SpillManager;
+pub use spill::{SpillManager, SpillRunReader};

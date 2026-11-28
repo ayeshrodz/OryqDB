@@ -17,7 +17,7 @@ use crate::adapters::CoreQuerySource;
 use crate::catalog::{list_collection_names, load_collection_entry, CatalogEntry};
 use crate::write::decode_collection_record_from_store;
 
-const DEFAULT_QUERY_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_QUERY_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 const MODULE_ID: &str = "core";
 
@@ -104,9 +104,41 @@ impl ReadCollection<'_, '_> {
         find_all_in_store(self.tx, &self.entry)
     }
 
+    /// Streams documents in this collection one at a time in O(1) memory,
+    /// stopping early if `visitor` returns `Ok(false)`.
+    pub fn for_each_document<F>(&self, mut visitor: F) -> Result<()>
+    where
+        F: FnMut(DocumentBuf) -> Result<bool>,
+    {
+        let tree = BTree::open(self.entry.data_root_page_id, TreeKind::Collection);
+        let mut cur = tree.cursor(self.tx);
+        if cur.seek_first()? {
+            while let Some((_k, val)) = cur.current() {
+                let doc = crate::write::decode_collection_record_from_store(self.tx, val)?;
+                if !visitor(doc)? {
+                    break;
+                }
+                if !cur.step_next()? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn count(&self) -> Result<usize> {
         let tree = BTree::open(self.entry.data_root_page_id, TreeKind::Collection);
-        Ok(tree.scan_all(self.tx)?.len())
+        let mut cur = tree.cursor(self.tx);
+        let mut count = 0usize;
+        if cur.seek_first()? {
+            while cur.current().is_some() {
+                count += 1;
+                if !cur.step_next()? {
+                    break;
+                }
+            }
+        }
+        Ok(count)
     }
 
     pub fn list_indexes(&self) -> &[IndexDescriptor] {
