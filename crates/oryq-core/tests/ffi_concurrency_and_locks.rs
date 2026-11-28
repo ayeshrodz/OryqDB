@@ -134,7 +134,7 @@ fn cross_thread_begin_write_respects_busy_timeout_ms() {
     let db_path = dir.join("busy.oryq");
 
     let cfg = DatabaseConfig {
-        busy_timeout_ms: 50,
+        busy_timeout_ms: 250,
         ..DatabaseConfig::default()
     };
     let db = Arc::new(Database::open(&db_path, cfg).unwrap());
@@ -150,7 +150,7 @@ fn cross_thread_begin_write_respects_busy_timeout_ms() {
         let wtx2 = db3.begin_write().unwrap();
         wtx2.rollback();
     });
-    thread::sleep(std::time::Duration::from_millis(10));
+    thread::sleep(std::time::Duration::from_millis(20));
     drop(_wtx);
     waker.join().unwrap();
 

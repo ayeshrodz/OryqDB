@@ -142,9 +142,9 @@ impl PageHeader {
         hasher.digest()
     }
 
-    /// Encodes this header (except checksum) into `page[0..24]`, computes `page_checksum`,
-    /// and writes it into `page[24..32]`.
-    pub fn encode_and_checksum(&mut self, page: &mut [u8]) {
+    /// Encodes this header (except checksum) into `page[0..24]` and zeroes `page[24..32]`.
+    #[inline]
+    pub fn encode_without_checksum(&self, page: &mut [u8]) {
         page[0..8].copy_from_slice(&self.page_id.raw().to_le_bytes());
         page[8] = self.page_type as u8;
         page[9] = self.page_flags.bits();
@@ -152,9 +152,22 @@ impl PageHeader {
         page[12..14].copy_from_slice(&self.free_space_end.to_le_bytes());
         page[14..16].copy_from_slice(&self.fragmented_bytes.to_le_bytes());
         page[16..24].copy_from_slice(&self.lsn_tx_id.raw().to_le_bytes());
+        page[24..32].fill(0);
+    }
+
+    /// Computes and writes the canonical `XXH3_64` checksum into `page[24..32]`.
+    #[inline]
+    pub fn stamp_checksum(page: &mut [u8]) -> u64 {
         let checksum = Self::compute_checksum(page);
-        self.page_checksum = checksum;
         page[24..32].copy_from_slice(&checksum.to_le_bytes());
+        checksum
+    }
+
+    /// Encodes this header (except checksum) into `page[0..24]`, computes `page_checksum`,
+    /// and writes it into `page[24..32]`.
+    pub fn encode_and_checksum(&mut self, page: &mut [u8]) {
+        self.encode_without_checksum(page);
+        self.page_checksum = Self::stamp_checksum(page);
     }
 
     /// Decodes and validates a 32-byte header and full-page `XXH3_64` checksum.
@@ -525,6 +538,38 @@ impl<'a> SlottedPageMut<'a> {
         Ok(Self { bytes, header })
     }
 
+    /// Initializes a fresh empty slotted page without computing the initial `XXH3_64` checksum
+    /// (caller must call [`Self::finalize`] or [`Self::finalize_without_checksum`]).
+    pub fn init_unchecksummed(
+        bytes: &'a mut [u8],
+        page_id: PageId,
+        page_type: PageType,
+        page_flags: PageFlags,
+        lsn_tx_id: TxId,
+    ) -> Result<Self> {
+        let page_len = u16::try_from(bytes.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "SlottedPageMut::init_unchecksummed",
+                "page buffer exceeds u16::MAX",
+            )
+        })?;
+        bytes.fill(0);
+        let header = PageHeader {
+            page_id,
+            page_type,
+            page_flags,
+            slot_count: 0,
+            free_space_end: page_len,
+            fragmented_bytes: 0,
+            lsn_tx_id,
+            page_checksum: 0,
+        };
+        header.encode_without_checksum(bytes);
+        Ok(Self { bytes, header })
+    }
+
     /// Opens an existing validated slotted page for mutation under `lsn_tx_id`.
     pub fn from_bytes(
         bytes: &'a mut [u8],
@@ -550,7 +595,21 @@ impl<'a> SlottedPageMut<'a> {
 
     /// Inserts a new payload, returning its assigned slot index, or `None` if insufficient space.
     pub fn insert_slot(&mut self, payload: &[u8], flags: SlotFlags) -> Option<u16> {
-        let needed = SLOT_ENTRY_SIZE + payload.len();
+        self.insert_slot_with(payload.len(), flags, |dst| dst.copy_from_slice(payload))
+    }
+
+    /// Inserts a new payload of `payload_len` bytes written directly into the page buffer via
+    /// `writer`, avoiding intermediate heap allocations.
+    pub fn insert_slot_with<F>(
+        &mut self,
+        payload_len: usize,
+        flags: SlotFlags,
+        writer: F,
+    ) -> Option<u16>
+    where
+        F: FnOnce(&mut [u8]),
+    {
+        let needed = SLOT_ENTRY_SIZE.checked_add(payload_len)?;
         if self.contiguous_free_bytes() < needed {
             if self.contiguous_free_bytes() + usize::from(self.header.fragmented_bytes) >= needed {
                 self.compact_payloads();
@@ -563,10 +622,10 @@ impl<'a> SlottedPageMut<'a> {
         }
 
         let slot_idx = self.header.slot_count;
-        let new_free_end = usize::from(self.header.free_space_end) - payload.len();
-        self.bytes[new_free_end..new_free_end + payload.len()].copy_from_slice(payload);
+        let new_free_end = usize::from(self.header.free_space_end) - payload_len;
+        writer(&mut self.bytes[new_free_end..new_free_end + payload_len]);
 
-        let entry = SlotEntry::new_live(new_free_end as u16, payload.len() as u16, flags);
+        let entry = SlotEntry::new_live(new_free_end as u16, payload_len as u16, flags);
         let dir_off = PAGE_HEADER_SIZE + usize::from(slot_idx) * SLOT_ENTRY_SIZE;
         let mut raw = [0u8; SLOT_ENTRY_SIZE];
         entry.encode(&mut raw);
@@ -644,6 +703,13 @@ impl<'a> SlottedPageMut<'a> {
     /// Writes the updated header and recomputes the full-page `XXH3_64` checksum.
     pub fn finalize(mut self) -> PageHeader {
         self.header.encode_and_checksum(self.bytes);
+        self.header
+    }
+
+    /// Writes the updated header without computing `XXH3_64` (used when `WriteTxn::commit`
+    /// stamps checksums once for all final dirty pages).
+    pub fn finalize_without_checksum(self) -> PageHeader {
+        self.header.encode_without_checksum(self.bytes);
         self.header
     }
 }

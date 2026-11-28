@@ -36,6 +36,7 @@ struct DatabaseInner {
     engine: StorageEngine,
     registries: CoreRegistries,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
     batch_queue: GroupCommitQueue<CoreWriteBatchTx>,
 }
 
@@ -102,6 +103,7 @@ impl Database {
                 engine,
                 registries,
                 max_document_bytes: config.max_document_bytes,
+                compression_threshold_bytes: config.compression_threshold_bytes,
                 batch_queue,
             }),
         })
@@ -117,12 +119,18 @@ impl Database {
         self.inner.max_document_bytes
     }
 
+    #[inline]
+    pub(crate) fn compression_threshold_bytes(&self) -> Option<usize> {
+        self.inner.compression_threshold_bytes
+    }
+
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>> {
         let tx = self.inner.engine.begin_write()?;
         Ok(WriteTransaction::new(
             tx,
             &self.inner.registries,
             self.inner.max_document_bytes,
+            self.inner.compression_threshold_bytes,
         ))
     }
 
@@ -132,6 +140,7 @@ impl Database {
             tx,
             &self.inner.registries,
             self.inner.max_document_bytes,
+            self.inner.compression_threshold_bytes,
         ))
     }
 

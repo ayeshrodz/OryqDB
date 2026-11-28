@@ -65,6 +65,13 @@ pub trait PageStoreMut: PageStore {
     fn write_page(&mut self, page_id: PageId, bytes: &[u8]) -> Result<()>;
     fn allocate_page(&mut self) -> Result<PageId>;
     fn free_page(&mut self, page_id: PageId) -> Result<()>;
+
+    /// When `true`, callers may omit per-write `XXH3_64` page checksums because the store
+    /// stamps canonical checksums once on every final dirty page at commit time.
+    #[inline]
+    fn defer_checksums(&self) -> bool {
+        false
+    }
 }
 
 /// Direct [`PageStore`] / [`PageStoreMut`] adapter backed by a [`Pager`] and optional [`PageCache`].
@@ -380,6 +387,75 @@ pub const fn max_page_usable_bytes(page_size: PageSize) -> usize {
     page_size.bytes() - PAGE_HEADER_SIZE
 }
 
+/// Encodes `entries` into a fresh leaf page image, optionally deferring the `XXH3_64` checksum.
+///
+/// Returns `Ok(None)` if `entries` do not fit into `page_size`.
+pub fn build_leaf_page_opt(
+    page_size: PageSize,
+    page_id: PageId,
+    kind: TreeKind,
+    is_root: bool,
+    lsn_tx_id: TxId,
+    entries: &[LeafEntry],
+    compute_checksum: bool,
+) -> Result<Option<Vec<u8>>> {
+    if leaf_serialized_bytes(entries) > max_page_usable_bytes(page_size) {
+        return Ok(None);
+    }
+    let mut raw = vec![0u8; page_size.bytes()];
+    let flags = if is_root {
+        PageFlags::EMPTY.with(PageFlags::IS_ROOT_PAGE)
+    } else {
+        PageFlags::EMPTY
+    };
+    let mut page = SlottedPageMut::init_unchecksummed(
+        &mut raw,
+        page_id,
+        kind.leaf_page_type(),
+        flags,
+        lsn_tx_id,
+    )?;
+    for entry in entries {
+        let key_len = u16::try_from(entry.key.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "btree::build_leaf_page_opt",
+                "B+ tree key exceeds u16::MAX bytes",
+            )
+        })?;
+        let val_len = u32::try_from(entry.value.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "btree::build_leaf_page_opt",
+                "B+ tree value exceeds u32::MAX bytes",
+            )
+        })?;
+        let payload_len = 2 + entry.key.len() + 4 + entry.value.len();
+        let inserted = page.insert_slot_with(
+            payload_len,
+            SlotFlags::EMPTY.with(SlotFlags::BASE_DOC),
+            |dst| {
+                dst[0..2].copy_from_slice(&key_len.to_le_bytes());
+                let val_off = 2 + entry.key.len();
+                dst[2..val_off].copy_from_slice(&entry.key);
+                dst[val_off..val_off + 4].copy_from_slice(&val_len.to_le_bytes());
+                dst[val_off + 4..].copy_from_slice(&entry.value);
+            },
+        );
+        if inserted.is_none() {
+            return Ok(None);
+        }
+    }
+    if compute_checksum {
+        page.finalize();
+    } else {
+        page.finalize_without_checksum();
+    }
+    Ok(Some(raw))
+}
+
 /// Encodes `entries` into a fresh checksummed leaf page image.
 ///
 /// Returns `Ok(None)` if `entries` do not fit into `page_size`.
@@ -391,7 +467,22 @@ pub fn build_leaf_page(
     lsn_tx_id: TxId,
     entries: &[LeafEntry],
 ) -> Result<Option<Vec<u8>>> {
-    if leaf_serialized_bytes(entries) > max_page_usable_bytes(page_size) {
+    build_leaf_page_opt(page_size, page_id, kind, is_root, lsn_tx_id, entries, true)
+}
+
+/// Encodes `node` into a fresh internal page image, optionally deferring the `XXH3_64` checksum.
+///
+/// Returns `Ok(None)` if `node` does not fit into `page_size`.
+pub fn build_internal_page_opt(
+    page_size: PageSize,
+    page_id: PageId,
+    kind: TreeKind,
+    is_root: bool,
+    lsn_tx_id: TxId,
+    node: &InternalNode,
+    compute_checksum: bool,
+) -> Result<Option<Vec<u8>>> {
+    if internal_serialized_bytes(node) > max_page_usable_bytes(page_size) {
         return Ok(None);
     }
     let mut raw = vec![0u8; page_size.bytes()];
@@ -400,18 +491,49 @@ pub fn build_leaf_page(
     } else {
         PageFlags::EMPTY
     };
-    let mut page =
-        SlottedPageMut::init(&mut raw, page_id, kind.leaf_page_type(), flags, lsn_tx_id)?;
-    for entry in entries {
-        let encoded = encode_leaf_entry(&entry.key, &entry.value)?;
+    let mut page = SlottedPageMut::init_unchecksummed(
+        &mut raw,
+        page_id,
+        kind.internal_page_type(),
+        flags,
+        lsn_tx_id,
+    )?;
+    if page
+        .insert_slot_with(10, SlotFlags::EMPTY, |dst| {
+            dst[0..2].copy_from_slice(&0u16.to_le_bytes());
+            dst[2..10].copy_from_slice(&node.leftmost_child.raw().to_le_bytes());
+        })
+        .is_none()
+    {
+        return Ok(None);
+    }
+    for (sep, child) in &node.separators {
+        let sep_len = u16::try_from(sep.len()).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCategory::InvalidArgument,
+                MODULE_ID,
+                "btree::build_internal_page_opt",
+                "internal separator key exceeds u16::MAX bytes",
+            )
+        })?;
+        let payload_len = 2 + sep.len() + 8;
         if page
-            .insert_slot(&encoded, SlotFlags::EMPTY.with(SlotFlags::BASE_DOC))
+            .insert_slot_with(payload_len, SlotFlags::EMPTY, |dst| {
+                dst[0..2].copy_from_slice(&sep_len.to_le_bytes());
+                let child_off = 2 + sep.len();
+                dst[2..child_off].copy_from_slice(sep);
+                dst[child_off..child_off + 8].copy_from_slice(&child.raw().to_le_bytes());
+            })
             .is_none()
         {
             return Ok(None);
         }
     }
-    page.finalize();
+    if compute_checksum {
+        page.finalize();
+    } else {
+        page.finalize_without_checksum();
+    }
     Ok(Some(raw))
 }
 
@@ -426,34 +548,7 @@ pub fn build_internal_page(
     lsn_tx_id: TxId,
     node: &InternalNode,
 ) -> Result<Option<Vec<u8>>> {
-    if internal_serialized_bytes(node) > max_page_usable_bytes(page_size) {
-        return Ok(None);
-    }
-    let mut raw = vec![0u8; page_size.bytes()];
-    let flags = if is_root {
-        PageFlags::EMPTY.with(PageFlags::IS_ROOT_PAGE)
-    } else {
-        PageFlags::EMPTY
-    };
-    let mut page = SlottedPageMut::init(
-        &mut raw,
-        page_id,
-        kind.internal_page_type(),
-        flags,
-        lsn_tx_id,
-    )?;
-    let sentinel = encode_internal_slot(&[], node.leftmost_child)?;
-    if page.insert_slot(&sentinel, SlotFlags::EMPTY).is_none() {
-        return Ok(None);
-    }
-    for (sep, child) in &node.separators {
-        let encoded = encode_internal_slot(sep, *child)?;
-        if page.insert_slot(&encoded, SlotFlags::EMPTY).is_none() {
-            return Ok(None);
-        }
-    }
-    page.finalize();
-    Ok(Some(raw))
+    build_internal_page_opt(page_size, page_id, kind, is_root, lsn_tx_id, node, true)
 }
 
 fn corrupt(op: &'static str, msg: impl Into<String>) -> ErrorEnvelope {

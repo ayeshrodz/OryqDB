@@ -1,5 +1,6 @@
 //! Atomic statement savepoint orchestration across collection data, indexes, and catalog.
 
+pub mod lz4;
 pub mod statement;
 
 #[cfg(feature = "fts")]
