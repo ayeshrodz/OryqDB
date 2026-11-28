@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 
-__version__ = "0.15.0"
+__version__ = "1.0.0"
 __all__ = [
     "OryqStatus",
     "OryqError",

@@ -6,12 +6,44 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) 
 
 ## [Unreleased]
 
-### Planned
-- `0.14.1` (#45): Index, query, projection, aggregation & DoS bug/security fixes.
-- `0.14.2` (#46): FFI, C ABI, CLI & multi-language bindings security hardening + shared read-only locks.
-- `0.15.0` (#47): O(1)-memory streaming cursors, k-way spill sort, chunked VACUUM/backup, batch CRUD & C ABI options.
-- `0.15.1` (#48): Deferred commit checksums & transparent LZ4 document compression.
-- `1.0.0` (#49): Differential planner fuzzing, full Miri/audit sign-off & cross-platform release CI.
+## [1.0.0] - 2026-11-28
+
+### GA Release (#49 — Format v1 & C ABI v1.3 Freeze, Differential Planner Fuzzing, Miri & Audit Sign-Off)
+- Added 300-query deterministic randomized differential query-planner oracle test suite (`crates/oryq-core/tests/differential_planner_fuzz.rs`) verifying `PrimaryIdLookup`, `SecondaryEqScan`, `SecondaryRangeScan` (across `Secondary`, `Compound`, `Multikey`, `Sparse`, `Asc`/`Desc`, and nested dotted-path indexes), and `CollectionScan` match bit-for-bit across random documents, updates, deletes, sorts, pagination, and `count_matching`.
+- Completed final Nightly Miri verification (0 UB, 0 leaks across `oryq-types`, `oryq-document`, and `oryq-ffi` including `:memory:` C ABI v1.3 CRUD/query/cursor tests) and `cargo audit` (0 vulnerabilities across 51 dependencies).
+- Documented `RECORD_KIND_COMPRESSED` (`0x03`) in `docs/file-format.md`, finalized `docs/PRE_1_0_READINESS_CHECKLIST.md`, and froze `.oryq` Format v1 and C ABI v1.3 for `v1.0.0` GA.
+- Cross-platform release packaging workflow (`.github/workflows/release.yml`) builds and publishes `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc` `oryq` CLI + `liboryq` archives with `SHA256SUMS.txt`.
+
+## [0.15.1] - 2026-11-28
+
+### Performance (#48 — Deferred `WriteTxn` Checksums, Zero-Alloc Leaf Writes & Pure-Safe LZ4)
+- Deferred dirty-page `XXH3_64` checksum computation to `WriteTxn::commit()` (stamped in-place via `Arc::get_mut`) and added zero-allocation `SlottedPageMut::insert_slot_with` leaf/internal serialization (`+33%` faster native Rust batched inserts at `41,286 docs/sec`, `855,440 ops/sec` point lookups, `+32%` faster partial delta updates).
+- Added `#![forbid(unsafe_code)]`, zero-dependency LZ4 raw block codec (`RECORD_KIND_COMPRESSED = 0x03`) with configurable `DatabaseConfig::compression_threshold_bytes` (default `Some(128)`) and OOM pre-allocation bomb guards.
+- Published updated `N = 2,000` & `N = 25,000` SQLite comparison and native Rust benchmarks in `docs/BENCHMARK_RESULTS.md`.
+
+## [0.15.0] - 2026-11-28
+
+### Added (#47 — Streaming Cursors, K-Way Spill Sort, Chunked Backup, Batch CRUD & C ABI v1.3)
+- Upgraded `QuerySource`, `CoreQuerySource`, `execute_find`, `execute_count`, and `ReadCollection::count()` to lazy O(1)-memory streaming and key-only B+ tree counting.
+- Upgraded `spillable_sort` to a streaming k-way `BinaryHeap` merge via `SpillManager::open_run` / `SpillRunReader`.
+- Chunked `backup_to` and `vacuum` into 1,000-doc / 8 MiB batches with periodic `checkpoint(true)`.
+- Added atomic statement-savepoint batch CRUD (`insert_many`, `update_one`, `update_many`, `delete_one`, `delete_many`, `upsert`) in `oryq-core`, C ABI v1.3 (`oryq_db_open_with_config`, `oryq_write_txn_try_begin`, `oryq_find_with_options_json`, `oryq_count_json`, batch CRUD, dotted-path zero-copy cursor accessors), Python bindings, and CLI streaming JSONL `export` / `import`.
+- Removed dead `encode_prefix_block` / `decode_prefix_block` / `PREFIX_RESTART_INTERVAL` from `oryq-index`.
+
+## [0.14.3] - 2026-11-27
+
+### Hardening (#53 — Ponytail Audit Hardening)
+- Deduplicated 5 index `drop_index` DFS loops into `BTree::free_all_pages`, added configurable `busy_timeout_ms` to `EngineConfig` / `DatabaseConfig` / `SingleProcessCoordinator`, synchronized `.NET` `OryqDatabase` with `ReaderWriterLockSlim`, scoped CLI `--help` interception, and routed CLI `count --filter` through `count_matching`.
+
+## [0.14.2] - 2026-11-27
+
+### Security & Concurrency (#46 — FFI/C ABI/CLI/Bindings Hardening & Shared Read-Only Locks)
+- Fixed `OryqDb` close/begin race via atomic `CLOSING_BIT` CAS gate, made `ReadTransaction` `Send + Sync`, guarded re-entrant single-thread `begin_write` (`Busy`), enabled concurrent shared OS/process-local read-only locks, added standalone `parse_json_value_str`, and hardened CLI and Python/Go/Node/.NET bindings.
+
+## [0.14.1] - 2026-11-27
+
+### Fixed (#45 — Query, Index, Projection, Aggregation & DoS Fixes)
+- Fixed multikey secondary/compound indexing and range planning, multi-hop array dotted paths, `Binary` memcomparable order, nested projection exclusion/sibling inclusion, `$group` `Decimal128` & `SumConst`, `Decimal128::parse_str`, JSON/Filter recursion depth limits, CSPRNG `ObjectId`/`UUID`, `0700` spill directories, and full multi-index `integrity_check`.
 
 ## [0.14.0] - 2026-11-26
 
