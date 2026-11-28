@@ -321,7 +321,7 @@ fn flush_backup_batch(
     *batch_bytes = 0;
 
     if *docs_since_ckpt >= BACKUP_CHECKPOINT_DOCS || *bytes_since_ckpt >= BACKUP_CHECKPOINT_BYTES {
-        target_db.checkpoint(false)?;
+        target_db.checkpoint(true)?;
         *docs_since_ckpt = 0;
         *bytes_since_ckpt = 0;
     }

@@ -362,6 +362,9 @@ class TestOryqDbPythonBindings(unittest.TestCase):
                 with db.read_txn() as rtx:
                     self.assertEqual(rtx.count("users"), 3)
                     self.assertEqual(rtx.count("users", {"tier": "pro"}), 2)
+                    with self.assertRaises(OryqError) as lim_ctx:
+                        rtx.find("users", limit=(1 << 63))
+                    self.assertEqual(lim_ctx.exception.status, OryqStatus.ERR_INVALID_ARGUMENT)
                     with rtx.find(
                         "users",
                         {"score": {"$gte": 10}},

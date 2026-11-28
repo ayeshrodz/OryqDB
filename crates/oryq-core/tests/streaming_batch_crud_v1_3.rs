@@ -189,3 +189,57 @@ fn batch_crud_insert_update_delete_and_upsert_work_end_to_end() {
     );
     assert!(db.integrity_check().unwrap().ok);
 }
+
+#[test]
+fn batch_crud_rolls_back_atomically_on_mid_batch_error() {
+    let db = Database::open_in_memory().unwrap();
+    {
+        let mut wtx = db.begin_write().unwrap();
+        wtx.create_collection("items").unwrap();
+        let mut col = wtx.collection("items").unwrap();
+        col.create_index("code", SortOrder::Asc, true, false, Some("idx_code_uniq"))
+            .unwrap();
+        col.insert_json(r#"{"_id": 1, "code": "A"}"#).unwrap();
+
+        // Second item duplicates unique key "A"; entire insert_many_json must roll back.
+        let err = col
+            .insert_many_json(r#"[{"_id": 2, "code": "B"}, {"_id": 3, "code": "A"}]"#)
+            .unwrap_err();
+        assert_eq!(err.category(), ErrorCategory::DuplicateKey);
+        assert!(col
+            .find_by_id(&oryq_document::Value::Int64(2))
+            .unwrap()
+            .is_none());
+
+        // Insert a second valid doc, then attempt update_many that collides on unique key "A".
+        col.insert_json(r#"{"_id": 2, "code": "B"}"#).unwrap();
+        let err2 = col
+            .update_many_json(r#"{}"#, r#"{"$set": {"code": "SAME"}}"#)
+            .unwrap_err();
+        assert_eq!(err2.category(), ErrorCategory::DuplicateKey);
+
+        // Both original docs must remain untouched inside the same open transaction.
+        assert_eq!(
+            col.find_by_id(&oryq_document::Value::Int64(1))
+                .unwrap()
+                .unwrap()
+                .view()
+                .get_field("code")
+                .unwrap()
+                .to_owned_value(),
+            oryq_document::Value::String("A".to_owned())
+        );
+        assert_eq!(
+            col.find_by_id(&oryq_document::Value::Int64(2))
+                .unwrap()
+                .unwrap()
+                .view()
+                .get_field("code")
+                .unwrap()
+                .to_owned_value(),
+            oryq_document::Value::String("B".to_owned())
+        );
+        wtx.commit().unwrap();
+    }
+    assert!(db.integrity_check().unwrap().ok);
+}

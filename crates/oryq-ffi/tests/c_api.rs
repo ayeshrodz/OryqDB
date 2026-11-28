@@ -726,3 +726,125 @@ fn ffi_rejects_null_arguments_and_catches_panics() {
         .unwrap();
     assert!(msg.contains("simulated panic"));
 }
+
+#[test]
+fn ffi_v1_3_config_try_begin_batch_crud_find_options_count_and_nested_cursor() {
+    use oryq::{
+        oryq_count_json, oryq_db_open_with_config, oryq_delete_many_json,
+        oryq_find_with_options_json, oryq_insert_many_json, oryq_update_many_json,
+        oryq_upsert_json, oryq_write_txn_try_begin,
+    };
+
+    let mem = CString::new(":memory:").unwrap();
+    let cfg = CString::new(r#"{"sync_mode":"off","busy_timeout_ms":100}"#).unwrap();
+    let bad_cfg = CString::new(r#"{"unknown_key":1}"#).unwrap();
+    let col = CString::new("users").unwrap();
+    let mut db: *mut OryqDb = ptr::null_mut();
+
+    // SAFETY: All pointers are valid stack locals or NUL-terminated CStrings.
+    unsafe {
+        assert_eq!(
+            oryq_db_open_with_config(mem.as_ptr(), bad_cfg.as_ptr(), &mut db),
+            OryqStatus::ErrInvalidArgument
+        );
+        assert!(db.is_null());
+
+        assert_eq!(
+            oryq_db_open_with_config(mem.as_ptr(), cfg.as_ptr(), &mut db),
+            OryqStatus::Ok
+        );
+        assert!(!db.is_null());
+
+        let mut wtx: *mut OryqWriteTxn = ptr::null_mut();
+        assert_eq!(oryq_write_txn_try_begin(db, &mut wtx), OryqStatus::Ok);
+        let mut wtx2: *mut OryqWriteTxn = ptr::null_mut();
+        assert_eq!(oryq_write_txn_try_begin(db, &mut wtx2), OryqStatus::ErrBusy);
+        assert!(wtx2.is_null());
+
+        assert_eq!(oryq_create_collection(wtx, col.as_ptr()), OryqStatus::Ok);
+        let docs = CString::new(
+            r#"[{"_id":1,"score":10,"meta":{"age":30,"city":"Auckland"}},{"_id":2,"score":20,"meta":{"age":40,"city":"Wellington"}}]"#,
+        )
+        .unwrap();
+        let mut inserted: usize = 0;
+        assert_eq!(
+            oryq_insert_many_json(wtx, col.as_ptr(), docs.as_ptr(), &mut inserted),
+            OryqStatus::Ok
+        );
+        assert_eq!(inserted, 2);
+
+        let upsert_doc =
+            CString::new(r#"{"_id":2,"score":25,"meta":{"age":41,"city":"Wellington"}}"#).unwrap();
+        let mut was_inserted = true;
+        assert_eq!(
+            oryq_upsert_json(wtx, col.as_ptr(), upsert_doc.as_ptr(), &mut was_inserted),
+            OryqStatus::Ok
+        );
+        assert!(!was_inserted);
+
+        let filter = CString::new(r#"{"score":{"$gte":10}}"#).unwrap();
+        let upd = CString::new(r#"{"$inc":{"score":1}}"#).unwrap();
+        let mut updated: usize = 0;
+        assert_eq!(
+            oryq_update_many_json(
+                wtx,
+                col.as_ptr(),
+                filter.as_ptr(),
+                upd.as_ptr(),
+                &mut updated
+            ),
+            OryqStatus::Ok
+        );
+        assert_eq!(updated, 2);
+        assert_eq!(oryq_write_txn_commit(wtx), OryqStatus::Ok);
+
+        let mut rtx: *mut OryqReadTxn = ptr::null_mut();
+        assert_eq!(oryq_read_txn_begin(db, &mut rtx), OryqStatus::Ok);
+        let mut cnt: u64 = 0;
+        assert_eq!(
+            oryq_count_json(rtx, col.as_ptr(), ptr::null(), &mut cnt),
+            OryqStatus::Ok
+        );
+        assert_eq!(cnt, 2);
+
+        let sort = CString::new(r#"{"score":-1}"#).unwrap();
+        let mut cur: *mut OryqCursor = ptr::null_mut();
+        assert_eq!(
+            oryq_find_with_options_json(
+                rtx,
+                col.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                sort.as_ptr(),
+                0,
+                1,
+                &mut cur
+            ),
+            OryqStatus::Ok
+        );
+        assert_eq!(oryq_cursor_next(cur), OryqStatus::Ok);
+        let f_age = CString::new("meta.age").unwrap();
+        let mut age: i64 = 0;
+        assert_eq!(
+            oryq_cursor_get_i64(cur, f_age.as_ptr(), &mut age),
+            OryqStatus::Ok
+        );
+        assert_eq!(age, 41);
+        assert_eq!(oryq_cursor_next(cur), OryqStatus::CursorDone);
+        assert_eq!(oryq_cursor_close(cur), OryqStatus::Ok);
+        assert_eq!(oryq_read_txn_close(rtx), OryqStatus::Ok);
+
+        let mut wtx3: *mut OryqWriteTxn = ptr::null_mut();
+        assert_eq!(oryq_write_txn_begin(db, &mut wtx3), OryqStatus::Ok);
+        let del_filter = CString::new(r#"{"_id":1}"#).unwrap();
+        let mut deleted: usize = 0;
+        assert_eq!(
+            oryq_delete_many_json(wtx3, col.as_ptr(), del_filter.as_ptr(), &mut deleted),
+            OryqStatus::Ok
+        );
+        assert_eq!(deleted, 1);
+        assert_eq!(oryq_write_txn_commit(wtx3), OryqStatus::Ok);
+
+        assert_eq!(oryq_db_close(db), OryqStatus::Ok);
+    }
+}

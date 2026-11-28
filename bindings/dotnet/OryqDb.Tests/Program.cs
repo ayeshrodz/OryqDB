@@ -10,7 +10,7 @@ static void Assert(bool cond, string message)
 
 Assert(!string.IsNullOrEmpty(OryqDatabase.Version()), "version should be non-empty");
 var (maj, min) = OryqDatabase.AbiVersion();
-Assert(maj == 1 && min == 2, $"expected ABI 1.2, got {maj}.{min}");
+Assert(maj == 1 && min >= 2, $"expected ABI 1.x (>= 1.2), got {maj}.{min}");
 
 // 1. Disk database: CRUD, index, zero-copy getters, aggregation, vacuum, auto-seal & backup
 var tmpDir = Path.Combine(Path.GetTempPath(), $"oryqdb_dotnet_{Environment.ProcessId}_{DateTime.UtcNow.Ticks}");

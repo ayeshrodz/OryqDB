@@ -43,7 +43,7 @@ class VectorQuantization(enum.IntEnum):
 
 
 class OryqStatus(enum.IntEnum):
-    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.2)."""
+    """Status codes matching `oryq_status` in `include/oryq.h` (ABI v1.3)."""
 
     OK = 0
     CURSOR_DONE = 1
@@ -279,7 +279,7 @@ def _configure_prototypes(lib: ctypes.CDLL) -> ctypes.CDLL:
 
 
 def load_library(lib_path: Optional[Union[str, os.PathLike[str]]] = None) -> ctypes.CDLL:
-    """Loads `liboryq` and configures all C ABI v1.2 prototypes."""
+    """Loads `liboryq` and configures all C ABI v1.3 prototypes."""
     global _DEFAULT_LIB
     if lib_path is not None:
         return _configure_prototypes(ctypes.CDLL(str(lib_path)))
@@ -482,7 +482,15 @@ class ReadTxn:
     ) -> Cursor:
         h = self._require_open()
         skip = _require_nonneg_int(skip, "skip")
-        limit_val = -1 if limit is None else _require_nonneg_int(limit, "limit")
+        if limit is None:
+            limit_val = -1
+        else:
+            if isinstance(limit, bool) or not isinstance(limit, int) or not (0 <= limit <= (1 << 63) - 1):
+                raise OryqError(
+                    OryqStatus.ERR_INVALID_ARGUMENT,
+                    "limit must be a non-negative integer <= 2^63 - 1",
+                )
+            limit_val = limit
         filter_bytes = _to_json_bytes(filter_doc) if filter_doc is not None else None
         proj_bytes = _to_json_bytes(projection) if projection is not None else None
         sort_bytes = _to_json_bytes(sort) if sort is not None else None

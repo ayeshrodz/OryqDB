@@ -61,7 +61,14 @@ pub fn execute_find(
     let indexes = source.collection_indexes(collection)?;
     let plan = plan_find(collection, options.filter.as_ref(), &indexes);
 
-    let final_rows = if let Some(sort) = &options.sort {
+    let final_rows = if options.limit == Some(0) {
+        // Still invoke the access plan so invalid primary `_id` lookups or collection errors
+        // are validated consistently, without scanning or sorting any rows.
+        visit_matching_docs(source, collection, &plan, &indexes, ctx, &mut |_doc| {
+            Ok(false)
+        })?;
+        Vec::new()
+    } else if let Some(sort) = &options.sort {
         let matched = fetch_matching_docs(source, collection, &plan, &indexes, ctx, None)?;
         let sorted = crate::pipeline::spillable_sort(matched, sort, ctx)?;
         let skip = usize::try_from(options.skip).unwrap_or(usize::MAX);

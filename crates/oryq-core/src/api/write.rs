@@ -143,16 +143,28 @@ impl WriteCollection<'_, '_> {
         self.insert(&doc)
     }
 
-    /// Inserts multiple documents in sequence inside this write transaction.
+    /// Inserts multiple documents atomically inside this write transaction (rolls back the
+    /// entire batch via an internal savepoint if any document fails).
     pub fn insert_many(&mut self, docs: &[DocumentBuf]) -> Result<Vec<(Value, RecordId)>> {
+        let sp = self.tx.savepoint();
+        let saved_entry = self.entry.clone();
         let mut results = Vec::with_capacity(docs.len());
         for doc in docs {
-            results.push(self.insert(doc)?);
+            match self.insert(doc) {
+                Ok(res) => results.push(res),
+                Err(err) => {
+                    let _ = self.tx.rollback_to(sp);
+                    self.entry = saved_entry;
+                    return Err(err);
+                }
+            }
         }
+        self.tx.release_savepoint(sp)?;
         Ok(results)
     }
 
-    /// Parses a JSON array of document objects and inserts each inside this write transaction.
+    /// Parses a JSON array of document objects and inserts all of them atomically inside this
+    /// write transaction (rolls back the entire batch via an internal savepoint on any error).
     pub fn insert_many_json(&mut self, json_array: &str) -> Result<Vec<(Value, RecordId)>> {
         let parsed = parse_json_value_str(json_array)?;
         let items = match parsed {
@@ -166,7 +178,7 @@ impl WriteCollection<'_, '_> {
                 ));
             }
         };
-        let mut results = Vec::with_capacity(items.len());
+        let mut docs = Vec::with_capacity(items.len());
         for item in items {
             let fields = match item {
                 Value::Document(fields) => fields,
@@ -180,9 +192,9 @@ impl WriteCollection<'_, '_> {
                 }
             };
             let (doc, _) = encode_document(&fields, None)?;
-            results.push(self.insert(&doc)?);
+            docs.push(doc);
         }
-        Ok(results)
+        self.insert_many(&docs)
     }
 
     fn find_matching_ids(&self, filter: &FilterExpr, limit: Option<u64>) -> Result<Vec<Value>> {
@@ -250,23 +262,33 @@ impl WriteCollection<'_, '_> {
         self.update_one(&filter, update_json)
     }
 
-    /// Updates all documents matching `filter` using `update_json`, returning the number updated.
+    /// Updates all documents matching `filter` atomically using `update_json`, returning the
+    /// number updated (rolls back the entire batch via an internal savepoint on any error).
     pub fn update_many(&mut self, filter: &FilterExpr, update_json: &str) -> Result<usize> {
         let spec = UpdateSpec::from_json_str(update_json, &self.registries.updates)?;
         let ids = self.find_matching_ids(filter, None)?;
+        let sp = self.tx.savepoint();
+        let saved_entry = self.entry.clone();
         let mut updated = 0usize;
         for id in &ids {
-            if update_by_id_with_entry(
+            match update_by_id_with_entry(
                 self.tx,
                 self.registries,
                 &mut self.entry,
                 id,
                 &spec,
                 self.max_document_bytes,
-            )? {
-                updated += 1;
+            ) {
+                Ok(true) => updated += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = self.tx.rollback_to(sp);
+                    self.entry = saved_entry;
+                    return Err(err);
+                }
             }
         }
+        self.tx.release_savepoint(sp)?;
         Ok(updated)
     }
 
@@ -335,15 +357,25 @@ impl WriteCollection<'_, '_> {
         self.delete_one(&filter)
     }
 
-    /// Deletes all documents matching `filter`, returning the number deleted.
+    /// Deletes all documents matching `filter` atomically, returning the number deleted
+    /// (rolls back the entire batch via an internal savepoint on any error).
     pub fn delete_many(&mut self, filter: &FilterExpr) -> Result<usize> {
         let ids = self.find_matching_ids(filter, None)?;
+        let sp = self.tx.savepoint();
+        let saved_entry = self.entry.clone();
         let mut deleted = 0usize;
         for id in &ids {
-            if delete_by_id_with_entry(self.tx, self.registries, &mut self.entry, id)? {
-                deleted += 1;
+            match delete_by_id_with_entry(self.tx, self.registries, &mut self.entry, id) {
+                Ok(true) => deleted += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = self.tx.rollback_to(sp);
+                    self.entry = saved_entry;
+                    return Err(err);
+                }
             }
         }
+        self.tx.release_savepoint(sp)?;
         Ok(deleted)
     }
 

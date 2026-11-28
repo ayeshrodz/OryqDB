@@ -11,8 +11,8 @@ func TestEndToEndCRUDIndexAggregateVacuumAndBackup(t *testing.T) {
 		t.Fatal("expected non-empty version")
 	}
 	maj, min := ABIVersion()
-	if maj != 1 || min != 2 {
-		t.Fatalf("expected ABI 1.2, got %d.%d", maj, min)
+	if maj != 1 || min < 2 {
+		t.Fatalf("expected ABI 1.x (>= 1.2), got %d.%d", maj, min)
 	}
 
 	dir := t.TempDir()

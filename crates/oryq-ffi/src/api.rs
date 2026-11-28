@@ -112,15 +112,34 @@ fn parse_config_json(config_json: &str) -> Result<DatabaseConfig, (OryqStatus, S
                     }
                 };
             }
-            ("max_cache_bytes", Value::Int64(n)) if n >= 0 => cfg.max_cache_bytes = n as usize,
+            ("max_cache_bytes", Value::Int64(n)) if n >= 0 => {
+                cfg.max_cache_bytes = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_cache_bytes exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
+            }
             ("max_wal_hard_bytes", Value::Int64(n)) if n > 0 => cfg.max_wal_hard_bytes = n as u64,
             ("wal_autocheckpoint_bytes", Value::Int64(n)) if n >= 0 => {
                 cfg.wal_autocheckpoint_bytes = n as u64;
             }
             ("busy_timeout_ms", Value::Int64(n)) if n >= 0 => cfg.busy_timeout_ms = n as u64,
-            ("max_readers", Value::Int64(n)) if n > 0 => cfg.max_readers = n as usize,
+            ("max_readers", Value::Int64(n)) if n > 0 => {
+                cfg.max_readers = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_readers exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
+            }
             ("max_document_bytes", Value::Int64(n)) if n > 0 => {
-                cfg.max_document_bytes = n as usize;
+                cfg.max_document_bytes = usize::try_from(n).map_err(|_| {
+                    (
+                        OryqStatus::ErrInvalidArgument,
+                        "max_document_bytes exceeds platform usize::MAX".to_owned(),
+                    )
+                })?;
             }
             (other, _) => {
                 return Err((

@@ -13,7 +13,9 @@ import {
 
 test("end-to-end CRUD, index, aggregation, vacuum, auto-seal & backup", () => {
   assert.ok(Database.version().length > 0);
-  assert.deepEqual(Database.abiVersion(), [1, 2]);
+  const [abiMajor, abiMinor] = Database.abiVersion();
+  assert.equal(abiMajor, 1);
+  assert.ok(abiMinor >= 2, `expected ABI minor >= 2, got ${abiMinor}`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oryqdb_node_"));
   try {
