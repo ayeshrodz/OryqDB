@@ -149,12 +149,17 @@ fn gen_filter_json(rng: &mut Rng) -> String {
             let op_hi = *rng.pick(&["$lt", "$lte"]);
             format!(r#"{{"score":{{"{op_lo}":{lo},"{op_hi}":{hi}}}}}"#)
         }
-        // Sparse Desc range on rank
-        3 => {
-            let v = (rng.range(25) as i64) - 5;
-            let op = *rng.pick(&["$gt", "$gte", "$lt", "$lte"]);
-            format!(r#"{{"rank":{{"{op}":{v}}}}}"#)
-        }
+        // Sparse Desc eq / null / $exists / range on rank
+        3 => match rng.range(4) {
+            0 => r#"{"rank":null}"#.to_owned(),
+            1 => r#"{"rank":{"$exists":false}}"#.to_owned(),
+            2 => format!(r#"{{"rank":{}}}"#, (rng.range(25) as i64) - 5),
+            _ => {
+                let v = (rng.range(25) as i64) - 5;
+                let op = *rng.pick(&["$gt", "$gte", "$lt", "$lte"]);
+                format!(r#"{{"rank":{{"{op}":{v}}}}}"#)
+            }
+        },
         // Multikey array element equality or empty-array equality
         4 => match rng.range(5) {
             0 => r#"{"tags":[]}"#.to_owned(),
@@ -310,14 +315,32 @@ fn differential_planner_oracle_matches_collection_scan_across_300_random_queries
                 .unwrap();
         }
 
-        // Apply 30 identical random updates and 20 random deletes to verify index maintenance.
-        for _ in 0..30 {
+        // Apply 30 identical random updates (mutating/unsetting all indexed fields including
+        // multikey arrays, sparse fields, compound keys, and nested paths) and 20 random deletes.
+        for step in 0..30 {
             let id = oryq_document::Value::Int64(1 + rng.range(150) as i64);
-            let new_score = (rng.range(50) as i64) - 10;
-            let upd = format!(
-                r#"{{"$set":{{"score":{new_score},"opt":{}}}}}"#,
-                rng.range(8)
-            );
+            let upd = match step % 4 {
+                0 => {
+                    let new_score = (rng.range(50) as i64) - 10;
+                    let c = *rng.pick(&["alpha", "beta", "gamma", "delta"]);
+                    format!(
+                        r#"{{"$set":{{"score":{new_score},"cat":"{c}","opt":{}}}}}"#,
+                        rng.range(8)
+                    )
+                }
+                1 => format!(
+                    r#"{{"$set":{{"tags":[{},{}],"rank":null}}}}"#,
+                    rng.range(12),
+                    rng.range(12)
+                ),
+                2 => r#"{"$set":{"tags":[],"meta":{"tier":3}},"$unset":{"rank":"","opt":""}}"#
+                    .to_owned(),
+                _ => format!(
+                    r#"{{"$set":{{"rank":{},"meta":{{"tier":{}}}}}}}"#,
+                    (rng.range(25) as i64) - 5,
+                    rng.range(5)
+                ),
+            };
             let r1 = wtx
                 .collection("oracle")
                 .unwrap()
@@ -350,15 +373,20 @@ fn differential_planner_oracle_matches_collection_scan_across_300_random_queries
     let oracle = rtx.collection("oracle").unwrap();
     let indexed = rtx.collection("indexed").unwrap();
 
+    // Ground-truth full collection snapshot for brute-force predicate evaluation (zero indexes,
+    // including bypassing primary `_id` lookup so PrimaryIdLookup is tested against CollectionScan).
+    let oracle_all_docs = oracle.find_all().unwrap();
     let mut plan_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
 
     for trial in 0..300usize {
         let filter_json = gen_filter_json(&mut rng);
         let filter = oryq_core::parse_filter_json(&filter_json).unwrap();
 
-        let o_cur = oracle
-            .find_json(Some(&filter_json), None, None, 0, None)
-            .unwrap();
+        let o_matched: Vec<oryq_document::DocumentBuf> = oracle_all_docs
+            .iter()
+            .filter(|doc| oryq_query::eval_filter(&doc.view(), &filter).unwrap())
+            .cloned()
+            .collect();
         let i_cur = indexed
             .find_json(Some(&filter_json), None, None, 0, None)
             .unwrap();
@@ -371,20 +399,19 @@ fn differential_planner_oracle_matches_collection_scan_across_300_random_queries
         };
         *plan_counts.entry(plan_kind).or_insert(0) += 1;
 
-        let o_ids = collect_id_set(&o_cur.collect_all());
+        let o_ids = collect_id_set(&o_matched);
         let i_ids = collect_id_set(&i_cur.collect_all());
         assert_eq!(
             i_ids, o_ids,
-            "trial {trial}: indexed ({plan_kind}) diverged from CollectionScan on filter {filter_json}"
+            "trial {trial}: indexed ({plan_kind}) diverged from brute-force CollectionScan on filter {filter_json}"
         );
 
-        let o_cnt = oracle.count_matching(Some(&filter)).unwrap();
         let i_cnt = indexed.count_matching(Some(&filter)).unwrap();
         assert_eq!(
-            i_cnt, o_cnt,
+            i_cnt as usize,
+            o_ids.len(),
             "trial {trial}: count_matching diverged on filter {filter_json}"
         );
-        assert_eq!(i_cnt as usize, i_ids.len());
 
         // Every 5th trial also verifies deterministic sort + skip + limit parity.
         if trial % 5 == 0 {

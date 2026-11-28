@@ -101,8 +101,6 @@ Freelist pages (`0x06`) are trunks: `32..40` next trunk (`u64 LE`, 0 end), `40..
 
 Page 0 bytes `512..page_size` are reserved zero, never an inline catalog. `catalog_root_page_id` names an ordinary page. Root changes live in WAL commit metadata until checkpoint. A new file initializes a catalog root and two identical logical header states, syncs database/WAL and directory entries before reporting creation success.
 
-### 4.2 Section B:
-
 ### 4.2 Section B: `OryqDoc` v1 & State-Normalized Delta Patch Encoding
 
 #### Base `OryqDoc` Layout

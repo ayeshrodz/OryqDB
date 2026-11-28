@@ -672,6 +672,7 @@ evidence = [
     "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "cargo audit",
     "cargo +nightly miri test -p oryq-types -p oryq-document",
+    "MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p oryq-ffi --test c_api",
     "python3 -m unittest discover -s bindings/python/tests -v",
     "cargo run -p xtask -- architecture --base origin/main",
     "python3 tools/validate_design_docs.py",
