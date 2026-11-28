@@ -24,6 +24,10 @@ pub struct DatabaseConfig {
     /// Maximum milliseconds `begin_write()` waits for an active writer before returning
     /// `ErrorCategory::Busy` (`5_000` ms default; `0` waits indefinitely).
     pub busy_timeout_ms: u64,
+    /// Optional minimum encoded `OryqDoc` byte length above which transparent pure-safe LZ4
+    /// block compression (`RECORD_KIND_COMPRESSED`) is attempted (`Some(128)` default; `None`
+    /// disables compression). Documents are only stored compressed when strictly smaller.
+    pub compression_threshold_bytes: Option<usize>,
 }
 
 impl Default for DatabaseConfig {
@@ -42,6 +46,7 @@ impl Default for DatabaseConfig {
             auto_checkpoint_on_close: true,
             wal_autocheckpoint_bytes: eng.wal_autocheckpoint_bytes,
             busy_timeout_ms: eng.busy_timeout_ms,
+            compression_threshold_bytes: Some(128),
         }
     }
 }

@@ -15,9 +15,10 @@ pub use cursor::BTreeCursor;
 pub use delete::btree_delete;
 pub use insert::btree_insert;
 pub use layout::{
-    build_internal_page, build_leaf_page, decode_internal_slot, decode_leaf_entry,
-    encode_internal_slot, encode_leaf_entry, read_internal_node, read_leaf_entries, InternalNode,
-    LeafEntry, PageStore, PageStoreMut, PagerPageStore, TreeKind, MAX_BTREE_HEIGHT,
+    build_internal_page, build_internal_page_opt, build_leaf_page, build_leaf_page_opt,
+    decode_internal_slot, decode_leaf_entry, encode_internal_slot, encode_leaf_entry,
+    read_internal_node, read_leaf_entries, InternalNode, LeafEntry, PageStore, PageStoreMut,
+    PagerPageStore, TreeKind, MAX_BTREE_HEIGHT,
 };
 pub use search::{btree_get, descend_to_leaf, DescentFrame};
 
@@ -38,7 +39,8 @@ impl BTree {
         let root = store.allocate_page()?;
         let page_size = store.page_size();
         let lsn = store.writer_tx_id();
-        let raw = build_leaf_page(page_size, root, kind, true, lsn, &[])?
+        let checksum = !store.defer_checksums();
+        let raw = build_leaf_page_opt(page_size, root, kind, true, lsn, &[], checksum)?
             .expect("empty leaf always fits");
         store.write_page(root, &raw)?;
         Ok(Self { root, kind })
@@ -126,7 +128,7 @@ impl BTree {
                 continue;
             }
             let bytes = store.read_page(pid)?;
-            let view = crate::format::SlottedPageView::parse(&bytes, pid)?;
+            let view = crate::format::SlottedPageView::parse_verified(&bytes, pid)?;
             if TreeKind::is_internal(view.header().page_type) {
                 let node = read_internal_node(&bytes, pid)?;
                 stack.push(node.leftmost_child);

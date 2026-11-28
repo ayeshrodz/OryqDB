@@ -143,7 +143,17 @@ impl<'a> WriteTxn<'a> {
     pub fn commit(mut self) -> Result<CommitReceipt> {
         self.flush_retired_pages_to_freelist()?;
         self.undo_log.clear();
-        let ordered: BTreeMap<PageId, Arc<[u8]>> = self.dirty_pages.drain().collect();
+        let mut ordered: BTreeMap<PageId, Arc<[u8]>> = BTreeMap::new();
+        for (pid, mut bytes) in self.dirty_pages.drain() {
+            if let Some(slice) = Arc::get_mut(&mut bytes) {
+                PageHeader::stamp_checksum(slice);
+                ordered.insert(pid, bytes);
+            } else {
+                let mut cloned = bytes.to_vec();
+                PageHeader::stamp_checksum(&mut cloned);
+                ordered.insert(pid, Arc::from(cloned));
+            }
+        }
         self.meta.latest_tx_id = self.tx_id;
         let receipt = self
             .engine
@@ -408,8 +418,9 @@ impl PageStoreMut for WriteTxn<'_> {
                 "page slice length does not match configured page_size",
             ));
         }
-        // Validate page header checksum, slotted layout, and lsn_tx_id match before buffering.
-        let hdr = PageHeader::decode_and_verify(bytes, page_id)?;
+        // Validate page header layout, slotted structure, and lsn_tx_id match before buffering.
+        // Full-page `XXH3_64` checksums are stamped once per final dirty page in `commit()`.
+        let hdr = PageHeader::decode_without_checksum(bytes, page_id)?;
         if crate::btree::TreeKind::is_leaf(hdr.page_type)
             || crate::btree::TreeKind::is_internal(hdr.page_type)
         {
@@ -465,5 +476,10 @@ impl PageStoreMut for WriteTxn<'_> {
         }
         self.retired_pages.push(page_id);
         Ok(())
+    }
+
+    #[inline]
+    fn defer_checksums(&self) -> bool {
+        true
     }
 }

@@ -299,7 +299,11 @@ fn in_memory_edge_cases_readonly_create_flag_and_custom_memory_vfs_vacuum() {
     //    must still be detected as in-memory and perform zero-disk VACUUM cleanly.
     let vfs = Arc::new(MemoryVfs::new());
     let virtual_path = Path::new("custom_virtual_db.oryq");
-    let db = Database::open_with_io(vfs.clone(), virtual_path, DatabaseConfig::default()).unwrap();
+    let cfg = DatabaseConfig {
+        compression_threshold_bytes: None,
+        ..DatabaseConfig::default()
+    };
+    let db = Database::open_with_io(vfs.clone(), virtual_path, cfg).unwrap();
     assert!(db.is_in_memory());
     {
         let mut wtx = db.begin_write().unwrap();

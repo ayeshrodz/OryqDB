@@ -3,10 +3,11 @@
 use oryq_types::{ErrorCategory, ErrorEnvelope, PageId, Result};
 
 use crate::btree::layout::{
-    build_internal_page, build_leaf_page, leaf_serialized_bytes, max_page_usable_bytes,
+    build_internal_page_opt, build_leaf_page_opt, leaf_serialized_bytes, max_page_usable_bytes,
     read_internal_node, read_leaf_entries, InternalNode, LeafEntry, PageStoreMut, TreeKind,
 };
 use crate::btree::search::descend_to_leaf;
+use crate::format::SLOT_ENTRY_SIZE;
 
 const MODULE_ID: &str = "engine";
 
@@ -21,18 +22,14 @@ pub fn btree_insert(
     value: &[u8],
 ) -> Result<(PageId, Option<Vec<u8>>)> {
     let page_size = store.page_size();
-    let single_entry = [LeafEntry {
-        key: key.to_vec(),
-        value: value.to_vec(),
-    }];
-    if leaf_serialized_bytes(&single_entry) > max_page_usable_bytes(page_size) {
+    let single_entry_bytes = SLOT_ENTRY_SIZE + 2 + key.len() + 4 + value.len();
+    if single_entry_bytes > max_page_usable_bytes(page_size) {
         return Err(ErrorEnvelope::new(
             ErrorCategory::InvalidArgument,
             MODULE_ID,
             "btree::btree_insert",
             format!(
-                "single entry ({} bytes) exceeds maximum B+ tree leaf capacity ({} bytes); use overflow storage",
-                leaf_serialized_bytes(&single_entry),
+                "single entry ({single_entry_bytes} bytes) exceeds maximum B+ tree leaf capacity ({} bytes); use overflow storage",
                 max_page_usable_bytes(page_size)
             ),
         ));
@@ -61,10 +58,13 @@ pub fn btree_insert(
         };
 
     let lsn = store.writer_tx_id();
+    let checksum = !store.defer_checksums();
     let is_root = path.is_empty();
 
     // Fast path: updated leaf fits in a single page.
-    if let Some(raw) = build_leaf_page(page_size, leaf_pid, kind, is_root, lsn, &entries)? {
+    if let Some(raw) =
+        build_leaf_page_opt(page_size, leaf_pid, kind, is_root, lsn, &entries, checksum)?
+    {
         store.write_page(leaf_pid, &raw)?;
         return Ok((root, previous));
     }
@@ -80,24 +80,40 @@ pub fn btree_insert(
     let promoted_key = right_entries[0].key.clone();
 
     let right_pid = store.allocate_page()?;
-    let left_raw = build_leaf_page(page_size, leaf_pid, kind, false, lsn, &left_entries)?
-        .ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCategory::Internal,
-                MODULE_ID,
-                "btree::btree_insert",
-                "left leaf half unexpectedly exceeded page capacity after split",
-            )
-        })?;
-    let right_raw = build_leaf_page(page_size, right_pid, kind, false, lsn, &right_entries)?
-        .ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCategory::Internal,
-                MODULE_ID,
-                "btree::btree_insert",
-                "right leaf half unexpectedly exceeded page capacity after split",
-            )
-        })?;
+    let left_raw = build_leaf_page_opt(
+        page_size,
+        leaf_pid,
+        kind,
+        false,
+        lsn,
+        &left_entries,
+        checksum,
+    )?
+    .ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorCategory::Internal,
+            MODULE_ID,
+            "btree::btree_insert",
+            "left leaf half unexpectedly exceeded page capacity after split",
+        )
+    })?;
+    let right_raw = build_leaf_page_opt(
+        page_size,
+        right_pid,
+        kind,
+        false,
+        lsn,
+        &right_entries,
+        checksum,
+    )?
+    .ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorCategory::Internal,
+            MODULE_ID,
+            "btree::btree_insert",
+            "right leaf half unexpectedly exceeded page capacity after split",
+        )
+    })?;
 
     store.write_page(leaf_pid, &left_raw)?;
     store.write_page(right_pid, &right_raw)?;
@@ -118,9 +134,15 @@ pub fn btree_insert(
         node.separators.insert(insert_pos, (sep_key, right_child));
 
         let parent_is_root = path.is_empty();
-        if let Some(raw) =
-            build_internal_page(page_size, frame.page_id, kind, parent_is_root, lsn, &node)?
-        {
+        if let Some(raw) = build_internal_page_opt(
+            page_size,
+            frame.page_id,
+            kind,
+            parent_is_root,
+            lsn,
+            &node,
+            checksum,
+        )? {
             store.write_page(frame.page_id, &raw)?;
             return Ok((root, previous));
         }
@@ -136,8 +158,9 @@ pub fn btree_insert(
         };
         let new_right_pid = store.allocate_page()?;
 
-        let left_raw = build_internal_page(page_size, frame.page_id, kind, false, lsn, &node)?
-            .ok_or_else(|| {
+        let left_raw =
+            build_internal_page_opt(page_size, frame.page_id, kind, false, lsn, &node, checksum)?
+                .ok_or_else(|| {
                 ErrorEnvelope::new(
                     ErrorCategory::Internal,
                     MODULE_ID,
@@ -145,16 +168,23 @@ pub fn btree_insert(
                     "left internal half unexpectedly exceeded page capacity",
                 )
             })?;
-        let right_raw =
-            build_internal_page(page_size, new_right_pid, kind, false, lsn, &right_node)?
-                .ok_or_else(|| {
-                    ErrorEnvelope::new(
-                        ErrorCategory::Internal,
-                        MODULE_ID,
-                        "btree::btree_insert",
-                        "right internal half unexpectedly exceeded page capacity",
-                    )
-                })?;
+        let right_raw = build_internal_page_opt(
+            page_size,
+            new_right_pid,
+            kind,
+            false,
+            lsn,
+            &right_node,
+            checksum,
+        )?
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCategory::Internal,
+                MODULE_ID,
+                "btree::btree_insert",
+                "right internal half unexpectedly exceeded page capacity",
+            )
+        })?;
 
         store.write_page(frame.page_id, &left_raw)?;
         store.write_page(new_right_pid, &right_raw)?;
@@ -170,8 +200,16 @@ pub fn btree_insert(
         leftmost_child: left_child,
         separators: vec![(sep_key, right_child)],
     };
-    let root_raw = build_internal_page(page_size, new_root_pid, kind, true, lsn, &new_root_node)?
-        .ok_or_else(|| {
+    let root_raw = build_internal_page_opt(
+        page_size,
+        new_root_pid,
+        kind,
+        true,
+        lsn,
+        &new_root_node,
+        checksum,
+    )?
+    .ok_or_else(|| {
         ErrorEnvelope::new(
             ErrorCategory::Internal,
             MODULE_ID,

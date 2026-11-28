@@ -626,3 +626,34 @@ evidence = [
     "python3 -m unittest discover -s bindings/python/tests -v",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0033"
+modules = ["engine", "core", "ffi"]
+files = [
+    "crates/oryq-engine/src/format/page.rs",
+    "crates/oryq-engine/src/btree/layout.rs",
+    "crates/oryq-engine/src/btree/mod.rs",
+    "crates/oryq-engine/src/btree/insert.rs",
+    "crates/oryq-engine/src/btree/delete.rs",
+    "crates/oryq-engine/src/transaction/write.rs",
+    "crates/oryq-core/src/config.rs",
+    "crates/oryq-core/src/database.rs",
+    "crates/oryq-core/src/admin.rs",
+    "crates/oryq-core/src/api/write.rs",
+    "crates/oryq-core/src/write/mod.rs",
+    "crates/oryq-core/src/write/lz4.rs",
+    "crates/oryq-core/src/write/statement.rs",
+    "crates/oryq-ffi/src/api.rs",
+    "docs/BENCHMARK_RESULTS.md",
+]
+reason = "Implement Issue #48 (v0.15.1): defer WriteTxn dirty-page XXH3_64 checksum stamping to commit(), add zero-allocation SlottedPageMut::insert_slot_with leaf/internal serialization, add pure-safe zero-dependency LZ4 block compression (RECORD_KIND_COMPRESSED = 0x03) with configurable compression_threshold_bytes, and publish updated N=2,000 & N=25,000 SQLite benchmarks."
+compatibility = "api_change"
+evidence = [
+    "cargo test --workspace --all-features",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "python3 tools/bench_vs_sqlite.py --docs 2000",
+    "python3 tools/bench_vs_sqlite.py --docs 25000",
+    "cargo run -p xtask -- architecture --base origin/main",
+]

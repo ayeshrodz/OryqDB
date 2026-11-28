@@ -41,6 +41,8 @@ const MODULE_ID: &str = "core";
 const RECORD_KIND_INLINE: u8 = 0x00;
 const RECORD_KIND_DELTA_CHAIN: u8 = 0x01;
 const RECORD_KIND_OVERFLOW: u8 = 0x02;
+const RECORD_KIND_COMPRESSED: u8 = 0x03;
+const DEFAULT_COMPRESSION_THRESHOLD_BYTES: Option<usize> = Some(128);
 /// Maximum valid binary `OryqDoc` length (`256 MiB - 1`, `docs/file-format.md` §5).
 const MAX_ORYQDOC_BYTES: usize = (1 << 28) - 1;
 /// Maximum number of chained physical delta patches before automatic compaction (`docs/file-format.md` §4.2).
@@ -119,20 +121,74 @@ pub fn encode_collection_record(doc: &DocumentBuf) -> Vec<u8> {
     out
 }
 
-/// Persists `doc` either inline (`0x00`) when it fits comfortably in a collection leaf page,
-/// or across chained `PageType::Overflow` pages (`0x02` + 16-byte [`OverflowRef`]).
-fn store_collection_record(tx: &mut WriteTxn<'_>, doc: &DocumentBuf) -> Result<Vec<u8>> {
+/// Persists `doc` using transparent LZ4 compression (`0x03`) when `compression_threshold_bytes`
+/// is met and compression strictly reduces size, inline (`0x00`) when it fits in a collection
+/// leaf page, or across chained `PageType::Overflow` pages (`0x02` + 16-byte [`OverflowRef`]).
+fn store_collection_record(
+    tx: &mut WriteTxn<'_>,
+    doc: &DocumentBuf,
+    compression_threshold_bytes: Option<usize>,
+) -> Result<Vec<u8>> {
     let max_inline = max_inline_record_bytes(tx.page_size());
-    if doc.len() < max_inline {
+    let raw = doc.as_bytes();
+
+    if compression_threshold_bytes.is_some_and(|threshold| raw.len() >= threshold) {
+        let compressed = crate::write::lz4::compress_block(raw);
+        // Only store compressed when `[uncompressed_len: u32][lz4_bytes]` is strictly smaller.
+        if 4 + compressed.len() < raw.len() {
+            if 1 + 4 + compressed.len() < max_inline {
+                let mut out = Vec::with_capacity(1 + 4 + compressed.len());
+                out.push(RECORD_KIND_COMPRESSED);
+                out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+                out.extend_from_slice(&compressed);
+                return Ok(out);
+            }
+            let mut framed = Vec::with_capacity(4 + compressed.len());
+            framed.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            framed.extend_from_slice(&compressed);
+            let oref = OverflowStore::write_in_store(tx, &framed, RECORD_KIND_COMPRESSED)?;
+            let mut out = [0u8; 1 + OVERFLOW_REF_SIZE];
+            out[0] = RECORD_KIND_OVERFLOW;
+            let mut ref_buf = [0u8; OVERFLOW_REF_SIZE];
+            oref.encode(&mut ref_buf);
+            out[1..].copy_from_slice(&ref_buf);
+            return Ok(out.to_vec());
+        }
+    }
+
+    if raw.len() < max_inline {
         return Ok(encode_collection_record(doc));
     }
-    let oref = OverflowStore::write_in_store(tx, doc.as_bytes(), RECORD_KIND_INLINE)?;
+    let oref = OverflowStore::write_in_store(tx, raw, RECORD_KIND_INLINE)?;
     let mut out = [0u8; 1 + OVERFLOW_REF_SIZE];
     out[0] = RECORD_KIND_OVERFLOW;
     let mut ref_buf = [0u8; OVERFLOW_REF_SIZE];
     oref.encode(&mut ref_buf);
     out[1..].copy_from_slice(&ref_buf);
     Ok(out.to_vec())
+}
+
+fn decode_compressed_payload(body: &[u8]) -> Result<DocumentBuf> {
+    if body.len() < 4 {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::decode_compressed_payload",
+            "truncated compressed record length header",
+        ));
+    }
+    let expected_len = u32::from_le_bytes(body[0..4].try_into().unwrap()) as usize;
+    if !(8..=MAX_ORYQDOC_BYTES).contains(&expected_len) {
+        return Err(ErrorEnvelope::new(
+            ErrorCategory::Corruption,
+            MODULE_ID,
+            "write::decode_compressed_payload",
+            format!("compressed document length {expected_len} outside valid OryqDoc bounds"),
+        ));
+    }
+    let decompressed =
+        crate::write::lz4::decompress_block(&body[4..], expected_len, MAX_ORYQDOC_BYTES)?;
+    DocumentBuf::from_bytes(decompressed)
 }
 
 /// Retires any chained `PageType::Overflow` pages referenced by an existing `0x02` record value.
@@ -168,33 +224,48 @@ pub fn decode_collection_record_from_store(
             )
         })?;
         let oref = OverflowRef::decode(raw_ref)?;
-        if oref.original_tag != RECORD_KIND_INLINE {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Corruption,
-                MODULE_ID,
-                "write::decode_collection_record_from_store",
-                format!(
-                    "unsupported overflow original_tag 0x{:02x}",
-                    oref.original_tag
-                ),
-            ));
+        match oref.original_tag {
+            RECORD_KIND_INLINE => {
+                let total = oref.total_len as usize;
+                if !(8..=MAX_ORYQDOC_BYTES).contains(&total) {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Corruption,
+                        MODULE_ID,
+                        "write::decode_collection_record_from_store",
+                        format!("overflow document total_len {total} outside valid OryqDoc bounds"),
+                    ));
+                }
+                let (blob, _) = OverflowStore::read_from_store(store, &oref, None)?;
+                return DocumentBuf::from_bytes(blob);
+            }
+            RECORD_KIND_COMPRESSED => {
+                let total = oref.total_len as usize;
+                if !(4..=MAX_ORYQDOC_BYTES + 4).contains(&total) {
+                    return Err(ErrorEnvelope::new(
+                        ErrorCategory::Corruption,
+                        MODULE_ID,
+                        "write::decode_collection_record_from_store",
+                        format!("compressed overflow total_len {total} outside valid bounds"),
+                    ));
+                }
+                let (blob, _) = OverflowStore::read_from_store(store, &oref, None)?;
+                return decode_compressed_payload(&blob);
+            }
+            other => {
+                return Err(ErrorEnvelope::new(
+                    ErrorCategory::Corruption,
+                    MODULE_ID,
+                    "write::decode_collection_record_from_store",
+                    format!("unsupported overflow original_tag 0x{other:02x}"),
+                ));
+            }
         }
-        let total = oref.total_len as usize;
-        if !(8..=MAX_ORYQDOC_BYTES).contains(&total) {
-            return Err(ErrorEnvelope::new(
-                ErrorCategory::Corruption,
-                MODULE_ID,
-                "write::decode_collection_record_from_store",
-                format!("overflow document total_len {total} outside valid OryqDoc bounds"),
-            ));
-        }
-        let (blob, _) = OverflowStore::read_from_store(store, &oref, None)?;
-        return DocumentBuf::from_bytes(blob);
     }
     decode_collection_record(raw)
 }
 
-/// Decodes an inline (`0x00`) or delta-chained (`0x01`) collection record into a [`DocumentBuf`].
+/// Decodes an inline (`0x00`), delta-chained (`0x01`), or compressed (`0x03`) collection record
+/// into a [`DocumentBuf`].
 pub fn decode_collection_record(raw: &[u8]) -> Result<DocumentBuf> {
     let (&kind, body) = raw.split_first().ok_or_else(|| {
         ErrorEnvelope::new(
@@ -206,6 +277,7 @@ pub fn decode_collection_record(raw: &[u8]) -> Result<DocumentBuf> {
     })?;
     match kind {
         RECORD_KIND_INLINE => DocumentBuf::from_bytes(body),
+        RECORD_KIND_COMPRESSED => decode_compressed_payload(body),
         RECORD_KIND_DELTA_CHAIN => {
             let (base, patches, _bloom) = parse_delta_chain_record(body)?;
             let patch_slices: Vec<&[u8]> = patches.iter().map(|p| p.as_slice()).collect();
@@ -306,6 +378,7 @@ fn append_or_compact_record(
     patch_bytes: &[u8],
     patch_bloom: u64,
     fallback_compacted: &DocumentBuf,
+    compression_threshold_bytes: Option<usize>,
 ) -> Result<Vec<u8>> {
     let max_inline = max_inline_record_bytes(tx.page_size());
     let (&kind, body) = raw_existing.split_first().ok_or_else(|| {
@@ -318,7 +391,10 @@ fn append_or_compact_record(
     })?;
     if !matches!(
         kind,
-        RECORD_KIND_INLINE | RECORD_KIND_DELTA_CHAIN | RECORD_KIND_OVERFLOW
+        RECORD_KIND_INLINE
+            | RECORD_KIND_DELTA_CHAIN
+            | RECORD_KIND_OVERFLOW
+            | RECORD_KIND_COMPRESSED
     ) {
         return Err(ErrorEnvelope::new(
             ErrorCategory::UnsupportedFeature,
@@ -329,14 +405,14 @@ fn append_or_compact_record(
     }
     if patch_bytes.is_empty() {
         free_record_overflow_if_any(tx, raw_existing)?;
-        return store_collection_record(tx, fallback_compacted);
+        return store_collection_record(tx, fallback_compacted, compression_threshold_bytes);
     }
 
     match kind {
         RECORD_KIND_INLINE => {
             let projected = 1 + 1 + 8 + 4 + body.len() + 4 + patch_bytes.len();
             if projected > max_inline {
-                store_collection_record(tx, fallback_compacted)
+                store_collection_record(tx, fallback_compacted, compression_threshold_bytes)
             } else {
                 Ok(encode_delta_chain_record(
                     body,
@@ -355,13 +431,13 @@ fn append_or_compact_record(
                 let budget = BudgetHandle::new(BudgetDomain::Transaction, 16 * 1024 * 1024);
                 let compacted = DocumentRecordCompactor.compact(&base, &patch_slices, &budget)?;
                 let doc = DocumentBuf::from_bytes(compacted)?;
-                store_collection_record(tx, &doc)
+                store_collection_record(tx, &doc, compression_threshold_bytes)
             } else {
                 patches.insert(0, patch_bytes.to_vec());
                 let total_patches: usize = patches.iter().map(|p| 4 + p.len()).sum();
                 let projected = 1 + 1 + 8 + 4 + base.len() + total_patches;
                 if projected > max_inline {
-                    store_collection_record(tx, fallback_compacted)
+                    store_collection_record(tx, fallback_compacted, compression_threshold_bytes)
                 } else {
                     Ok(encode_delta_chain_record(
                         &base,
@@ -373,7 +449,10 @@ fn append_or_compact_record(
         }
         RECORD_KIND_OVERFLOW => {
             free_record_overflow_if_any(tx, raw_existing)?;
-            store_collection_record(tx, fallback_compacted)
+            store_collection_record(tx, fallback_compacted, compression_threshold_bytes)
+        }
+        RECORD_KIND_COMPRESSED => {
+            store_collection_record(tx, fallback_compacted, compression_threshold_bytes)
         }
         _ => unreachable!("storage_kind validated above"),
     }
@@ -503,7 +582,14 @@ pub fn insert_doc_stmt(
                 format!("collection '{collection_name}' does not exist"),
             )
         })?;
-    insert_doc_with_entry(tx, registries, &mut entry, doc, max_document_bytes)
+    insert_doc_with_entry(
+        tx,
+        registries,
+        &mut entry,
+        doc,
+        max_document_bytes,
+        DEFAULT_COMPRESSION_THRESHOLD_BYTES,
+    )
 }
 
 /// Inserts `doc` using a pre-loaded [`CatalogEntry`], updating `entry` in place only on success.
@@ -513,6 +599,7 @@ pub(crate) fn insert_doc_with_entry(
     entry: &mut CatalogEntry,
     doc: &DocumentBuf,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
 ) -> Result<(Value, RecordId)> {
     let doc_with_id = ensure_document_id(doc)?;
     if doc_with_id.len() > max_document_bytes {
@@ -542,7 +629,7 @@ pub(crate) fn insert_doc_with_entry(
 
         let mut data_tree = BTree::open(next_entry.data_root_page_id, TreeKind::Collection);
         let rec_key = encode_record_id(record_id);
-        let rec_val = store_collection_record(tx, &doc_with_id)?;
+        let rec_val = store_collection_record(tx, &doc_with_id, compression_threshold_bytes)?;
         data_tree.insert(tx, &rec_key, &rec_val)?;
         next_entry.data_root_page_id = data_tree.root();
 
@@ -596,6 +683,7 @@ pub fn update_by_id_stmt(
         id_value,
         update_spec,
         max_document_bytes,
+        DEFAULT_COMPRESSION_THRESHOLD_BYTES,
     )
 }
 
@@ -608,6 +696,7 @@ pub(crate) fn update_by_id_with_entry(
     id_value: &Value,
     update_spec: &UpdateSpec,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
 ) -> Result<bool> {
     let sp = tx.savepoint();
     let mut next_entry = entry.clone();
@@ -662,6 +751,7 @@ pub(crate) fn update_by_id_with_entry(
             &mutated.patch_bytes,
             mutated.bloom_mask,
             &mutated.updated_doc,
+            compression_threshold_bytes,
         )?;
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
         let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
@@ -723,6 +813,7 @@ pub fn replace_by_id_stmt(
         id_value,
         replacement,
         max_document_bytes,
+        DEFAULT_COMPRESSION_THRESHOLD_BYTES,
     )
 }
 
@@ -734,6 +825,7 @@ pub(crate) fn replace_by_id_with_entry(
     id_value: &Value,
     replacement: &DocumentBuf,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
 ) -> Result<bool> {
     if replacement.len() > max_document_bytes {
         return Err(ErrorEnvelope::new(
@@ -774,7 +866,7 @@ pub(crate) fn replace_by_id_with_entry(
         validate_replacement_doc(&existing_doc.view(), &replacement.view())?;
 
         free_record_overflow_if_any(tx, &raw)?;
-        let new_rec_val = store_collection_record(tx, replacement)?;
+        let new_rec_val = store_collection_record(tx, replacement, compression_threshold_bytes)?;
         data_tree.insert(tx, &rec_key, &new_rec_val)?;
         let mut catalog_changed = data_tree.root() != next_entry.data_root_page_id;
         next_entry.data_root_page_id = data_tree.root();
@@ -1074,7 +1166,7 @@ fn free_collection_tree_pages(tx: &mut WriteTxn<'_>, root: PageId) -> Result<()>
             continue;
         }
         let bytes = tx.read_page(pid)?;
-        let view = SlottedPageView::parse(&bytes, pid)?;
+        let view = SlottedPageView::parse_verified(&bytes, pid)?;
         let ptype = view.header().page_type;
         if TreeKind::is_internal(ptype) {
             let node = read_internal_node(&bytes, pid)?;

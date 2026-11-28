@@ -28,6 +28,7 @@ pub struct WriteTransaction<'db> {
     tx: WriteTxn<'db>,
     registries: &'db CoreRegistries,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
 }
 
 impl<'db> WriteTransaction<'db> {
@@ -35,11 +36,13 @@ impl<'db> WriteTransaction<'db> {
         tx: WriteTxn<'db>,
         registries: &'db CoreRegistries,
         max_document_bytes: usize,
+        compression_threshold_bytes: Option<usize>,
     ) -> Self {
         Self {
             tx,
             registries,
             max_document_bytes,
+            compression_threshold_bytes,
         }
     }
 
@@ -76,6 +79,7 @@ impl<'db> WriteTransaction<'db> {
             registries: self.registries,
             entry,
             max_document_bytes: self.max_document_bytes,
+            compression_threshold_bytes: self.compression_threshold_bytes,
         })
     }
 
@@ -112,6 +116,7 @@ pub struct WriteCollection<'tx, 'db> {
     registries: &'db CoreRegistries,
     entry: CatalogEntry,
     max_document_bytes: usize,
+    compression_threshold_bytes: Option<usize>,
 }
 
 impl WriteCollection<'_, '_> {
@@ -135,6 +140,7 @@ impl WriteCollection<'_, '_> {
             &mut self.entry,
             doc,
             self.max_document_bytes,
+            self.compression_threshold_bytes,
         )
     }
 
@@ -236,6 +242,7 @@ impl WriteCollection<'_, '_> {
             id,
             &spec,
             self.max_document_bytes,
+            self.compression_threshold_bytes,
         )
     }
 
@@ -253,6 +260,7 @@ impl WriteCollection<'_, '_> {
             id,
             &spec,
             self.max_document_bytes,
+            self.compression_threshold_bytes,
         )
     }
 
@@ -278,6 +286,7 @@ impl WriteCollection<'_, '_> {
                 id,
                 &spec,
                 self.max_document_bytes,
+                self.compression_threshold_bytes,
             ) {
                 Ok(true) => updated += 1,
                 Ok(false) => {}
@@ -307,6 +316,7 @@ impl WriteCollection<'_, '_> {
             id,
             &replacement,
             self.max_document_bytes,
+            self.compression_threshold_bytes,
         )
     }
 
@@ -324,6 +334,7 @@ impl WriteCollection<'_, '_> {
                 &id,
                 doc,
                 self.max_document_bytes,
+                self.compression_threshold_bytes,
             )? {
                 return Ok(false);
             }
