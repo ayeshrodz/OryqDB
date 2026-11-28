@@ -657,3 +657,22 @@ evidence = [
     "python3 tools/bench_vs_sqlite.py --docs 25000",
     "cargo run -p xtask -- architecture --base origin/main",
 ]
+
+
+[[changes]]
+id = "CC-0034"
+modules = ["engine", "core"]
+files = [
+    "docs/file-format.md",
+]
+reason = "Implement Issue #49 (v1.0.0 GA): document RECORD_KIND_COMPRESSED (0x03) in docs/file-format.md, add 300-query differential planner fuzzing oracle, complete Nightly Miri & cargo audit sign-off, update PRE_1_0_READINESS_CHECKLIST.md & CHANGELOG.md, and bump workspace to v1.0.0 GA."
+compatibility = "api_change"
+evidence = [
+    "cargo test --workspace --all-features",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "cargo audit",
+    "cargo +nightly miri test -p oryq-types -p oryq-document",
+    "python3 -m unittest discover -s bindings/python/tests -v",
+    "cargo run -p xtask -- architecture --base origin/main",
+    "python3 tools/validate_design_docs.py",
+]
